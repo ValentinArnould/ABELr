@@ -3,14 +3,14 @@
     Section custom affichée dans Fichier > Gestionnaire des modules externes,
     quand "Lr Automation" est sélectionné dans la liste de gauche.
 
+    Boutons : démarrer/connecter, relancer l'App Python, vérifier l'état.
     Référencé par la clé LrPluginInfoProvider de Info.lua.
-    API : retourne une table avec sectionsForTopOfDialog / sectionsForBottomOfDialog,
-    chacune = fonction(viewFactory, propertyTable) -> liste de sections de vue.
 ]]
 
-local LrView    = import 'LrView'
-local LrDialogs = import 'LrDialogs'
-local LrTasks   = import 'LrTasks'
+local LrView  = import 'LrView'
+local LrColor = import 'LrColor'
+
+local Actions = require 'lib.Actions'
 
 local provider = {}
 
@@ -27,18 +27,24 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
             },
 
             f:row {
-                f:static_text { title = 'Statut application :', font = '<system/bold>' },
-                f:static_text { title = 'non connectée' },
+                f:push_button {
+                    title  = 'Démarrer / connecter',
+                    action = function() Actions.connect() end,
+                },
+                f:push_button {
+                    title  = 'Relancer l\'application',
+                    action = function() Actions.relaunch() end,
+                },
+                f:push_button {
+                    title  = 'Vérifier l\'état',
+                    action = function() Actions.checkStatus() end,
+                },
             },
 
             f:row {
-                f:push_button {
-                    title  = 'Test Hello World',
-                    action = function()
-                        LrTasks.startAsyncTask(function()
-                            LrDialogs.message('Lr Automation', 'Hello World', 'info')
-                        end)
-                    end,
+                f:static_text {
+                    title      = 'Serveur attendu : http://127.0.0.1:5000',
+                    text_color = LrColor(0.5, 0.5, 0.5),
                 },
             },
         },

@@ -1,0 +1,71 @@
+"""Modèles Pydantic — contrats JSON échangés entre l'App et le plugin Lr.
+
+Clés JSON en snake_case. Les noms de paramètres develop SDK Lr restent en PascalCase
+(ex. Exposure, Temperature) à l'intérieur du dict `develop`.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field
+
+
+class JobType(str, Enum):
+    """Types de jobs envoyés au plugin via polling."""
+
+    GET_SELECTED_PHOTOS = "get_selected_photos"
+    APPLY_ADJUSTMENTS = "apply_adjustments"
+
+
+class JobStatus(str, Enum):
+    """Cycle de vie d'un job côté App."""
+
+    PENDING = "pending"      # en attente que le plugin le récupère
+    IN_PROGRESS = "in_progress"  # récupéré par le plugin, résultat attendu
+    DONE = "done"            # résultat reçu
+    FAILED = "failed"        # le plugin a signalé une erreur
+
+
+class Job(BaseModel):
+    """Job poussé dans la queue, récupéré par le plugin via GET /jobs/pending."""
+
+    job_id: str
+    type: JobType
+    # Charge utile spécifique au type (ex. adjustments pour apply_adjustments).
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExifData(BaseModel):
+    iso: Optional[int] = None
+    aperture: Optional[float] = None
+    shutter_speed: Optional[str] = None
+    focal_length: Optional[float] = None
+    camera: Optional[str] = None
+
+
+class PhotoResult(BaseModel):
+    """Données d'une photo retournées par le plugin."""
+
+    photo_id: str
+    path: str
+    exif: ExifData = Field(default_factory=ExifData)
+    # Develop settings courants — clés PascalCase SDK Lr.
+    current_develop: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobResult(BaseModel):
+    """Résultat soumis par le plugin via POST /jobs/{id}/result."""
+
+    job_id: str
+    status: str = "ok"  # "ok" | "error"
+    error: Optional[str] = None
+    photos: list[PhotoResult] = Field(default_factory=list)
+
+
+class PhotoAdjustment(BaseModel):
+    """Ajustements à appliquer à une photo — clés develop en PascalCase SDK."""
+
+    photo_id: str
+    develop: dict[str, Any]

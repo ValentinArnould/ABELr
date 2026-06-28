@@ -182,7 +182,7 @@ local function _parseURI( base )
 	local _, _, e=  string.find( base, "^([^?#]*)" )
 	if e then base = string.sub( base, string.len( e )+1 ) end
 
-	local _, _, f, g =  string.find( base, "^(\?([^#]*))" )
+	local _, _, f, g =  string.find( base, "^(\\?([^#]*))" )
 	if f then base = string.sub( base, string.len( f )+1 ) end
 
 	local _, _, h, i =  string.find( base, "^(#(.*))" )

@@ -18,16 +18,20 @@ return {
     -- Bibliothèque > Modules externes supplémentaires (module Bibliothèque actif)
     LrLibraryMenuItems = {
         {
-            title = 'Hello World',
-            file  = 'ShowMessage.lua',
+            title = 'Démarrer / connecter l\'application',
+            file  = 'MenuConnect.lua',
+        },
+        {
+            title = 'Relancer l\'application',
+            file  = 'MenuRelaunch.lua',
         },
     },
 
     -- Fichier > Modules externes supplémentaires
     LrExportMenuItems = {
         {
-            title = 'Hello World',
-            file  = 'ShowMessage.lua',
+            title = 'Démarrer / connecter l\'application',
+            file  = 'MenuConnect.lua',
         },
     },
 
