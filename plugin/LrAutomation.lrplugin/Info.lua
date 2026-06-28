@@ -1,3 +1,8 @@
+--[[
+    Info.lua — Manifeste du plugin Lr Automation
+    Chargé par Lightroom Classic pour identifier et enregistrer le plugin.
+]]
+
 return {
     LrSdkVersion        = 12.0,
     LrSdkMinimumVersion = 12.0,
@@ -5,18 +10,24 @@ return {
     LrToolkitIdentifier = 'com.lrautomation.plugin',
     LrPluginName        = 'Lr Automation',
 
-    -- Dossier où Lightroom peut stocker les fichiers temporaires du plugin
-    LrPluginInfoUrl = "",
+    LrPluginInfoUrl     = '',
 
-    -- LrInitPlugin = "Init.lua",
+    -- Section custom dans le Gestionnaire de modules externes
+    LrPluginInfoProvider = 'PluginInfoProvider.lua',
 
-    -- LrPluginInfoProvider = "lua/PluginInfoProvider.lua",
-
+    -- Bibliothèque > Modules externes supplémentaires (module Bibliothèque actif)
     LrLibraryMenuItems = {
         {
-            title       = 'Lr Automation',
-            file        = 'Menu.lua',
-            enabledWhen = 'anythingSelected',
+            title = 'Hello World',
+            file  = 'ShowMessage.lua',
+        },
+    },
+
+    -- Fichier > Modules externes supplémentaires
+    LrExportMenuItems = {
+        {
+            title = 'Hello World',
+            file  = 'ShowMessage.lua',
         },
     },
 
