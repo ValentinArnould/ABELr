@@ -34,8 +34,12 @@ end
 -- POST JSON → retourne (decodedTable | nil, status | nil).
 -- À appeler depuis un contexte postAsyncTaskWithContext.
 function HttpClient.postJson(path, tableBody, timeout)
+    return HttpClient.postJsonRaw(path, Json.encode(tableBody), timeout)
+end
+
+-- Variante : payload déjà sérialisé (string JSON).
+function HttpClient.postJsonRaw(path, payload, timeout)
     local url = HttpClient.BASE_URL .. path
-    local payload = Json.encode(tableBody)
     local body, headers = LrHttp.post(url, payload, JSON_HEADER, 'POST', timeout or 10)
     if not headers then
         return nil, nil

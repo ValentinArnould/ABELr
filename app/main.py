@@ -7,10 +7,18 @@ Lancement :
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 
 import uvicorn
+
+
+class _PollFilter(logging.Filter):
+    """Supprime les logs de polling /jobs/pending (204) — trop verbeux."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not ("GET /jobs/pending" in msg and "204" in msg)
 
 HOST = "127.0.0.1"
 PORT = 5000
@@ -18,9 +26,9 @@ PORT = 5000
 
 def _run_server() -> None:
     """Serveur uvicorn — bloquant, donc lancé dans un thread daemon."""
-    # import différé : évite de charger FastAPI avant le fork du thread
     from app.server.api import app
 
+    logging.getLogger("uvicorn.access").addFilter(_PollFilter())
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
 

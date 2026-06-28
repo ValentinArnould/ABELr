@@ -61,17 +61,34 @@ local function pollOnce()
         return true    -- connecté, pas de job
     end
 
+    Utils.logf('Job reçu : type=%s id=%s', tostring(job.type), tostring(job.job_id))
+
     local ok, result = pcall(dispatch, job)
     if not ok then
+        Utils.logf('Erreur dispatch : %s', tostring(result))
         result = {
             job_id = job.job_id,
             status = 'error',
             error  = tostring(result),
             photos = Json.array({}),
         }
+    else
+        Utils.logf('Dispatch OK : %d photo(s)', type(result.photos) == 'table' and #result.photos or -1)
     end
 
-    HttpClient.postJson('/jobs/' .. job.job_id .. '/result', result, 10)
+    local encOk, payload = pcall(Json.encode, result)
+    if not encOk then
+        Utils.logf('Erreur Json.encode : %s', tostring(payload))
+        payload = Json.encode({
+            job_id = job.job_id,
+            status = 'error',
+            error  = 'encode failed: ' .. tostring(payload),
+            photos = Json.array({}),
+        })
+    end
+
+    local _, postStatus = HttpClient.postJsonRaw('/jobs/' .. job.job_id .. '/result', payload, 10)
+    Utils.logf('POST result → HTTP %s', tostring(postStatus))
     return true
 end
 

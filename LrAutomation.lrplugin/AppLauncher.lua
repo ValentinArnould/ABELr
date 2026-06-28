@@ -10,34 +10,21 @@
 
 local LrTasks     = import 'LrTasks'
 local LrPathUtils = import 'LrPathUtils'
-local LrFileUtils = import 'LrFileUtils'
 
 local HttpClient = require 'HttpClient'
 local Utils      = require 'Utils'
 
 local AppLauncher = {}
 
--- Chemin de l'interpréteur Python : venv du projet en priorité, sinon PATH.
-local function pythonExe()
-    local venvPy = LrPathUtils.child(
-        LrPathUtils.child(
-            LrPathUtils.child(Utils.appDir(), '.venv'), 'Scripts'), 'python.exe')
-    if LrFileUtils.exists(venvPy) then
-        return venvPy
-    end
-    return 'python'   -- depuis le PATH système
-end
-
--- Construit la commande de lancement détaché (Windows).
--- `start "titre" /D <cwd> <exe> -m app.main` rend la main immédiatement.
+-- Construit la commande PowerShell de lancement (Windows).
+-- Lance launch_app.ps1 dans une fenêtre PowerShell détachée.
 local function buildLaunchCommand()
-    local root = Utils.projectRoot()
-    local exe  = pythonExe()
-    -- Le premier argument quoté de `start` est interprété comme titre → on le fournit
-    -- explicitement pour lever l'ambiguïté quand <exe> est quoté.
+    -- _PLUGIN.path = .../Lr_automation/LrAutomation.lrplugin → parent = racine projet
+    local projectRoot = LrPathUtils.parent(_PLUGIN.path)
+    local script      = LrPathUtils.child(projectRoot, 'launch_app.ps1')
     return string.format(
-        'cmd /c start "Lr Automation" /D "%s" "%s" -m app.main',
-        root, exe)
+        'cmd /c start "Lr Automation" powershell -ExecutionPolicy Bypass -File "%s"',
+        script)
 end
 
 -- Attend que /health réponde (ou échoue) selon `wantAlive`. Retourne true si atteint.
