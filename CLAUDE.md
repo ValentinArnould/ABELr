@@ -8,7 +8,7 @@
 | [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md) | **Référence principale** — tout code Lua plugin : imports, APIs, paramètres Camera Raw 18, patterns, limitations SDK |
 
 > Avant d'écrire du code Lua ou de chercher un nom de paramètre develop, consulter `lr15_sdk_api_reference.md`.
-> Les noms de paramètres SDK (ex. `ColorGradeShadowHue`, `AINoiseReductionAmount`) sont dans la section 6 de ce fichier.
+> Les méthodes marquées ⚠️ dans ce fichier sont **non vérifiées** — les tester ou les confirmer dans la doc Adobe SDK officielle avant usage.
 
 ---
 
@@ -60,15 +60,16 @@ Lr_automation/
 │   ├── project_overview.md        # Vision globale, décisions architecture
 │   └── lr15_sdk_api_reference.md  # Référence API SDK Lr 15 / Camera Raw 18 (Lua)
 │
-├── plugin/                        # Plugin Lightroom (Lua)
-│   ├── Info.lua                   # Manifeste obligatoire (LrToolkitIdentifier, version…)
-│   ├── Menu.lua                   # Entrées menu Fichier > Modules externes
-│   └── lib/
-│       ├── PollingLoop.lua        # LrTasks : boucle HTTP polling toutes 300ms
-│       ├── HttpClient.lua         # Wrappers LrHttp (GET/POST JSON vers App)
-│       ├── Adjustments.lua        # Application ajustements SDK (withWriteAccessDo)
-│       ├── PhotoData.lua          # Extraction path, EXIF, develop settings via SDK
-│       └── Utils.lua              # Helpers, sérialisation JSON
+├── plugin/
+│   └── LrAutomation.lrplugin/     # Dossier chargé par Lightroom (.lrplugin obligatoire)
+│       ├── Info.lua               # Manifeste obligatoire (LrToolkitIdentifier, version…)
+│       ├── Menu.lua               # Entrée menu Bibliothèque > Modules externes
+│       └── lib/
+│           ├── PollingLoop.lua    # LrTasks : boucle HTTP polling toutes 300ms
+│           ├── HttpClient.lua     # Wrappers LrHttp (GET/POST JSON vers App)
+│           ├── Adjustments.lua    # Application ajustements SDK (withWriteAccessDo)
+│           ├── PhotoData.lua      # Extraction path, EXIF, develop settings via SDK
+│           └── Utils.lua          # Helpers, sérialisation JSON
 │
 └── app/                           # Application Python externe
     ├── main.py                    # Point d'entrée : lance GUI + serveur FastAPI
@@ -274,7 +275,7 @@ Groupes principaux :
 | Ton / Courbe | `ParametricShadows`, `ParametricDarks`, `ParametricLights`, `ParametricHighlights` |
 | Netteté | `Sharpness`, `SharpenRadius`, `SharpenDetail`, `SharpenEdgeMasking`, `Texture` |
 | Bruit | `LuminanceSmoothing`, `ColorNoiseReduction` |
-| Denoise AI | `AINoiseReduction`, `AINoiseReductionAmount` |
+| Denoise AI | ⚠️ noms de paramètres non vérifiés — consulter doc Adobe SDK |
 | Calibration | `CameraProfile`, `RedHue/Sat`, `GreenHue/Sat`, `BlueHue/Sat` |
 
 ---
@@ -298,9 +299,9 @@ Groupes principaux :
 ## Workflow de développement
 
 ### Plugin Lua
-1. Modifier les fichiers dans `plugin/`
-2. Lr : **Fichier > Gestionnaire des modules externes** > Recharger
-3. Tester via **Fichier > Modules externes** > entrée définie dans `Menu.lua`
+1. Modifier les fichiers dans `plugin/LrAutomation.lrplugin/`
+2. Lr : **Fichier > Gestionnaire des modules externes** > sélectionner `plugin/LrAutomation.lrplugin/` > Recharger
+3. Tester via **Bibliothèque > Modules externes** > Lr Automation (module Bibliothèque doit être actif)
 4. Logs : `LrLogger` ou `print()` → **Aide > Console Lua** dans Lr
 
 ### App Python
