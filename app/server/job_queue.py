@@ -35,6 +35,9 @@ class JobQueue:
         self._lock = threading.Lock()
         self._pending: deque[str] = deque()
         self._jobs: dict[str, _JobEntry] = {}
+        # Horodatage du dernier GET /jobs/pending du plugin = battement de cœur
+        # du pont. Tant que le pont écoute, il poll toutes les 300ms.
+        self._last_poll_at: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Côté producteur (GUI)
@@ -66,6 +69,23 @@ class JobQueue:
     # ------------------------------------------------------------------ #
     # Côté plugin (via endpoints FastAPI)
     # ------------------------------------------------------------------ #
+    def mark_poll(self) -> None:
+        """Le plugin vient de poller : rafraîchit le battement de cœur du pont."""
+        with self._lock:
+            self._last_poll_at = time.time()
+
+    def seconds_since_poll(self) -> Optional[float]:
+        """Secondes depuis le dernier poll plugin. None si jamais vu."""
+        with self._lock:
+            if self._last_poll_at is None:
+                return None
+            return time.time() - self._last_poll_at
+
+    def bridge_connected(self, threshold: float = 5.0) -> bool:
+        """True si le plugin a pollé dans les `threshold` dernières secondes."""
+        since = self.seconds_since_poll()
+        return since is not None and since <= threshold
+
     def next_pending(self) -> Optional[Job]:
         """Retourne le prochain job en attente et le passe IN_PROGRESS. None si vide."""
         with self._lock:

@@ -11,6 +11,7 @@ local LrView  = import 'LrView'
 local LrColor = import 'LrColor'
 
 local Actions = require 'Actions'
+local Utils = require 'Utils'
 
 local provider = {}
 
@@ -38,6 +39,10 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
                 f:push_button {
                     title  = 'Vérifier l\'état',
                     action = function() Actions.checkStatus() end,
+                },
+                f:push_button {
+                    title  = 'test',
+                    action = function() Utils.test() end,
                 },
             },
 

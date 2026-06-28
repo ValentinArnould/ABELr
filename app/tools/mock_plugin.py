@@ -47,6 +47,9 @@ FAKE_PHOTOS = [
 def handle(job: dict) -> dict:
     job_id = job["job_id"]
     job_type = job["type"]
+    if job_type == "test":
+        print("  [mock] test: popup Hello World (simulée)")
+        return {"job_id": job_id, "status": "ok", "photos": []}
     if job_type == "get_selected_photos":
         return {"job_id": job_id, "status": "ok", "photos": FAKE_PHOTOS}
     if job_type == "apply_adjustments":

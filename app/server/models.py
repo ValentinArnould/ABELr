@@ -17,6 +17,7 @@ class JobType(str, Enum):
 
     GET_SELECTED_PHOTOS = "get_selected_photos"
     APPLY_ADJUSTMENTS = "apply_adjustments"
+    TEST = "test"  # ping plugin : déclenche une popup Hello World côté Lr
 
 
 class JobStatus(str, Enum):

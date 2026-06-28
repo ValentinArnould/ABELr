@@ -31,12 +31,28 @@ def status_() -> dict:
     return {
         "status": "ready",
         "pending_jobs": job_queue.pending_count(),
+        "bridge_connected": job_queue.bridge_connected(),
+        "last_poll_s_ago": job_queue.seconds_since_poll(),
+    }
+
+
+@app.get("/bridge")
+def bridge() -> dict:
+    """État du pont plugin : a-t-il pollé récemment ?
+
+    Le plugin Lr poll /jobs/pending toutes les 300ms tant que sa boucle d'écoute
+    tourne. Ce battement de cœur permet de savoir si le pont est encore actif.
+    """
+    return {
+        "connected": job_queue.bridge_connected(),
+        "last_poll_s_ago": job_queue.seconds_since_poll(),
     }
 
 
 @app.get("/jobs/pending")
 def jobs_pending(response: Response) -> dict:
     """Le plugin récupère le prochain job. 204 si aucun job en attente."""
+    job_queue.mark_poll()  # battement de cœur du pont
     job = job_queue.next_pending()
     if job is None:
         response.status_code = status.HTTP_204_NO_CONTENT

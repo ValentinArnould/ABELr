@@ -25,6 +25,10 @@ return {
             title = 'Relancer l\'application',
             file  = 'MenuRelaunch.lua',
         },
+        {
+            title = 'test',
+            file  = 'ShowMessage.lua',
+        }
     },
 
     -- Fichier > Modules externes supplémentaires
@@ -33,6 +37,14 @@ return {
             title = 'Démarrer / connecter l\'application',
             file  = 'MenuConnect.lua',
         },
+        {
+            title = 'Relancer l\'application',
+            file  = 'MenuRelaunch.lua',
+        },
+        {
+            title = 'test',
+            file  = 'ShowMessage.lua',
+        }
     },
 
     -- Aide > Modules externes supplémentaires
@@ -45,6 +57,10 @@ return {
             title = 'Relancer l\'application',
             file  = 'MenuRelaunch.lua',
         },
+        {
+            title = 'test',
+            file  = 'ShowMessage.lua',
+        }
     },
 
     VERSION              = { major = 0, minor = 1, revision = 0, build = 1 },

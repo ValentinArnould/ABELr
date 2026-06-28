@@ -3,12 +3,8 @@
     Déclenché depuis Bibliothèque > Modules externes > Hello World.
 ]]
 
-local LrDialogs = import 'LrDialogs'
-local LrTasks   = import 'LrTasks'
-
-local function showMessage()
-    LrDialogs.message('Lr Automation', 'Hello World', 'info')
-end
+local Utils = require 'Utils'
+Utils.test()
 
 -- Tout appel SDK pouvant bloquer doit tourner dans une tâche asynchrone.
-LrTasks.startAsyncTask(showMessage)
+-- LrTasks.startAsyncTask(showMessage)

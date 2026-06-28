@@ -20,13 +20,35 @@ local Utils      = require 'Utils'
 local PollingLoop = {}
 
 local POLL_INTERVAL = 0.3
+-- Sans tour de boucle depuis ce délai, le pont est considéré mort (contexte tué
+-- sans cleanup, erreur fatale…) et peut être relancé.
+local HEARTBEAT_TIMEOUT = 5
+
+-- Vrai uniquement si une boucle a effectivement tourné récemment.
+-- Ne pas se fier au seul flag : il peut rester bloqué à true si le contexte de
+-- la tâche est détruit sans déclencher le cleanup handler.
+local function bridgeAlive()
+    if not _G.LR_AUTOMATION_BRIDGE_RUNNING then
+        return false
+    end
+    local hb = _G.LR_AUTOMATION_BRIDGE_HEARTBEAT or 0
+    return (os.time() - hb) < HEARTBEAT_TIMEOUT
+end
 
 -- Exécute un job, retourne la table résultat à renvoyer à l'App.
 local function dispatch(job)
     local jobId = job.job_id
     local jobType = job.type
 
-    if jobType == 'get_selected_photos' then
+    if jobType == 'test' then
+        -- Popup de test : affichée hors boucle pour ne pas bloquer le polling.
+        LrTasks.startAsyncTask(function() Utils.test() end)
+        return {
+            job_id = jobId,
+            status = 'ok',
+            photos = Json.array({}),
+        }
+    elseif jobType == 'get_selected_photos' then
         return {
             job_id = jobId,
             status = 'ok',
@@ -92,12 +114,16 @@ local function pollOnce()
     return true
 end
 
--- Démarre le pont. Idempotent : ne lance qu'une boucle par session.
+-- Démarre le pont. Idempotent : relance seulement si aucune boucle vivante.
+-- Si le flag est resté true mais le heartbeat est périmé (boucle morte), on
+-- repart proprement au lieu de refuser de démarrer.
 function PollingLoop.start()
-    if _G.LR_AUTOMATION_BRIDGE_RUNNING then
-        return false
+    if bridgeAlive() then
+        return false   -- déjà une boucle qui tourne
     end
+
     _G.LR_AUTOMATION_BRIDGE_RUNNING = true
+    _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()
 
     LrFunctionContext.postAsyncTaskWithContext('LrAutomationBridge', function(context)
         context:addCleanupHandler(function()
@@ -107,6 +133,7 @@ function PollingLoop.start()
         Utils.logf('Pont démarré → %s', HttpClient.BASE_URL)
 
         while _G.LR_AUTOMATION_BRIDGE_RUNNING do
+            _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()   -- battement de cœur
             local ok, err = pcall(pollOnce)
             if not ok then
                 Utils.logf('Erreur boucle : %s', tostring(err))
@@ -122,7 +149,7 @@ function PollingLoop.stop()
 end
 
 function PollingLoop.isRunning()
-    return _G.LR_AUTOMATION_BRIDGE_RUNNING == true
+    return bridgeAlive()
 end
 
 return PollingLoop

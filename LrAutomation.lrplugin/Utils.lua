@@ -4,6 +4,7 @@
 
 local LrPathUtils = import 'LrPathUtils'
 local LrLogger    = import 'LrLogger'
+local LrDialogs   = import 'LrDialogs'
 
 local Utils = {}
 
@@ -27,6 +28,10 @@ end
 -- Dossier de l'app Python (.../Lr_automation/app).
 function Utils.appDir()
     return LrPathUtils.child(Utils.projectRoot(), 'app')
+end
+
+function Utils.test()
+    LrDialogs.message('Lr Automation', 'Hello World', 'info')
 end
 
 return Utils
