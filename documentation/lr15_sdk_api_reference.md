@@ -1144,7 +1144,7 @@ local json = require 'dkjson'                 -- lib embarquée à la racine du 
 local t = json.decode(body)
 local s = json.encode(t)
 
-local PhotoData = require 'lib.PhotoData'     -- vos modules locaux
+local PhotoData = require 'PhotoData'     -- vos modules locaux
 ```
 
 ---

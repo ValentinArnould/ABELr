@@ -1,19 +1,20 @@
 # Serveur HTTP / orchestration
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
+virtualenv
+fastapi
+uvicorn[standard]
+pydantic
 
 # GUI
-PySide6==6.8.1
+PySide6
 
 # Image / RAW
-rawpy==0.24.0
-numpy==2.2.1
-opencv-python==4.10.0.84
+rawpy
+numpy
+opencv-python
 
 # Analyse
-scipy==1.15.0
-scikit-learn==1.6.0
+scipy
+scikit-learn
 
 # HTTP client (tests / mock plugin)
-requests==2.32.3
+requests
