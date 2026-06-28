@@ -12,6 +12,8 @@
     Valeur null : utiliser Json.null (sentinelle) pour produire `null`.
 ]]
 
+local LrTasks = import 'LrTasks'
+
 local Json = {}
 
 -- Sentinelle null (distincte de nil pour ne pas disparaître des tables).
@@ -229,7 +231,7 @@ function Json.decode(str)
     if type(str) ~= 'string' or str == '' then
         return nil, 'Json.decode: entrée vide'
     end
-    local ok, value = pcall(function()
+    local ok, value = LrTasks.pcall(function()
         local v = decodeValue(str, 1)
         return v
     end)

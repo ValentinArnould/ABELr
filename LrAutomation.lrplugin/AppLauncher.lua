@@ -62,7 +62,7 @@ function AppLauncher.stop()
     end
     HttpClient.get('/health', 1)  -- réveille la socket si besoin
     -- /shutdown est un POST ; on le fait via postJson (corps vide).
-    pcall(function() HttpClient.postJson('/shutdown', {}, 3) end)
+    LrTasks.pcall(function() HttpClient.postJson('/shutdown', {}, 3) end)
     return waitForHealth(false, 6)
 end
 

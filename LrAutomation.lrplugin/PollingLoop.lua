@@ -85,7 +85,7 @@ local function pollOnce()
 
     Utils.logf('Job reçu : type=%s id=%s', tostring(job.type), tostring(job.job_id))
 
-    local ok, result = pcall(dispatch, job)
+    local ok, result = LrTasks.pcall(dispatch, job)
     if not ok then
         Utils.logf('Erreur dispatch : %s', tostring(result))
         result = {
@@ -98,7 +98,7 @@ local function pollOnce()
         Utils.logf('Dispatch OK : %d photo(s)', type(result.photos) == 'table' and #result.photos or -1)
     end
 
-    local encOk, payload = pcall(Json.encode, result)
+    local encOk, payload = LrTasks.pcall(Json.encode, result)
     if not encOk then
         Utils.logf('Erreur Json.encode : %s', tostring(payload))
         payload = Json.encode({
@@ -134,7 +134,7 @@ function PollingLoop.start()
 
         while _G.LR_AUTOMATION_BRIDGE_RUNNING do
             _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()   -- battement de cœur
-            local ok, err = pcall(pollOnce)
+            local ok, err = LrTasks.pcall(pollOnce)
             if not ok then
                 Utils.logf('Erreur boucle : %s', tostring(err))
             end
