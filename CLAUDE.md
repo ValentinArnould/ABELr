@@ -56,38 +56,47 @@ Fonctionnalités cibles :
 Lr_automation/
 │
 ├── CLAUDE.md
+├── launch_app.ps1                 # Lancé par le plugin pour démarrer l'App Python
+├── createVenv.ps1                 # Crée le venv Python (setup initial)
 ├── documentation/
 │   ├── project_overview.md        # Vision globale, décisions architecture
-│   └── lr15_sdk_api_reference.md  # Référence API SDK Lr 15 / Camera Raw 18 (Lua)
+│   ├── lr15_sdk_api_reference.md  # Référence API SDK Lr 15 / Camera Raw 18 (Lua)
+│   └── Lr_SDK_API/                # SDK Adobe officiel (HTML + PDF + samples)
 │
-├── plugin/
-│   └── LrAutomation.lrplugin/     # Dossier chargé par Lightroom (.lrplugin obligatoire)
-│       ├── Info.lua               # Manifeste obligatoire (LrToolkitIdentifier, version…)
-│       ├── Menu.lua               # Entrée menu Bibliothèque > Modules externes
-│       └── lib/
-│           ├── PollingLoop.lua    # LrTasks : boucle HTTP polling toutes 300ms
-│           ├── HttpClient.lua     # Wrappers LrHttp (GET/POST JSON vers App)
-│           ├── Adjustments.lua    # Application ajustements SDK (withWriteAccessDo)
-│           ├── PhotoData.lua      # Extraction path, EXIF, develop settings via SDK
-│           └── Utils.lua          # Helpers, sérialisation JSON
+├── LrAutomation.lrplugin/         # Dossier chargé par Lightroom (à la racine du projet)
+│   ├── Info.lua                   # Manifeste (LrToolkitIdentifier, menus, version)
+│   ├── MenuConnect.lua            # Menu "Démarrer / connecter l'application"
+│   ├── MenuRelaunch.lua           # Menu "Relancer l'application"
+│   ├── ShowMessage.lua            # Menu "test" (debug)
+│   ├── PluginInfoProvider.lua     # Section custom Gestionnaire de modules externes
+│   ├── Actions.lua                # Actions haut niveau (connect, relaunch, checkStatus)
+│   ├── AppLauncher.lua            # Démarre / arrête / relance le process Python
+│   ├── PollingLoop.lua            # Boucle polling 300ms, dispatch jobs, heartbeat
+│   ├── HttpClient.lua             # Wrappers LrHttp (GET/POST JSON vers App)
+│   ├── Adjustments.lua            # Application ajustements SDK (withWriteAccessDo)
+│   ├── PhotoData.lua              # Extraction path, EXIF, develop settings via SDK
+│   ├── Json.lua                   # Encodeur/décodeur JSON pour Lua (lib embarquée)
+│   └── Utils.lua                  # Helpers (log, logf, test popup)
 │
 └── app/                           # Application Python externe
     ├── main.py                    # Point d'entrée : lance GUI + serveur FastAPI
+    ├── requirements.txt
     ├── server/
-    │   ├── api.py                 # Routes FastAPI : /jobs, /apply, /status
-    │   └── job_queue.py           # Queue des jobs en attente pour le plugin
+    │   ├── api.py                 # Routes FastAPI (voir endpoints ci-dessous)
+    │   ├── job_queue.py           # Queue thread-safe, heartbeat bridge, résultats
+    │   └── models.py              # Modèles Pydantic : Job, JobResult, PhotoResult…
     ├── gui/
     │   ├── main_window.py         # Fenêtre principale PySide6
     │   ├── photo_panel.py         # Affichage sélection / aperçu
-    │   └── analysis_panel.py      # Visualisation analyse, histogrammes, carte prédiction
+    │   ├── analysis_panel.py      # Visualisation analyse, histogrammes, carte prédiction
+    │   └── job_worker.py          # Worker Qt pour lancer des jobs sans bloquer le GUI
     ├── core/
     │   ├── raw.py                 # Décodage ARW Sony via rawpy (LibRaw)
     │   ├── analysis.py            # Analyse exposition, WB, couleurs (numpy + OpenCV)
     │   ├── prediction.py          # Modèle prédiction sur série 500-1000 photos
     │   └── adjustments.py         # Calcul et formatage corrections finales
-    ├── rust_ext/                  # (optionnel, plus tard) Module PyO3 si bottleneck
-    │   └── src/lib.rs
-    └── requirements.txt
+    └── tools/
+        └── mock_plugin.py         # Mock du plugin : simule polling + résultats (tests)
 ```
 
 ---
@@ -137,10 +146,12 @@ App envoie ajustements :
 
 | Endpoint | Méthode | Description |
 |---|---|---|
-| `/jobs/pending` | GET | Plugin récupère prochain job à exécuter |
+| `/health` | GET | Healthcheck — plugin vérifie si App est démarrée |
+| `/status` | GET | État App : pending jobs, bridge connecté, dernier poll |
+| `/bridge` | GET | État du pont plugin (battement de cœur, dernière activité) |
+| `/jobs/pending` | GET | Plugin récupère prochain job (204 si vide) — marque heartbeat |
 | `/jobs/{id}/result` | POST | Plugin soumet le résultat d'un job |
-| `/status` | GET | État de l'App (prête, en cours d'analyse…) |
-| `/health` | GET | Healthcheck (plugin vérifie si App est démarrée) |
+| `/shutdown` | POST | Arrêt propre du process Python (utilisé par plugin pour relancer) |
 
 ---
 
@@ -193,8 +204,10 @@ end)
 - **Chemins Windows** : utiliser `LrPathUtils` — ne jamais concaténer `/` manuellement
 - **LrDevelopController** : opère sur la photo active dans module Développement uniquement
   → Pour batch, utiliser `photo:applyDevelopSettings()` directement (pas besoin module Développement)
-- **JSON** : pas de lib JSON native Lua — utiliser une lib embarquée (ex. `dkjson.lua`)
+- **JSON** : pas de lib JSON native Lua — lib embarquée `Json.lua` (à la racine du plugin)
 - **Pas de `require` standard** : importer les modules SDK avec `import 'LrXxx'`
+- **`LrFunctionContext.postAsyncTaskWithContext`** : requis pour tout appel `LrHttp` (GET/POST) — `LrTasks.startAsyncTask` seul ne suffit pas pour le HTTP
+- **Heartbeat bridge** : `_G.LR_AUTOMATION_BRIDGE_HEARTBEAT` mis à jour à chaque tour de boucle — utilisé pour détecter une boucle morte sans cleanup propre
 
 ---
 
@@ -212,18 +225,20 @@ end)
 {
   "job_id": "uuid-v4",
   "type": "apply_adjustments",
-  "adjustments": [
-    {
-      "photo_id": "lr-internal-uuid",
-      "develop": {
-        "Exposure": 0.35,
-        "Temperature": 5650,
-        "Tint": -5,
-        "Highlights": -20,
-        "Shadows": 15
+  "payload": {
+    "adjustments": [
+      {
+        "photo_id": "lr-internal-uuid",
+        "develop": {
+          "Exposure": 0.35,
+          "Temperature": 5650,
+          "Tint": -5,
+          "Highlights": -20,
+          "Shadows": 15
+        }
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 
@@ -299,42 +314,55 @@ Groupes principaux :
 ## Workflow de développement
 
 ### Plugin Lua
-1. Modifier les fichiers dans `plugin/LrAutomation.lrplugin/`
-2. Lr : **Fichier > Gestionnaire des modules externes** > sélectionner `plugin/LrAutomation.lrplugin/` > Recharger
-3. Tester via **Bibliothèque > Modules externes** > Lr Automation (module Bibliothèque doit être actif)
-4. Logs : `LrLogger` ou `print()` → **Aide > Console Lua** dans Lr
+1. Modifier les fichiers dans `LrAutomation.lrplugin/` (racine du projet)
+2. Lr : **Fichier > Gestionnaire des modules externes** > sélectionner `LrAutomation.lrplugin/` > Recharger
+3. Tester via **Bibliothèque > Modules externes** > entrées "Démarrer / connecter" ou "Relancer"
+4. Logs : `Utils.logf(...)` → **Aide > Console Lua** dans Lr
 
 ### App Python
-1. `cd app && uvicorn main:app --reload --port 5000`
-2. GUI PySide6 se lance au démarrage de `main.py`
-3. Tester les endpoints API indépendamment : `curl http://localhost:5000/health`
-4. Mock du plugin : POST manuellement sur `/jobs/{id}/result` pour simuler réponses
+1. Lancer via `launch_app.ps1` (utilisé aussi par le plugin) ou `python -m app.main` depuis la racine
+2. GUI PySide6 se lance au démarrage ; serveur FastAPI tourne dans un thread daemon
+3. Tester les endpoints : `curl http://localhost:5000/health`
+4. Mock du plugin : `python -m app.tools.mock_plugin` pour simuler polling + résultats
 
 ### Test end-to-end
-1. Lancer `python app/main.py`
-2. Recharger plugin dans Lr
-3. Sélectionner photos dans Lr
-4. Déclencher action depuis GUI App
+1. Lancer l'App (via menu Lr "Démarrer / connecter" ou `launch_app.ps1` directement)
+2. Vérifier `GET /bridge` → `connected: true` (pont actif)
+3. Sélectionner photos dans Lr, déclencher action depuis GUI App
+4. Vérifier résultat via `GET /status` (pending_jobs = 0 si traité)
 
 ---
 
-## À faire (backlog initial)
+## Backlog
 
 ### Plugin Lua
-- [ ] Créer `plugin/Info.lua` (manifeste : LrToolkitIdentifier, LrSdkVersion, LrSdkMinimumVersion)
-- [ ] Créer `plugin/Menu.lua` (entrée menu + démarrage boucle polling)
-- [ ] Implémenter `lib/HttpClient.lua` (GET/POST via LrHttp + sérialisation JSON)
-- [ ] Implémenter `lib/PollingLoop.lua` (LrTasks, 300ms, dispatch jobs)
-- [ ] Implémenter `lib/PhotoData.lua` (path, EXIF, develop settings)
-- [ ] Implémenter `lib/Adjustments.lua` (withWriteAccessDo, applyDevelopSettings batch)
-- [ ] Embarquer `dkjson.lua` (parser JSON pour Lua)
+- [x] `Info.lua` — manifeste complet avec menus Bibliothèque / Fichier / Aide
+- [x] `MenuConnect.lua` / `MenuRelaunch.lua` — entrées menu
+- [x] `HttpClient.lua` — GET/POST JSON via LrHttp
+- [x] `PollingLoop.lua` — boucle 300ms, dispatch jobs, heartbeat, garde anti-doublon
+- [x] `Actions.lua` — connect, relaunch, checkStatus
+- [x] `AppLauncher.lua` — start / stop / relaunch process Python via `launch_app.ps1`
+- [x] `PhotoData.lua` — path, EXIF, develop settings
+- [x] `Adjustments.lua` — withWriteAccessDo, applyDevelopSettings batch
+- [x] `Json.lua` — parser/encodeur JSON embarqué
+- [x] `Utils.lua` — logf, test popup
+- [x] `PluginInfoProvider.lua` — section custom Gestionnaire modules externes
 
 ### App Python
-- [ ] Setup projet : `requirements.txt`, venv, structure dossiers
-- [ ] Créer `server/api.py` : endpoints `/health`, `/jobs/pending`, `/jobs/{id}/result`
-- [ ] Créer `server/job_queue.py` : queue thread-safe (asyncio.Queue)
-- [ ] Créer `main.py` : démarrage FastAPI (thread) + GUI PySide6 (main thread)
-- [ ] Créer `core/raw.py` : décodage ARW Sony via rawpy
-- [ ] Créer `core/analysis.py` : analyse exposition et WB (histogrammes, numpy)
-- [ ] Créer `gui/main_window.py` : fenêtre principale PySide6 minimale
-- [ ] Prototype end-to-end : plugin → App → décode RAW → retourne résultat
+- [x] Setup : `requirements.txt`, venv, structure dossiers
+- [x] `server/api.py` — tous les endpoints (health, bridge, status, jobs, shutdown)
+- [x] `server/job_queue.py` — queue thread-safe, heartbeat, résultats
+- [x] `server/models.py` — modèles Pydantic (Job, JobResult, PhotoResult, PhotoAdjustment)
+- [x] `main.py` — FastAPI (thread daemon) + GUI PySide6 (main thread)
+- [x] `core/raw.py` — décodage ARW Sony via rawpy
+- [x] `core/analysis.py` — analyse exposition et WB
+- [x] `gui/main_window.py` — fenêtre principale PySide6
+- [x] `gui/job_worker.py` — worker Qt pour jobs async sans bloquer le GUI
+- [x] `tools/mock_plugin.py` — mock du plugin pour tests sans Lightroom
+- [x] `launch_app.ps1` — script de lancement (venv auto-détecté)
+
+### À faire
+- [ ] `core/adjustments.py` — calcul des ajustements optimaux (algo exposition, WB)
+- [ ] `core/prediction.py` — modèle prédiction sur série 500-1000 photos
+- [ ] GUI : boutons "Analyser" et "Appliquer" câblés sur les vrais jobs
+- [ ] Prototype end-to-end complet : sélection Lr → décodage RAW → calcul → apply

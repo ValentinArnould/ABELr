@@ -38,13 +38,15 @@ end
 
 -- Retourne un tableau JSON (Json.array) de photos pour les photos sélectionnées.
 function PhotoData.getSelectedPhotos()
-    local catalog = LrApplication.activeCatalog()
-    local photos  = catalog:getTargetPhotos()
-    local result  = Json.array({})
+    local catalog     = LrApplication.activeCatalog()
+    local catalogPath = catalog:getPath()  -- chemin du .lrcat → localise les .lrdata
+    local photos      = catalog:getTargetPhotos()
+    local result      = Json.array({})
     for _, photo in ipairs(photos) do
         result[#result + 1] = {
             photo_id        = photo:getRawMetadata('uuid'),
             path            = photo:getRawMetadata('path'),
+            catalog_path    = catalogPath,
             exif            = extractExif(photo),
             current_develop = extractDevelop(photo),
         }

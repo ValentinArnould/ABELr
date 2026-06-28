@@ -11,6 +11,10 @@ PySide6
 rawpy
 numpy
 opencv-python
+# Smart Previews Lr = DNG JPEG XL (compression 52546) — rawpy/LibRaw ne sait pas
+# les lire ; tifffile + imagecodecs (libjxl) décodent les tuiles JXL 16-bit.
+tifffile
+imagecodecs
 
 # Analyse
 scipy

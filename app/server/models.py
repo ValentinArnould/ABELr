@@ -51,6 +51,9 @@ class PhotoResult(BaseModel):
 
     photo_id: str
     path: str
+    # Chemin du .lrcat actif — permet à l'App de localiser les bundles
+    # Previews.lrdata / Smart Previews.lrdata associés à cette photo.
+    catalog_path: Optional[str] = None
     exif: ExifData = Field(default_factory=ExifData)
     # Develop settings courants — clés PascalCase SDK Lr.
     current_develop: dict[str, Any] = Field(default_factory=dict)

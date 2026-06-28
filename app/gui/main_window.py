@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..server.job_queue import job_queue
 from ..server.models import JobResult, JobType
+from .analysis_worker import AnalysisWorker, PhotoAnalysis
 from .job_worker import JobWorker
 
 
@@ -29,6 +30,7 @@ class MainWindow(QMainWindow):
 
         self._worker: JobWorker | None = None
         self._check_worker: JobWorker | None = None
+        self._analysis_worker: AnalysisWorker | None = None
 
         self.bridge_label = QLabel()
         self.status_label = QLabel("Prêt. Sélectionnez des photos dans Lightroom.")
@@ -111,14 +113,49 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Check plugin échoué : {message}")
 
     def _on_result(self, result: JobResult) -> None:
-        self.analyze_btn.setEnabled(True)
         if not result.photos:
+            self.analyze_btn.setEnabled(True)
             self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
             return
-        self.status_label.setText(f"{len(result.photos)} photo(s) reçue(s).")
-        for photo in result.photos:
-            self.photo_list.addItem(photo.path)
+
+        # Photos reçues du plugin → on enchaîne sur l'analyse pixel (Smart Preview
+        # si dispo, sinon RAW) dans un worker dédié pour ne pas geler le GUI.
+        catalog_path = result.photos[0].catalog_path
+        self.status_label.setText(
+            f"{len(result.photos)} photo(s) reçue(s) — analyse en cours…"
+        )
+        self._analysis_worker = AnalysisWorker(result.photos, catalog_path)
+        self._analysis_worker.photo_done.connect(self._on_photo_analyzed)
+        self._analysis_worker.progress.connect(self._on_analysis_progress)
+        self._analysis_worker.finished_all.connect(self._on_analysis_done)
+        self._analysis_worker.failed.connect(self._on_failed)
+        self._analysis_worker.start()
 
     def _on_failed(self, message: str) -> None:
         self.analyze_btn.setEnabled(True)
         self.status_label.setText(f"Erreur : {message}")
+
+    # ------------------------------------------------------------------ #
+    # Analyse pixel (Smart Preview / RAW)
+    # ------------------------------------------------------------------ #
+    def _on_analysis_progress(self, index: int, total: int) -> None:
+        self.status_label.setText(f"Analyse {index}/{total}…")
+
+    def _on_photo_analyzed(self, pa: PhotoAnalysis) -> None:
+        import os
+
+        name = os.path.basename(pa.path) or pa.photo_id
+        if pa.error:
+            self.photo_list.addItem(f"⚠ {name} — erreur : {pa.error}")
+            return
+        tag = "SP" if pa.source == "smart_preview" else "RAW"
+        self.photo_list.addItem(
+            f"[{tag}] {name} — luma {pa.mean_luma:.0f} "
+            f"(hl {pa.clipped_highlights*100:.1f}% / sh {pa.clipped_shadows*100:.1f}%) "
+            f"WB r/g {pa.wb_gain_rg:.2f} b/g {pa.wb_gain_bg:.2f}"
+        )
+
+    def _on_analysis_done(self) -> None:
+        self.analyze_btn.setEnabled(True)
+        n = self.photo_list.count()
+        self.status_label.setText(f"Analyse terminée — {n} photo(s).")
