@@ -1,5 +1,17 @@
 # Lr_automation — Plugin Lightroom Classic
 
+## Documentation
+
+| Fichier | Quand le consulter |
+|---|---|
+| [`documentation/project_overview.md`](documentation/project_overview.md) | Vision globale, architecture, décisions techniques, flux d'utilisation |
+| [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md) | **Référence principale** — tout code Lua plugin : imports, APIs, paramètres Camera Raw 18, patterns, limitations SDK |
+
+> Avant d'écrire du code Lua ou de chercher un nom de paramètre develop, consulter `lr15_sdk_api_reference.md`.
+> Les noms de paramètres SDK (ex. `ColorGradeShadowHue`, `AINoiseReductionAmount`) sont dans la section 6 de ce fichier.
+
+---
+
 ## Objectif
 
 Plugin Lightroom Classic (Lua + SDK Lr) couplé à une application Python externe pour retouche intelligente et analyse batch.
@@ -44,6 +56,9 @@ Fonctionnalités cibles :
 Lr_automation/
 │
 ├── CLAUDE.md
+├── documentation/
+│   ├── project_overview.md        # Vision globale, décisions architecture
+│   └── lr15_sdk_api_reference.md  # Référence API SDK Lr 15 / Camera Raw 18 (Lua)
 │
 ├── plugin/                        # Plugin Lightroom (Lua)
 │   ├── Info.lua                   # Manifeste obligatoire (LrToolkitIdentifier, version…)
@@ -130,68 +145,41 @@ App envoie ajustements :
 
 ## SDK Lightroom — APIs clés
 
-### Accès aux photos sélectionnées
+> Référence complète dans [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md).
+> Couvre : tous les imports, LrApplication, LrCatalog, LrPhoto, LrDevelopController,
+> LrTasks, LrHttp, LrSocket, LrDialogs, LrProgressScope, LrFileUtils, LrLogger, LrShell,
+> patterns complets (polling, batch, dispatch jobs), limitations SDK.
+
+Rappel des APIs les plus utilisées dans ce projet :
+
 ```lua
-local LrApplication = import 'LrApplication'
+-- Sélection active
 local catalog = LrApplication.activeCatalog()
-local photos = catalog:getTargetPhotos()  -- sélection active
-```
+local photos  = catalog:getTargetPhotos()
 
-### Lecture métadonnées / EXIF
-```lua
-local path      = photo:getRawMetadata('path')
-local isoSpeed  = photo:getRawMetadata('isoSpeedRating')
-local aperture  = photo:getRawMetadata('aperture')
-local shutter   = photo:getRawMetadata('shutterSpeed')
-local focal     = photo:getRawMetadata('focalLength')
-```
-
-### Lecture develop settings actuels
-```lua
+-- Lire données photo
+local path    = photo:getRawMetadata('path')
+local uuid    = photo:getRawMetadata('uuid')
 local develop = photo:getDevelopSettings()
--- develop.Exposure, develop.Temperature, develop.Tint, etc.
-```
 
-### Application d'ajustements (transaction obligatoire)
-```lua
+-- Écrire ajustements (transaction obligatoire)
 catalog:withWriteAccessDo('Apply adjustments', function()
-    for _, photo in ipairs(photos) do
-        photo:applyDevelopSettings({
-            Exposure    = 0.35,
-            Temperature = 5600,
-            Tint        = -5,
-        })
-    end
+    photo:applyDevelopSettings({ Exposure = 0.35, Temperature = 5600 })
 end)
-```
 
-### Boucle de polling asynchrone
-```lua
-local LrTasks = import 'LrTasks'
-local LrHttp  = import 'LrHttp'
-
-LrTasks.startAsyncTask(function()
-    while true do
-        local result, hdrs = LrHttp.get('http://localhost:5000/jobs/pending', {})
-        if result and result ~= '{}' then
-            -- parser JSON, exécuter job, POST résultat
-        end
-        LrTasks.sleep(0.3)  -- 300ms
-    end
-end)
-```
-
-### HTTP client (LrHttp)
-```lua
-local LrHttp = import 'LrHttp'
-
--- GET
-local body, headers = LrHttp.get(url, {})
-
--- POST JSON
+-- HTTP client (GET/POST vers App Python)
+local body, headers = LrHttp.get('http://localhost:5000/jobs/pending', {})
 local body, headers = LrHttp.post(url, jsonPayload, {
     { field = 'Content-Type', value = 'application/json' }
 })
+
+-- Async (tout I/O bloquant ici)
+LrTasks.startAsyncTask(function()
+    while true do
+        -- polling loop
+        LrTasks.sleep(0.3)
+    end
+end)
 ```
 
 ---
@@ -270,17 +258,24 @@ local body, headers = LrHttp.post(url, jsonPayload, {
 
 ## Paramètres de développement Lr (noms SDK)
 
+> Liste complète avec plages de valeurs dans [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md) — section 6.
+> Couvre : exposition, WB, HSL, Color Grading, Point Color, Tone Curve, Denoise AI,
+> Lens Corrections, calibration caméra, recadrage, effets, ProcessVersion.
+
+Groupes principaux :
+
 | Groupe | Paramètres SDK |
 |---|---|
-| Exposition | `Exposure`, `Contrast`, `Highlights`, `Shadows`, `Whites`, `Blacks` |
-| Couleur | `Temperature`, `Tint`, `Vibrance`, `Saturation` |
-| HSL Teinte | `HueAdjustmentRed/Orange/Yellow/Green/Aqua/Blue/Purple/Magenta` |
-| HSL Saturation | `SaturationAdjustmentRed/…` |
-| HSL Luminance | `LuminanceAdjustmentRed/…` |
-| Color Grading | `ColorGradingHighlightHue/Sat/Lum`, `ColorGradingMidtoneHue/Sat/Lum`, `ColorGradingShadowHue/Sat/Lum` |
-| Ton / Courbe | `ParametricDarks`, `ParametricLights`, `ParametricHighlights`, `ParametricShadows` |
-| Netteté | `Sharpness`, `SharpenRadius`, `SharpenDetail`, `SharpenEdgeMasking` |
-| Bruit | `LuminanceSmoothing`, `LuminanceNoiseReductionDetail`, `ColorNoiseReduction` |
+| Exposition | `Exposure`, `Contrast`, `Highlights`, `Shadows`, `Whites`, `Blacks`, `Clarity`, `Dehaze` |
+| Balance des blancs | `Temperature`, `Tint`, `WhiteBalance` |
+| Couleur | `Vibrance`, `Saturation` |
+| HSL (8 canaux) | `HueAdjustmentRed/…`, `SaturationAdjustmentRed/…`, `LuminanceAdjustmentRed/…` |
+| Color Grading | `ColorGradeShadowHue/Sat/Lum`, `ColorGradeMidtoneHue/Sat/Lum`, `ColorGradeHighlightHue/Sat/Lum` |
+| Ton / Courbe | `ParametricShadows`, `ParametricDarks`, `ParametricLights`, `ParametricHighlights` |
+| Netteté | `Sharpness`, `SharpenRadius`, `SharpenDetail`, `SharpenEdgeMasking`, `Texture` |
+| Bruit | `LuminanceSmoothing`, `ColorNoiseReduction` |
+| Denoise AI | `AINoiseReduction`, `AINoiseReductionAmount` |
+| Calibration | `CameraProfile`, `RedHue/Sat`, `GreenHue/Sat`, `BlueHue/Sat` |
 
 ---
 
