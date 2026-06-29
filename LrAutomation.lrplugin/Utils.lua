@@ -32,6 +32,11 @@ function Utils.appDir()
     return LrPathUtils.child(Utils.projectRoot(), 'app')
 end
 
+-- Répertoire des miniatures temporaires (.../Lr_automation/tmp_thumbs).
+function Utils.thumbsDir()
+    return LrPathUtils.child(Utils.projectRoot(), 'tmp_thumbs')
+end
+
 function Utils.test()
     LrDialogs.message('Lr Automation', 'Hello World', 'info')
 end

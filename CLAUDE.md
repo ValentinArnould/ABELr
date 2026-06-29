@@ -217,6 +217,26 @@ Constantes et conversions dans [`core/color.py`](app/core/color.py). Décodage d
 [`core/raw.py`](app/core/raw.py) (`load_linear`). Coût mesuré : **~1.5 s/photo**
 (half_size, ILCE-7M4 33MP) → parallélisation à prévoir pour les séries 500-1000.
 
+### Accélération — pourquoi le GPU n'aide pas (et ce qui aide)
+
+Le CPU sature à 100 % pendant l'analyse parce que **le coût est le décodage RAW**, pas
+le calcul numpy. Verdict :
+
+| Étape | Coût | GPU (RTX 2080) ? |
+|---|---|---|
+| `rawpy.imread().postprocess` (LibRaw : démosaïquage + WB + matrice couleur) | **~1.5 s/photo, ~100 % du temps** | **Non.** LibRaw est du C++ CPU-only, aucun chemin CUDA pour l'ARW Sony. Le porter sur GPU = réécrire LibRaw (démosaïquage + opcodes + matrices) → hors sujet. |
+| `analysis` (gray-world, `exposure_stats`) + matrices `color` (`@`) | **négligeable** (réductions/3×3 sur un array half-size) | Inutile. Le transfert PCIe host↔device coûterait **plus** que le calcul lui-même (CuPy serait plus lent ici). |
+
+**Le vrai levier = paralléliser le décodage sur les cœurs CPU** (`ProcessPoolExecutor`,
+1 process par photo). LibRaw libère le GIL et chaque décode est indépendant → scaling
+quasi-linéaire avec les cœurs physiques. C'est ça qui fait tomber le temps des séries
+500-1000, pas le GPU.
+
+> GPU réenvisageable **seulement si** un futur algo introduit du calcul lourd par pixel
+> sur des arrays full-size restant en VRAM (ex. filtrage spatial, ML local). Tant que le
+> pipeline = « décode RAW → quelques moyennes globales », le GPU reste inutile. Profiler
+> (`py-spy`, `cProfile`) avant toute tentative — ne pas ajouter CuPy spéculativement.
+
 ### Aperçu rendu et résolution d'identifiant (pour la vérification / l'inspection)
 
 Le `uuid` qui nomme les fichiers de preview n'est **pas** celui que le plugin envoie
@@ -424,6 +444,17 @@ retourne et qu'`applyDevelopSettings` attend) :
 3. Tester les endpoints : `curl http://127.0.0.1:5000/health`
 4. Mock du plugin : `python -m app.tools.mock_plugin` pour simuler polling + résultats (données factices, sans Lr)
 
+> **`python -m app.main` tourne 100 % indépendamment de Lightroom.** Lr n'a pas besoin
+> d'être ouvert : le serveur FastAPI démarre seul (le pont reste juste « déconnecté »
+> tant qu'aucun plugin ne poll). Sert à tester les fonctionnalités App sans Lr :
+> - **Cœur image / analyse** (`core/`) : appeler directement les fonctions sur des
+>   `.ARW` réels — `raw.load_linear`, `analysis.gray_world_wb`, `wb_model.calibrate`,
+>   `seeds.plan_adjustments` — sans passer par le serveur ni le GUI. C'est le chemin
+>   le plus rapide pour valider un algo (cf. scripts `tools/`).
+> - **Endpoints HTTP** : lancer `app.main` + `app.tools.mock_plugin` → boucle complète
+>   job → résultat sans Lr.
+> Le décodage RAW n'exige que le fichier `.ARW` sur disque, jamais le catalogue ni Lr.
+
 ### Test end-to-end
 1. Lancer l'App (via menu Lr "Démarrer / connecter" ou `launch_app.ps1` directement)
 2. Vérifier `GET /bridge` → `connected: true` (pont actif), ou l'indicateur live dans le GUI
@@ -480,7 +511,7 @@ retourne et qu'`applyDevelopSettings` attend) :
 > prouvée à n=1142) → `core/prediction.py` supprimé.
 
 ### À faire
-- [ ] Perf : paralléliser le décodage as-shot (`read_asshot_wb`) et RAW pour les séries 500-1000
+- [ ] Perf : paralléliser le décodage as-shot (`read_asshot_wb`) et RAW (`ProcessPoolExecutor`, 1 process/photo) pour les séries 500-1000 — **le bon levier, pas le GPU** (LibRaw = CPU-only, cf. « Accélération » du Pipeline image)
 - [ ] Sélection explicite des seeds dans le GUI (au lieu de l'heuristique WB Custom seule)
 - [ ] Repli régime artistique : boucle fermée (rendu Previews.lrdata → cible → nudge) ou marquage manuel
 - [ ] GUI : `photo_panel.py` / `analysis_panel.py` — aperçus, histogrammes, outliers WB

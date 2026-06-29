@@ -6,14 +6,20 @@
     (requis par LrHttp.post). Reconnecte automatiquement si l'App redémarre.
 
     Garde anti-doublon via flag global : un seul pont actif par session Lr.
+
+    Hot-reload : `dispatch` est stocké dans _G.LR_AUTOMATION_DISPATCH et mis à jour
+    à chaque rechargement du module. La boucle en cours (`pollOnce`) l'appelle via
+    le global — elle récupère automatiquement le nouveau code sans redémarrage.
 ]]
 
+local LrApplication     = import 'LrApplication'
 local LrTasks           = import 'LrTasks'
 local LrFunctionContext = import 'LrFunctionContext'
 
 local HttpClient = require 'HttpClient'
 local PhotoData  = require 'PhotoData'
 local Adjustments= require 'Adjustments'
+local Thumbnails = require 'Thumbnails'
 local Json       = require 'Json'
 local Utils      = require 'Utils'
 
@@ -60,6 +66,35 @@ local function dispatch(job)
             status = 'ok',
             photos = PhotoData.getAllPhotos(),
         }
+    elseif jobType == 'get_thumbnails' then
+        local payload  = job.payload or {}
+        local width    = payload.width  or 512
+        local height   = payload.height or 512
+        -- Utilise la sélection courante (la même liste que get_selected_photos).
+        local catalog  = LrApplication.activeCatalog()
+        local photos   = catalog:getTargetPhotos()
+        local thumbs   = Thumbnails.fetch(photos, width, height)
+        -- Filtre optionnel : si payload.photo_ids fourni, ne retourner que ceux-là.
+        local filter   = {}
+        if payload.photo_ids and #payload.photo_ids > 0 then
+            for _, id in ipairs(payload.photo_ids) do filter[id] = true end
+        end
+        local out = Json.array({})
+        for _, t in ipairs(thumbs) do
+            if not payload.photo_ids or #payload.photo_ids == 0 or filter[t.photo_id] then
+                out[#out + 1] = {
+                    photo_id       = t.photo_id,
+                    thumbnail_path = t.thumbnail_path,
+                    error          = t.error,
+                }
+            end
+        end
+        return {
+            job_id     = jobId,
+            status     = 'ok',
+            thumbnails = out,
+            photos     = Json.array({}),
+        }
     elseif jobType == 'apply_adjustments' then
         local payload = job.payload or {}
         local adjustments = payload.adjustments or {}
@@ -101,7 +136,9 @@ local function pollOnce()
 
     Utils.logf('Job reçu : type=%s id=%s', tostring(job.type), tostring(job.job_id))
 
-    local ok, result = LrTasks.pcall(dispatch, job)
+    -- Appel via global : récupère le dispatch le plus récent après rechargement plugin.
+    local currentDispatch = _G.LR_AUTOMATION_DISPATCH or dispatch
+    local ok, result = LrTasks.pcall(currentDispatch, job)
     if not ok then
         Utils.logf('Erreur dispatch : %s', tostring(result))
         result = {
@@ -167,5 +204,27 @@ end
 function PollingLoop.isRunning()
     return bridgeAlive()
 end
+
+-- ─── Hot-reload ─────────────────────────────────────────────────────────────
+-- Publie le dispatch courant dans un global : la boucle l'appelle via _G,
+-- donc un rechargement du module met à jour le comportement sans redémarrage.
+_G.LR_AUTOMATION_DISPATCH = dispatch
+
+-- Migration unique : si une boucle sans hot-reload tourne encore, on l'arrête
+-- et on relance proprement. Après ce premier rechargement la boucle neuve
+-- utilisera _G.LR_AUTOMATION_DISPATCH et les rechargements suivants seront
+-- transparents (sans redémarrage).
+if _G.LR_AUTOMATION_BRIDGE_RUNNING and not _G.LR_AUTOMATION_HOT_RELOAD_ACTIVE then
+    Utils.logf('Hot-reload : migration, redémarrage de la boucle...')
+    _G.LR_AUTOMATION_BRIDGE_RUNNING = false  -- signal arrêt ancienne boucle
+    local loop = PollingLoop
+    LrTasks.startAsyncTask(function()
+        LrTasks.sleep(HEARTBEAT_TIMEOUT + 1)
+        loop.start()
+        Utils.logf('Hot-reload : nouveau pont démarré.')
+    end)
+end
+_G.LR_AUTOMATION_HOT_RELOAD_ACTIVE = true
+-- ────────────────────────────────────────────────────────────────────────────
 
 return PollingLoop

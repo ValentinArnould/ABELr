@@ -17,6 +17,7 @@ class JobType(str, Enum):
 
     GET_SELECTED_PHOTOS = "get_selected_photos"
     GET_CATALOG_PHOTOS = "get_catalog_photos"  # toutes les photos du catalogue actif
+    GET_THUMBNAILS = "get_thumbnails"           # miniatures JPEG de la sélection (→ analyse preview)
     APPLY_ADJUSTMENTS = "apply_adjustments"
     TEST = "test"  # ping plugin : déclenche une popup Hello World côté Lr
 
@@ -60,6 +61,14 @@ class PhotoResult(BaseModel):
     current_develop: dict[str, Any] = Field(default_factory=dict)
 
 
+class ThumbnailResult(BaseModel):
+    """Miniature JPEG écrite par le plugin pour une photo (job get_thumbnails)."""
+
+    photo_id: str
+    thumbnail_path: Optional[str] = None  # chemin absolu local du JPEG, ou None si erreur
+    error: Optional[str] = None
+
+
 class JobResult(BaseModel):
     """Résultat soumis par le plugin via POST /jobs/{id}/result."""
 
@@ -67,6 +76,7 @@ class JobResult(BaseModel):
     status: str = "ok"  # "ok" | "error"
     error: Optional[str] = None
     photos: list[PhotoResult] = Field(default_factory=list)
+    thumbnails: list[ThumbnailResult] = Field(default_factory=list)
     # Renseignés par le job apply_adjustments (diagnostic d'application).
     applied: Optional[int] = None
     matched: Optional[int] = None
