@@ -17,12 +17,14 @@ function Utils.logf(fmt, ...)
     log:trace(string.format(fmt, ...))
 end
 
--- Racine du projet = deux niveaux au-dessus du dossier .lrplugin.
---   _PLUGIN.path = .../Lr_automation/plugin/LrAutomation.lrplugin
---   parent       = .../Lr_automation/plugin
+-- Racine du projet = dossier parent du .lrplugin (le plugin est chargé
+-- directement depuis la racine du projet).
+--   _PLUGIN.path = .../Lr_automation/LrAutomation.lrplugin
 --   parent       = .../Lr_automation
+-- (doit rester cohérent avec AppLauncher.buildLaunchCommand, qui calcule
+--  la racine de la même façon.)
 function Utils.projectRoot()
-    return LrPathUtils.parent(LrPathUtils.parent(_PLUGIN.path))
+    return LrPathUtils.parent(_PLUGIN.path)
 end
 
 -- Dossier de l'app Python (.../Lr_automation/app).

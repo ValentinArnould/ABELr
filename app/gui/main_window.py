@@ -1,7 +1,14 @@
-"""Fenêtre principale PySide6 — base minimale fonctionnelle.
+"""Fenêtre principale PySide6.
 
-Bouton « Analyser la sélection » -> crée un job get_selected_photos que le plugin
-récupère via polling, et affiche les photos retournées.
+Trois interactions :
+- indicateur live du pont plugin (rafraîchi 1s, lit l'état du job_queue) ;
+- « Check plugin » : job `test` → popup Hello World côté Lightroom ;
+- « Analyser la sélection » : job `get_selected_photos` (récupéré par le plugin
+  via polling), puis analyse pixel des photos retournées via `AnalysisWorker`
+  (Smart Preview si dispo, sinon RAW) et affichage des métriques par photo.
+
+Tout travail bloquant (attente du plugin, décodage/analyse) tourne dans un
+QThread dédié pour ne pas geler le GUI.
 """
 
 from __future__ import annotations
@@ -118,13 +125,12 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
             return
 
-        # Photos reçues du plugin → on enchaîne sur l'analyse pixel (Smart Preview
-        # si dispo, sinon RAW) dans un worker dédié pour ne pas geler le GUI.
-        catalog_path = result.photos[0].catalog_path
+        # Photos reçues du plugin → analyse pixel (décodage RAW en ProPhoto
+        # linéaire) dans un worker dédié pour ne pas geler le GUI.
         self.status_label.setText(
             f"{len(result.photos)} photo(s) reçue(s) — analyse en cours…"
         )
-        self._analysis_worker = AnalysisWorker(result.photos, catalog_path)
+        self._analysis_worker = AnalysisWorker(result.photos)
         self._analysis_worker.photo_done.connect(self._on_photo_analyzed)
         self._analysis_worker.progress.connect(self._on_analysis_progress)
         self._analysis_worker.finished_all.connect(self._on_analysis_done)
@@ -148,11 +154,11 @@ class MainWindow(QMainWindow):
         if pa.error:
             self.photo_list.addItem(f"⚠ {name} — erreur : {pa.error}")
             return
-        tag = "SP" if pa.source == "smart_preview" else "RAW"
+        # Métriques en linéaire : Ylin = luminance moyenne (0-1).
         self.photo_list.addItem(
-            f"[{tag}] {name} — luma {pa.mean_luma:.0f} "
+            f"[RAW] {name} — Ylin {pa.mean_luma:.4f} "
             f"(hl {pa.clipped_highlights*100:.1f}% / sh {pa.clipped_shadows*100:.1f}%) "
-            f"WB r/g {pa.wb_gain_rg:.2f} b/g {pa.wb_gain_bg:.2f}"
+            f"WB g/r {pa.wb_gain_rg:.2f} g/b {pa.wb_gain_bg:.2f}"
         )
 
     def _on_analysis_done(self) -> None:

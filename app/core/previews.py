@@ -1,19 +1,27 @@
-"""Décodage des deux sources d'analyse Lightroom sans réexport RAW.
+"""Accès aux previews Lightroom stockées à côté du catalogue.
+
+Deux bundles, deux natures très différentes :
 
 1. Aperçu rendu (« Previews.lrdata ») — JPEG du rendu LR, **réglages appliqués**.
-   Idéal pour vérifier le RÉSULTAT d'une correction. Décodage ~5-20 ms.
+   Display-referred (sRGB/AdobeRGB 8-bit). Sert à vérifier le RÉSULTAT d'une
+   correction, **pas** à mesurer quelle correction appliquer. Décodage ~5-20 ms.
    En Lr 13 chaque niveau de pyramide est un fichier `{uuid}-{digest}_{taille}`
    (JPEG brut, offset 0). Un conteneur `{uuid}-{digest}.lrfprev` (en-tête `AgHg`)
    porte le plus petit niveau ; le JPEG y commence après l'en-tête.
 
-2. Smart Preview (« Smart Previews.lrdata ») — DNG lossy **JPEG XL**, RGB 16-bit
-   linéaire ~2.5MP, **avant réglages**. Idéal pour exposition / balance des blancs
-   brutes. Décodage ~100 ms via tifffile + imagecodecs (libjxl). rawpy/LibRaw ne
-   sait PAS lire ces DNG (tuiles JXL, compression 52546).
+2. Smart Preview (« Smart Previews.lrdata ») — DNG lossy **JPEG XL** ~2.5MP.
+   ⚠️ **N'est PAS un RGB exploitable.** PhotometricInterpretation = 34892
+   (LinearRaw) : c'est du raw caméra-natif démosaïqué, **avant** balance des blancs
+   et **avant** matrice couleur. La calibration sur catalogue réel a montré qu'un
+   dérawmatiseur fait main ne le ramène pas fidèlement au niveau du RAW développé
+   (écarts d'exposition incohérents, biais couleur), et LibRaw ne décode pas ses
+   tuiles JXL (compression 52546). **L'analyse part donc du RAW** (`image_source`),
+   pas de la Smart Preview. `decode_smart_preview` reste fourni pour inspection /
+   expérimentation, mais ne l'utilise pas comme source d'analyse en l'état.
 
 Le `uuid` qui nomme ces fichiers n'est PAS `id_global` (ce que le plugin envoie),
 mais l'identifiant de cache de `previews.db`. `PreviewIndex` fait le pont :
-`id_global` → (uuid, digest) → chemins. Toutes les fonctions retournent du RGB.
+`id_global` → (uuid, digest) → chemins.
 """
 
 from __future__ import annotations
@@ -91,13 +99,16 @@ def smart_preview_path(paths: CatalogPaths, uuid: str) -> Path | None:
 
 
 def decode_smart_preview(path: str | Path, normalize: bool = False) -> np.ndarray:
-    """Décode le Smart Preview (DNG JXL) en RGB.
+    """Décode le SubIFD du Smart Preview (DNG JXL) en uint16.
 
-    Retourne le SubIFD pleine résolution (~2560 px de côté long), RGB 16-bit
-    linéaire. `normalize=True` renvoie du float32 0-1 (pratique pour l'analyse
-    en espace linéaire : exposition, balance des blancs).
+    ⚠️ Renvoie du **raw caméra-natif** (LinearRaw, avant WB et avant matrice
+    couleur), PAS un RGB affichable ni directement analysable — cf. l'avertissement
+    en tête de module. Pour le développer correctement il faudrait appliquer WB
+    (AsShotNeutral), matrice couleur (ForwardMatrix) et opcodes DNG.
 
-    Nécessite `tifffile` + `imagecodecs` (décodeur JPEG XL).
+    Retourne le SubIFD pleine résolution (~2560 px de côté long). `normalize=True`
+    divise par la valeur max du type (float32 0-1). Nécessite `tifffile` +
+    `imagecodecs` (décodeur JPEG XL).
     """
     import tifffile
 

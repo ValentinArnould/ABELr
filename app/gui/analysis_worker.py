@@ -1,9 +1,11 @@
-"""Worker Qt — charge et analyse les photos hors du thread GUI.
+"""Worker Qt — décode et analyse les photos hors du thread GUI.
 
-Pour chaque photo : applique la politique Smart-Preview-puis-RAW
-(`image_source.load_for_analysis`), calcule les métriques exposition + WB, et
-émet un résultat incrémental pour que le GUI se mette à jour photo par photo.
-Le décodage (Smart Preview JXL ou RAW) est lourd → jamais sur le thread Qt.
+Pour chaque photo : décode le RAW en ProPhoto linéaire
+(`image_source.load_for_analysis`), calcule les métriques exposition + WB, et émet
+un résultat incrémental pour que le GUI se mette à jour photo par photo. Le décodage
+RAW est lourd (~1 s/photo) → jamais sur le thread Qt.
+
+Toutes les métriques sont en **échelle linéaire** (cf. `core.analysis`).
 """
 
 from __future__ import annotations
@@ -14,18 +16,17 @@ from typing import Optional
 from PySide6.QtCore import QThread, Signal
 
 from ..core import analysis, image_source
-from ..core.previews import PreviewIndex
 from ..server.models import PhotoResult
 
 
 @dataclass
 class PhotoAnalysis:
-    """Résultat d'analyse d'une seule photo."""
+    """Résultat d'analyse d'une seule photo (métriques linéaires)."""
 
     photo_id: str
     path: str
-    source: str            # "smart_preview" | "raw"
-    mean_luma: float
+    source: str            # "raw" | "error"
+    mean_luma: float       # luminance Y moyenne, linéaire 0-1
     median_luma: float
     clipped_highlights: float
     clipped_shadows: float
@@ -42,45 +43,24 @@ class AnalysisWorker(QThread):
     finished_all = Signal()
     failed = Signal(str)
 
-    def __init__(
-        self,
-        photos: list[PhotoResult],
-        catalog_path: Optional[str],
-        half_size: bool = True,
-    ) -> None:
+    def __init__(self, photos: list[PhotoResult], half_size: bool = True) -> None:
         super().__init__()
         self._photos = photos
-        self._catalog_path = catalog_path
         self._half_size = half_size
 
     def run(self) -> None:
-        index: PreviewIndex | None = None
         try:
-            # Un seul PreviewIndex (2 connexions SQLite) réutilisé pour tout le lot.
-            if self._catalog_path:
-                try:
-                    index = PreviewIndex(self._catalog_path)
-                except Exception:
-                    index = None  # catalogue illisible → tout passe par le RAW
-
             total = len(self._photos)
             for i, photo in enumerate(self._photos, start=1):
                 self.progress.emit(i, total)
-                self.photo_done.emit(self._analyze_one(photo, index))
+                self.photo_done.emit(self._analyze_one(photo))
             self.finished_all.emit()
         except Exception as exc:  # garde-fou : ne jamais tuer le thread silencieusement
             self.failed.emit(str(exc))
-        finally:
-            if index is not None:
-                index.close()
 
-    def _analyze_one(
-        self, photo: PhotoResult, index: PreviewIndex | None
-    ) -> PhotoAnalysis:
+    def _analyze_one(self, photo: PhotoResult) -> PhotoAnalysis:
         try:
-            loaded = image_source.load_for_analysis(
-                photo.photo_id, photo.path, index, half_size=self._half_size
-            )
+            loaded = image_source.load_for_analysis(photo.path, half_size=self._half_size)
             stats = analysis.exposure_stats(loaded.rgb)
             gain_rg, gain_bg = analysis.gray_world_wb(loaded.rgb)
             return PhotoAnalysis(

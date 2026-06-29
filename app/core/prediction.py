@@ -1,7 +1,8 @@
 """Modèle de prédiction des ajustements sur série 500-1000 photos.
 
-Stub initial — réservé. Idée : interpoler/lisser les corrections le long d'une
-série temporelle (scipy/scikit-learn) pour harmoniser exposition et WB.
+Pas encore implémenté. Cible : lisser / interpoler les corrections le long d'une
+série temporelle (scipy / scikit-learn) pour harmoniser exposition et WB sur tout
+un reportage. `smooth_series` est un placeholder en attendant le vrai modèle.
 """
 
 from __future__ import annotations
