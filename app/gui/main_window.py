@@ -400,6 +400,11 @@ class MainWindow(QMainWindow):
         self.photo_list.addItem(
             f"Régime : {res.regime.regime.value} — {res.regime.message}"
         )
+        if not res.used_model:
+            self.photo_list.addItem(
+                f"⚠ Régime artistique : Apply WB appliquera une Temperature fixe "
+                f"{cal.median_temp_k:.0f}K (médiane seeds) — pas de prédiction r/g."
+            )
         self.status_label.setText(
             f"Calibrage WB OK — {res.n_seeds} seed(s), régime {res.regime.regime.value}. "
             f"« Apply WB » pour appliquer à la sélection."
@@ -447,6 +452,11 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Calibrage OK — aucune photo à corriger.")
             return
         mode = "toute la sélection" if self._wb_force else "hors seeds"
+        if not res.used_model:
+            self.photo_list.addItem(
+                f"⚠ Régime artistique — Temperature fixe {res.calibration.median_temp_k:.0f}K "
+                f"appliquée à {res.n_planned} photo(s). Vérifiez les exceptions manuellement."
+            )
         self.status_label.setText(
             f"Application WB sur {res.n_planned} photo(s) ({mode}) — "
             f"régime {res.regime.regime.value}…"

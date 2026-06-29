@@ -9,9 +9,11 @@
 
 -- Vide les modules du plugin pour forcer rechargement depuis le disque.
 -- Les modules SDK Lr (import '...') ne sont pas dans package.loaded, pas touchés.
-for _, m in ipairs({ 'Actions', 'PollingLoop', 'PhotoData', 'Adjustments',
-                     'Thumbnails', 'HttpClient', 'AppLauncher', 'Utils', 'Json' }) do
-    package.loaded[m] = nil
+if package and package.loaded then
+    for _, m in ipairs({ 'Actions', 'PollingLoop', 'PhotoData', 'Adjustments',
+                         'Thumbnails', 'HttpClient', 'AppLauncher', 'Utils', 'Json' }) do
+        package.loaded[m] = nil
+    end
 end
 
 local Actions = require 'Actions'

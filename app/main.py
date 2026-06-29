@@ -25,11 +25,30 @@ PORT = 5000
 
 
 def _run_server() -> None:
-    """Serveur uvicorn — bloquant, donc lancé dans un thread daemon."""
+    """Serveur uvicorn — bloquant, donc lancé dans un thread daemon.
+
+    Toute exception au démarrage (port déjà occupé par un process Python orphelin,
+    etc.) est rendue visible : sinon le thread meurt en silence et le pont paraît
+    « cassé » côté plugin alors que la vraie cause est que le serveur n'a jamais
+    écouté.
+    """
     from app.server.api import app
 
     logging.getLogger("uvicorn.access").addFilter(_PollFilter())
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    try:
+        uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    except Exception as exc:
+        import traceback
+
+        print(
+            f"\n[Lr Automation] ERREUR : le serveur HTTP n'a pas pu démarrer sur "
+            f"{HOST}:{PORT}.\n  Cause : {exc!r}\n  Un process python.exe orphelin "
+            f"occupe-t-il déjà le port {PORT} ? (Gestionnaire des tâches → terminer "
+            f"python.exe, puis relancer)\n",
+            file=sys.stderr,
+            flush=True,
+        )
+        traceback.print_exc()
 
 
 def main() -> int:

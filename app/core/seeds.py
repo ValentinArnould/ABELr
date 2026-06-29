@@ -87,21 +87,40 @@ def plan_adjustments(
     cal: WBCalibration,
     *,
     apply_exposure: bool = True,
+    use_model: bool = True,
 ) -> list[PhotoAdjustment]:
     """Calcule les corrections WB (+ expo) pour des photos, depuis le modèle calibré.
 
-    Pour chaque photo : décode l'as-shot r/g → Temperature prédite ; Tint et
-    Exposure = valeurs calibrées (médianes seeds). `apply_exposure=False` pour ne
-    corriger que la WB (cas où l'expo varie de façon non modélisable, régime
-    artistique). Photos au RAW illisible sont ignorées.
+    `use_model=True` (défaut, régime physique) : décode l'as-shot r/g de chaque RAW
+    → Temperature prédite via slope·r/g+intercept.
+
+    `use_model=False` (régime artistique) : Temperature fixe = médiane brute des seeds
+    (`cal.median_temp_k`). Pas de lecture RAW nécessaire — plus rapide et correct quand
+    l'as-shot n'a aucun pouvoir prédictif.
+
+    `apply_exposure=False` pour ne corriger que la WB.
     """
     out: list[PhotoAdjustment] = []
+
+    if not use_model:
+        flat_temp = round(cal.median_temp_k, 0)
+        for p in photos:
+            develop: dict = {
+                "Temperature": flat_temp,
+                "Tint": round(cal.tint, 0),
+                "WhiteBalance": "Custom",
+            }
+            if apply_exposure:
+                develop["Exposure2012"] = round(cal.exposure, 2)
+            out.append(PhotoAdjustment(photo_id=p.photo_id, develop=develop))
+        return out
+
     for p in photos:
         try:
             rg, _bg = raw.read_asshot_wb(p.path)
         except Exception:
             continue
-        develop: dict[str, float] = {
+        develop: dict = {
             "Temperature": round(cal.predict_temperature(rg), 0),
             "Tint": round(cal.tint, 0),
             "WhiteBalance": "Custom",

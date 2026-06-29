@@ -22,10 +22,10 @@ end
 function Actions.connect()
     runAsync('LrAutomationConnect', function()
         local ok, msg = AppLauncher.start()
-        if ok then
-            PollingLoop.start()
-            msg = msg .. '\nPont actif (polling 300ms).'
-        end
+        -- Démarre le pont quoi qu'il arrive : la boucle de polling se (re)connecte
+        -- d'elle-même dès que l'App répond, même si le healthcheck a expiré.
+        PollingLoop.start()
+        msg = msg .. '\nPont actif (polling 300ms).'
         LrDialogs.message('Lr Automation', msg, ok and 'info' or 'warning')
     end)
 end
@@ -34,10 +34,9 @@ end
 function Actions.relaunch()
     runAsync('LrAutomationRelaunch', function()
         local ok, msg = AppLauncher.relaunch()
-        if ok then
-            PollingLoop.start()
-            msg = msg .. '\nPont actif (polling 300ms).'
-        end
+        -- Idem : le pont démarre toujours et se reconnecte seul.
+        PollingLoop.start()
+        msg = msg .. '\nPont actif (polling 300ms).'
         LrDialogs.message('Lr Automation', msg, ok and 'info' or 'warning')
     end)
 end

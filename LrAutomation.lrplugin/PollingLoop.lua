@@ -30,13 +30,11 @@ local POLL_INTERVAL = 0.3
 -- sans cleanup, erreur fatale…) et peut être relancé.
 local HEARTBEAT_TIMEOUT = 5
 
--- Vrai uniquement si une boucle a effectivement tourné récemment.
--- Ne pas se fier au seul flag : il peut rester bloqué à true si le contexte de
--- la tâche est détruit sans déclencher le cleanup handler.
+-- Le pont est « vivant » si une boucle a pollé récemment (heartbeat frais).
+-- On ne se fie PAS à un flag booléen partagé : une boucle qui meurt ne doit
+-- jamais pouvoir éteindre une boucle plus récente. Le heartbeat seul est la
+-- source de vérité — il devient périmé tout seul si plus aucune boucle ne tourne.
 local function bridgeAlive()
-    if not _G.LR_AUTOMATION_BRIDGE_RUNNING then
-        return false
-    end
     local hb = _G.LR_AUTOMATION_BRIDGE_HEARTBEAT or 0
     return (os.time() - hb) < HEARTBEAT_TIMEOUT
 end
@@ -167,25 +165,33 @@ local function pollOnce()
     return true
 end
 
--- Démarre le pont. Idempotent : relance seulement si aucune boucle vivante.
--- Si le flag est resté true mais le heartbeat est périmé (boucle morte), on
--- repart proprement au lieu de refuser de démarrer.
+-- Démarre le pont. TOUJOURS démarre une boucle neuve, identifiée par un jeton de
+-- génération unique (_G.LR_AUTOMATION_BRIDGE_GEN). Démarrer incrémente le jeton :
+-- toute boucle antérieure (génération plus ancienne) se retire d'elle-même au tour
+-- suivant. On a donc au plus UNE boucle vivante, sans flag booléen partagé qu'une
+-- boucle mourante pourrait remettre à false pour tuer la boucle active.
+--
+-- Conséquence : recliquer « connecter » répare toujours le pont (la nouvelle
+-- boucle supersède un éventuel zombie au lieu de refuser de démarrer).
 function PollingLoop.start()
-    if bridgeAlive() then
-        return false   -- déjà une boucle qui tourne
-    end
+    -- Retire toute boucle d'une version antérieure du module : elle surveillait
+    -- le flag booléen LR_AUTOMATION_BRIDGE_RUNNING (et non la génération).
+    _G.LR_AUTOMATION_BRIDGE_RUNNING = false
 
-    _G.LR_AUTOMATION_BRIDGE_RUNNING = true
+    local gen = (_G.LR_AUTOMATION_BRIDGE_GEN or 0) + 1
+    _G.LR_AUTOMATION_BRIDGE_GEN = gen
     _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()
 
     LrFunctionContext.postAsyncTaskWithContext('LrAutomationBridge', function(context)
+        -- Le cleanup ne touche AUCUN état partagé : une boucle qui meurt ne peut
+        -- pas éteindre une boucle plus récente. Log seul (diagnostic).
         context:addCleanupHandler(function()
-            _G.LR_AUTOMATION_BRIDGE_RUNNING = false
-            Utils.logf('Pont arrêté.')
+            Utils.logf('Pont (gen %d) : contexte nettoyé.', gen)
         end)
-        Utils.logf('Pont démarré → %s', HttpClient.BASE_URL)
+        Utils.logf('Pont démarré (gen %d) → %s', gen, HttpClient.BASE_URL)
 
-        while _G.LR_AUTOMATION_BRIDGE_RUNNING do
+        -- Tourne tant que cette boucle reste la génération courante.
+        while _G.LR_AUTOMATION_BRIDGE_GEN == gen do
             _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()   -- battement de cœur
             local ok, err = LrTasks.pcall(pollOnce)
             if not ok then
@@ -193,12 +199,17 @@ function PollingLoop.start()
             end
             LrTasks.sleep(POLL_INTERVAL)
         end
+        Utils.logf('Pont (gen %d) retiré au profit de la gen %s.',
+            gen, tostring(_G.LR_AUTOMATION_BRIDGE_GEN))
     end)
     return true
 end
 
+-- Arrête le pont : incrémente la génération sans démarrer de boucle → la boucle
+-- courante se retire et aucune ne la remplace (le heartbeat devient périmé).
 function PollingLoop.stop()
     _G.LR_AUTOMATION_BRIDGE_RUNNING = false
+    _G.LR_AUTOMATION_BRIDGE_GEN = (_G.LR_AUTOMATION_BRIDGE_GEN or 0) + 1
 end
 
 function PollingLoop.isRunning()
@@ -206,25 +217,11 @@ function PollingLoop.isRunning()
 end
 
 -- ─── Hot-reload ─────────────────────────────────────────────────────────────
--- Publie le dispatch courant dans un global : la boucle l'appelle via _G,
--- donc un rechargement du module met à jour le comportement sans redémarrage.
+-- Publie le dispatch courant dans un global : la boucle vivante l'appelle via _G
+-- (cf. pollOnce), donc recharger le module met à jour le traitement des jobs sans
+-- redémarrer la boucle. Le cycle de vie de la boucle est géré par la génération
+-- (PollingLoop.start) — plus de bloc de migration fragile ici.
 _G.LR_AUTOMATION_DISPATCH = dispatch
-
--- Migration unique : si une boucle sans hot-reload tourne encore, on l'arrête
--- et on relance proprement. Après ce premier rechargement la boucle neuve
--- utilisera _G.LR_AUTOMATION_DISPATCH et les rechargements suivants seront
--- transparents (sans redémarrage).
-if _G.LR_AUTOMATION_BRIDGE_RUNNING and not _G.LR_AUTOMATION_HOT_RELOAD_ACTIVE then
-    Utils.logf('Hot-reload : migration, redémarrage de la boucle...')
-    _G.LR_AUTOMATION_BRIDGE_RUNNING = false  -- signal arrêt ancienne boucle
-    local loop = PollingLoop
-    LrTasks.startAsyncTask(function()
-        LrTasks.sleep(HEARTBEAT_TIMEOUT + 1)
-        loop.start()
-        Utils.logf('Hot-reload : nouveau pont démarré.')
-    end)
-end
-_G.LR_AUTOMATION_HOT_RELOAD_ACTIVE = true
 -- ────────────────────────────────────────────────────────────────────────────
 
 return PollingLoop

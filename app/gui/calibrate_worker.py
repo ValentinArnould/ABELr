@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QThread, Signal
 
 from ..core import regime, seeds, wb_model
-from ..core.regime import RegimeReport
+from ..core.regime import Regime, RegimeReport
 from ..core.wb_model import WBCalibration
 from ..server.models import PhotoAdjustment, PhotoResult
 
@@ -29,6 +29,7 @@ class CalibrationResult:
     adjustments: list[PhotoAdjustment]
     n_seeds: int
     n_planned: int
+    used_model: bool = True  # False = régime artistique, Temperature fixe appliquée
 
 
 class CalibrateWorker(QThread):
@@ -71,10 +72,14 @@ class CalibrateWorker(QThread):
 
             cal = wb_model.calibrate(seed_list, slope)
             rep = regime.detect(cal)
+            # Régime artistique : as-shot sans pouvoir → Temperature fixe (médiane seeds).
+            use_model = rep.regime is not Regime.ARTISTIC
             if self._plan:
                 targets = self._photos if self._force_seeds else others
                 # WB seule : l'exposition a ses propres boutons (Calibrate/Apply Expo).
-                adjustments = seeds.plan_adjustments(targets, cal, apply_exposure=False)
+                adjustments = seeds.plan_adjustments(
+                    targets, cal, apply_exposure=False, use_model=use_model
+                )
             else:
                 adjustments = []
             self.finished_result.emit(
@@ -84,6 +89,7 @@ class CalibrateWorker(QThread):
                     adjustments=adjustments,
                     n_seeds=len(seed_list),
                     n_planned=len(adjustments),
+                    used_model=use_model,
                 )
             )
         except Exception as exc:  # garde-fou

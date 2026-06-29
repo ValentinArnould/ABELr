@@ -4,9 +4,11 @@
     modules du plugin pour appliquer le nouveau code après un rechargement.
 ]]
 
-for _, m in ipairs({ 'Actions', 'PollingLoop', 'PhotoData', 'Adjustments',
-                     'Thumbnails', 'HttpClient', 'AppLauncher', 'Utils', 'Json' }) do
-    package.loaded[m] = nil
+if package and package.loaded then
+    for _, m in ipairs({ 'Actions', 'PollingLoop', 'PhotoData', 'Adjustments',
+                         'Thumbnails', 'HttpClient', 'AppLauncher', 'Utils', 'Json' }) do
+        package.loaded[m] = nil
+    end
 end
 
 local Actions = require 'Actions'

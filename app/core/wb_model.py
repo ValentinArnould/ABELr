@@ -68,6 +68,7 @@ class WBCalibration:
     n_seeds: int
     residual_k: float         # RMS des seeds autour de la droite (confiance)
     temp_spread_k: float      # dispersion des Temperature seeds (contexte)
+    median_temp_k: float = 0.0  # médiane brute des Temperature seeds (repli artistique)
 
     def predict_temperature(self, asshot_rg: float) -> float:
         """Temperature prédite pour une photo depuis son r/g as-shot (bornée)."""
@@ -104,4 +105,5 @@ def calibrate(seeds: list[Seed], slope_rg: float = DEFAULT_SLOPE_RG) -> WBCalibr
         n_seeds=len(seeds),
         residual_k=residual,
         temp_spread_k=spread,
+        median_temp_k=float(np.median(temp)),
     )
