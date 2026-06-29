@@ -26,10 +26,15 @@ Flux principal :
 6. Le plugin applique les ajustements dans Lr via SDK
 
 Fonctionnalités cibles :
-- Équilibrage batch de l'exposition (précis, photo par photo)
-- Équilibrage batch de la balance des blancs
-- Équilibrage et harmonisation de l'étalonnage des couleurs (Color Grading / HSL)
-- Carte de prédiction des ajustements sur séries de 500-1000 photos
+- **Balance des blancs batch par photo** (cœur actuel) : calibrage sur 5-8 seeds →
+  WB cohérente sur toute la série depuis l'as-shot boîtier (`core/wb_model`)
+- Exposition batch (souvent quasi-constante sur un event ; médiane des seeds)
+- Détection du régime (physique auto vs artistique → repli)
+- Plus tard : harmonisation étalonnage couleur (Color Grading / HSL)
+
+> Voir le verdict des essais dans le Backlog : la prédiction depuis les statistiques
+> pixel globales d'une photo isolée est une **impasse prouvée** (n=1142) ; la WB se
+> calibre par seeds, ancrée sur la physique du boîtier.
 
 ---
 
@@ -89,11 +94,12 @@ Lr_automation/
     │   ├── job_queue.py           # Queue thread-safe, heartbeat du pont, résultats
     │   └── models.py              # Modèles Pydantic : Job, JobResult, PhotoResult, ExifData…
     ├── gui/
-    │   ├── main_window.py         # Fenêtre principale PySide6 (check, analyse, indicateur pont)
+    │   ├── main_window.py         # Fenêtre PySide6 : check, analyse, calibrer WB + appliquer, pont
     │   ├── job_worker.py          # QThread : soumet un job, attend le résultat du plugin
-    │   ├── analysis_worker.py     # QThread : décode + analyse chaque photo (Smart Preview / RAW)
+    │   ├── analysis_worker.py     # QThread : décode + analyse chaque photo (RAW → ProPhoto linéaire)
+    │   ├── calibrate_worker.py    # QThread : seeds → calibrate → regime → plan_adjustments
     │   ├── photo_panel.py         # Aperçu / liste photos — stub réservé
-    │   └── analysis_panel.py      # Histogrammes / carte prédiction — stub réservé
+    │   └── analysis_panel.py      # Histogrammes / outliers WB — stub réservé
     ├── core/
     │   ├── color.py               # Espaces couleur de l'analyse : ProPhoto linéaire, luminance Y, → sRGB display
     │   ├── raw.py                 # Décodage ARW Sony via rawpy : load_linear (ProPhoto, analyse) / load_rgb (sRGB u8)
@@ -101,11 +107,18 @@ Lr_automation/
     │   ├── analysis.py            # Métriques exposition (Y) + balance des blancs (gray-world), en linéaire
     │   ├── catalog.py             # Localise .lrcat + bundles .lrdata, ouvre les SQLite en lecture seule
     │   ├── previews.py            # Résout id_global → fichiers preview ; aperçu rendu (verif) + Smart Preview (inspection)
-    │   ├── adjustments.py         # Calcul / formatage des corrections develop — en cours
-    │   └── prediction.py          # Modèle prédiction sur série 500-1000 photos — à faire
-    └── tools/
+    │   ├── wb_model.py            # Modèle WB : Temp = pente_boîtier·(r/g as-shot) + intercept seeds
+    │   ├── seeds.py               # Collecte seeds (WB Custom) + planifie les corrections WB/expo
+    │   ├── regime.py              # Détecte régime physique (auto) vs artistique (repli manuel)
+    │   └── adjustments.py         # Helper de formatage du dict develop (PascalCase SDK)
+    └── tools/                     # Scripts hors-app : mock, vérité terrain, recherche/validation
         ├── mock_plugin.py         # Mock du plugin : simule polling + résultats (tests sans Lr)
-        └── calibrate_sp_vs_raw.py # Outil de calibration Smart Preview ↔ RAW (inspection catalogue)
+        ├── analyze_ground_truth.py# Vérité terrain : RAW → réglages develop → JPEG final (export CSV)
+        ├── series_audit.py        # Audit série : régressions expo/WB, détection régime
+        ├── validate_wb_seeds.py   # Validation du modèle WB-seeds sur un catalogue (LOO seeds)
+        ├── cross_catalog_wb.py    # Généralisation croisée du modèle WB entre catalogues
+        ├── seed_curve.py          # Courbe k-seeds : combien de seeds pour calibrer
+        └── calibrate_sp_vs_raw.py # Calibration Smart Preview ↔ RAW (a tranché : RAW seul)
 ```
 
 ---
@@ -143,8 +156,11 @@ App reçoit les PhotoResult :
      → décodage RAW via rawpy en ProPhoto linéaire (float32)
   → analysis.exposure_stats (luminance Y) + gray_world_wb, émis photo par photo
 
-(à venir) App calcule les corrections et crée un job apply_adjustments :
-  Plugin le récupère via polling et applique via photo:applyDevelopSettings().
+Calibrage WB (bouton « Calibrer WB ») :
+  → CalibrateWorker : collect_seeds (WB Custom) → wb_model.calibrate → regime.detect
+     → seeds.plan_adjustments pour les non-seeds
+  → bouton « Appliquer WB au reste » : job apply_adjustments
+     Plugin le récupère via polling et applique via photo:applyDevelopSettings().
 ```
 
 > **Les ajustements passent aussi par la queue de jobs.** L'App ne « pousse » jamais
@@ -239,9 +255,10 @@ local path    = photo:getRawMetadata('path')
 local uuid    = photo:getRawMetadata('uuid')   -- = id_global (Adobe_images.id_global)
 local develop = photo:getDevelopSettings()
 
--- Écrire ajustements (transaction obligatoire)
+-- Écrire ajustements (transaction obligatoire). Noms SDK = PV2012 (Exposure2012).
+-- WhiteBalance='Custom' requis pour que Temperature/Tint prennent effet.
 catalog:withWriteAccessDo('Apply adjustments', function()
-    photo:applyDevelopSettings({ Exposure = 0.35, Temperature = 5600 })
+    photo:applyDevelopSettings({ Exposure2012 = 0.35, WhiteBalance = 'Custom', Temperature = 5600, Tint = -5 })
 end)
 
 -- HTTP client (GET/POST vers App Python)
@@ -300,11 +317,10 @@ end)
       {
         "photo_id": "lr-internal-uuid",
         "develop": {
-          "Exposure": 0.35,
+          "WhiteBalance": "Custom",
           "Temperature": 5650,
           "Tint": -5,
-          "Highlights": -20,
-          "Shadows": 15
+          "Exposure2012": 0.35
         }
       }
     ]
@@ -330,11 +346,12 @@ end)
         "camera": "ILCE-7M4"
       },
       "current_develop": {
-        "Exposure": 0.0,
+        "WhiteBalance": "Custom",
         "Temperature": 5500,
         "Tint": 0,
-        "Highlights": 0,
-        "Shadows": 0
+        "Exposure2012": 0.0,
+        "Highlights2012": 0,
+        "Shadows2012": 0
       }
     }
   ]
@@ -352,11 +369,13 @@ end)
 > Couvre : exposition, WB, HSL, Color Grading, Point Color, Tone Curve, Denoise AI,
 > Lens Corrections, calibration caméra, recadrage, effets, ProcessVersion.
 
-Groupes principaux :
+Groupes principaux (⚠️ en PV2012 les noms réels portent le suffixe `2012` :
+`Exposure2012`, `Contrast2012`, `Highlights2012`… — ce sont ces clés que `getDevelopSettings`
+retourne et qu'`applyDevelopSettings` attend) :
 
 | Groupe | Paramètres SDK |
 |---|---|
-| Exposition | `Exposure`, `Contrast`, `Highlights`, `Shadows`, `Whites`, `Blacks`, `Clarity`, `Dehaze` |
+| Exposition | `Exposure2012`, `Contrast2012`, `Highlights2012`, `Shadows2012`, `Whites2012`, `Blacks2012`, `Clarity2012`, `Dehaze` |
 | Balance des blancs | `Temperature`, `Tint`, `WhiteBalance` |
 | Couleur | `Vibrance`, `Saturation` |
 | HSL (8 canaux) | `HueAdjustmentRed/…`, `SaturationAdjustmentRed/…`, `LuminanceAdjustmentRed/…` |
@@ -367,9 +386,11 @@ Groupes principaux :
 | Denoise AI | ⚠️ noms de paramètres non vérifiés — consulter doc Adobe SDK |
 | Calibration | `CameraProfile`, `RedHue/Sat`, `GreenHue/Sat`, `BlueHue/Sat` |
 
-> Le sous-ensemble actuellement extrait par `PhotoData.lua` (`DEVELOP_KEYS`) :
-> exposition + WB + Vibrance/Saturation + Clarity/Dehaze. Étendre cette liste si un
-> nouvel algo a besoin d'autres paramètres.
+> Le sous-ensemble extrait par `PhotoData.lua` (`DEVELOP_KEYS`, noms PV2012) :
+> `WhiteBalance`, `Temperature`, `Tint`, `Exposure2012`, `Contrast2012`,
+> `Highlights2012`, `Shadows2012`, `Whites2012`, `Blacks2012`, `Clarity2012`,
+> `Dehaze`, `Vibrance`, `Saturation`. `WhiteBalance="Custom"` sert de marqueur de
+> seed côté App (`core.seeds.is_seed`). Étendre la liste si un nouvel algo le nécessite.
 
 ---
 
@@ -407,7 +428,9 @@ Groupes principaux :
 1. Lancer l'App (via menu Lr "Démarrer / connecter" ou `launch_app.ps1` directement)
 2. Vérifier `GET /bridge` → `connected: true` (pont actif), ou l'indicateur live dans le GUI
 3. Sélectionner photos dans Lr, cliquer « Analyser la sélection » dans le GUI
-4. Vérifier que les métriques s'affichent (tag `SP` = Smart Preview, `RAW` = décodage RAW)
+4. Vérifier que les métriques s'affichent (luminance Y linéaire + WB gray-world, décodage RAW)
+5. **Calibrage WB** : corriger la WB de 5-8 photos (seeds), cliquer « Calibrer WB sur la
+   sélection » → vérifier le régime détecté, puis « Appliquer WB au reste »
 
 ---
 
@@ -438,16 +461,27 @@ Groupes principaux :
 - [x] `core/analysis.py` — métriques exposition (Y) + WB gray-world, en linéaire
 - [x] `core/catalog.py` — localisation .lrcat / .lrdata, ouverture SQLite lecture seule
 - [x] `core/previews.py` — résolution id_global → preview, aperçu rendu (verif) ; SP = inspection
-- [x] `gui/main_window.py` — fenêtre principale (check, analyse, indicateur pont)
+- [x] `core/wb_model.py` — modèle WB Temp = pente·(r/g) + intercept seeds (validé CGC 64% gain)
+- [x] `core/seeds.py` — collecte seeds + `plan_adjustments` (corrections WB/expo des non-seeds)
+- [x] `core/regime.py` — détection physique/artistique (ratio résidu/étalement, validé CGC/Yggdrasil)
+- [x] `core/raw.py` — `read_asshot_wb` (r/g, b/g du WB boîtier)
+- [x] `gui/main_window.py` — check, analyse, **calibrer WB + appliquer**, indicateur pont
 - [x] `gui/job_worker.py` — QThread d'attente du plugin
 - [x] `gui/analysis_worker.py` — QThread d'analyse pixel (RAW → ProPhoto linéaire)
+- [x] `gui/calibrate_worker.py` — QThread : seeds → calibrate → regime → plan_adjustments
 - [x] `tools/mock_plugin.py` — mock du plugin pour tests sans Lightroom
+- [x] `tools/{analyze_ground_truth,series_audit,validate_wb_seeds}.py` — vérité terrain, audit, validation
 - [x] `tools/calibrate_sp_vs_raw.py` — calibration Smart Preview ↔ RAW (a tranché : RAW seul)
 
+> **Méthode WB tranchée par les essais** (CGC 1004, St-Valentin, Yggdrasil) : sur un
+> event typique la Temperature suit l'AWB boîtier (pente physique ~2450K/[r/g] ILCE-7M4)
+> + un biais chaleur par-event calibré sur 5-8 seeds. Régime artistique (Yggdrasil)
+> détecté et basculé en repli. Pas de prédiction depuis stats pixel globales (impasse
+> prouvée à n=1142) → `core/prediction.py` supprimé.
+
 ### À faire
-- [ ] Perf : paralléliser le décodage RAW (~1.5 s/photo) pour les séries 500-1000
-- [ ] `core/adjustments.py` — calcul complet des corrections (exposition + WB), pas seulement l'exposition
-- [ ] `core/prediction.py` — modèle prédiction sur série 500-1000 photos
-- [ ] GUI : bouton « Appliquer » câblé sur le job `apply_adjustments`
-- [ ] GUI : `photo_panel.py` / `analysis_panel.py` — aperçus, histogrammes, carte prédiction
-- [ ] Prototype end-to-end complet : sélection Lr → analyse → calcul → apply
+- [ ] Perf : paralléliser le décodage as-shot (`read_asshot_wb`) et RAW pour les séries 500-1000
+- [ ] Sélection explicite des seeds dans le GUI (au lieu de l'heuristique WB Custom seule)
+- [ ] Repli régime artistique : boucle fermée (rendu Previews.lrdata → cible → nudge) ou marquage manuel
+- [ ] GUI : `photo_panel.py` / `analysis_panel.py` — aperçus, histogrammes, outliers WB
+- [ ] Test end-to-end réel dans Lightroom (calibrer → appliquer → vérifier)

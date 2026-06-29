@@ -5,8 +5,8 @@ par `image_source.load_for_analysis` (décodage RAW via `raw.load_linear`). Trav
 en linéaire = WB et clipping mesurés correctement ; gamut large = pas de biais sur
 les ratios de canaux (cf. `core/color`).
 
-Métriques consommées par `gui.analysis_worker` (affichage) et, à terme, par les
-algos d'équilibrage batch (`prediction.py`, `adjustments.py`).
+Métriques consommées par `gui.analysis_worker` (affichage). Le calcul des
+corrections WB/expo vit dans `core.wb_model` / `core.seeds`.
 """
 
 from __future__ import annotations

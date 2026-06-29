@@ -68,6 +68,20 @@ def load_rgb(path: str | Path, half_size: bool = True) -> np.ndarray:
     return rgb
 
 
+def read_asshot_wb(path: str | Path) -> tuple[float, float]:
+    """Lit la balance des blancs « as shot » du boîtier (multiplicateurs RGGB).
+
+    Retourne (r/g, b/g) — les ratios normalisés au vert du WB caméra, signal
+    physique d'entrée du modèle WB (`core.wb_model`). Ancré sur le boîtier : pour
+    un même boîtier ces ratios prédisent la Temperature choisie (pente quasi-
+    universelle, cf. calibration ILCE-7M4). Indépendant du contenu de la scène.
+    """
+    with rawpy.imread(str(path)) as raw:
+        wb = list(raw.camera_whitebalance)  # [R, G1, B, G2]
+    g = wb[1] or 1.0
+    return wb[0] / g, wb[2] / g
+
+
 def load_thumbnail(path: str | Path) -> np.ndarray | None:
     """Extrait la miniature JPEG embarquée si disponible (rapide, pour aperçu GUI)."""
     try:

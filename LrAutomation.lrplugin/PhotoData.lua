@@ -11,9 +11,14 @@ local Json          = require 'Json'
 local PhotoData = {}
 
 -- Sous-ensemble de develop settings utile à l'analyse batch.
+-- Noms SDK = PV2012 (Exposure2012, etc.) : ce sont les valeurs réellement réglées
+-- par l'utilisateur. WhiteBalance ("Custom" = WB posée à la main) sert de marqueur
+-- de seed côté App (core.seeds.is_seed).
 local DEVELOP_KEYS = {
-    'Exposure', 'Contrast', 'Highlights', 'Shadows', 'Whites', 'Blacks',
-    'Temperature', 'Tint', 'Vibrance', 'Saturation', 'Clarity', 'Dehaze',
+    'WhiteBalance', 'Temperature', 'Tint',
+    'Exposure2012', 'Contrast2012', 'Highlights2012', 'Shadows2012',
+    'Whites2012', 'Blacks2012', 'Clarity2012', 'Dehaze',
+    'Vibrance', 'Saturation',
 }
 
 local function extractExif(photo)
