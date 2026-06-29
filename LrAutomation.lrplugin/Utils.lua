@@ -36,4 +36,14 @@ function Utils.test()
     LrDialogs.message('Lr Automation', 'Hello World', 'info')
 end
 
+-- Liste "clé=valeur" d'une table (diagnostic des develop settings reçus).
+function Utils.dumpKeys(t)
+    if type(t) ~= 'table' then return tostring(t) end
+    local parts = {}
+    for k, v in pairs(t) do
+        parts[#parts + 1] = tostring(k) .. '=' .. tostring(v)
+    end
+    return table.concat(parts, ', ')
+end
+
 return Utils

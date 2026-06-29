@@ -16,6 +16,7 @@ class JobType(str, Enum):
     """Types de jobs envoyés au plugin via polling."""
 
     GET_SELECTED_PHOTOS = "get_selected_photos"
+    GET_CATALOG_PHOTOS = "get_catalog_photos"  # toutes les photos du catalogue actif
     APPLY_ADJUSTMENTS = "apply_adjustments"
     TEST = "test"  # ping plugin : déclenche une popup Hello World côté Lr
 
@@ -66,6 +67,10 @@ class JobResult(BaseModel):
     status: str = "ok"  # "ok" | "error"
     error: Optional[str] = None
     photos: list[PhotoResult] = Field(default_factory=list)
+    # Renseignés par le job apply_adjustments (diagnostic d'application).
+    applied: Optional[int] = None
+    matched: Optional[int] = None
+    total: Optional[int] = None
 
 
 class PhotoAdjustment(BaseModel):

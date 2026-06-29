@@ -1,24 +1,28 @@
 """Fenêtre principale PySide6.
 
-Interactions :
-- indicateur live du pont plugin (rafraîchi 1s, lit l'état du job_queue) ;
-- « Check plugin » : job `test` → popup Hello World côté Lightroom ;
-- « Analyser la sélection » : job `get_selected_photos`, puis analyse pixel des
-  photos retournées via `AnalysisWorker` (décodage RAW ProPhoto linéaire) ;
-- « Calibrer WB » : récupère la sélection, calibre le modèle WB sur les seeds
-  (photos à WhiteBalance Custom) via `CalibrateWorker`, détecte le régime et
-  planifie les corrections des autres photos ;
-- « Appliquer WB au reste » : job `apply_adjustments` poussant les corrections
-  planifiées dans Lightroom.
+Boutons câblés (tout travail bloquant — attente plugin, décodage RAW — tourne dans
+un QThread pour ne pas geler le GUI) :
+- « Test » : job `test` → popup Hello World côté Lightroom ;
+- « Analyse Sélection » : job `get_selected_photos` puis analyse pixel
+  (`AnalysisWorker`, décodage RAW ProPhoto linéaire) ;
+- « Analyse Catalogue » : job `get_catalog_photos` → index métadonnées (EXIF +
+  develop) de toutes les photos, sans décodage pixel ;
+- « Calibrate WB / Expo » : récupère la sélection, apprend le réglage choisi par
+  le photographe sur les seeds (WhiteBalance Custom) et l'affiche — n'applique rien ;
+- « Apply WB / Expo » : autonome — récupère la sélection, calibre sur les seeds,
+  calcule les corrections et les applique via job `apply_adjustments`.
 
-Tout travail bloquant (attente du plugin, décodage/analyse) tourne dans un
-QThread dédié pour ne pas geler le GUI.
+WB et exposition sont indépendantes (boutons séparés) : Apply WB ne touche pas
+l'exposition et inversement. La checkbox « Écraser seeds » étend la cible Apply à
+toute la sélection (seeds compris) au lieu des seules non-seeds.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QHBoxLayout,
     QLabel,
     QListWidget,
     QMainWindow,
@@ -27,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core import exposure, seeds
 from ..server.job_queue import job_queue
 from ..server.models import JobResult, JobType
 from .analysis_worker import AnalysisWorker, PhotoAnalysis
@@ -45,30 +50,69 @@ class MainWindow(QMainWindow):
         self._analysis_worker: AnalysisWorker | None = None
         self._calib_worker: CalibrateWorker | None = None
         self._apply_worker: JobWorker | None = None
-        # Corrections planifiées par la dernière calibration, en attente d'application.
-        self._pending_adjustments: list = []
+        # Capturé au clic Apply : écrase aussi les seeds (cible = toute la sélection).
+        self._wb_force = False
+        self._exp_force = False
 
         self.bridge_label = QLabel()
         self.status_label = QLabel("Prêt. Sélectionnez des photos dans Lightroom.")
-        self.check_btn = QPushButton("Check plugin")
-        self.analyze_btn = QPushButton("Analyser la sélection")
-        self.calibrate_btn = QPushButton("Calibrer WB sur la sélection")
-        self.apply_btn = QPushButton("Appliquer WB au reste")
-        self.apply_btn.setEnabled(False)
+
+        # Ligne outils : ping plugin + analyses.
+        self.test_btn = QPushButton("Test")
+        self.analyze_catalog_btn = QPushButton("Analyse Catalogue")
+        self.analyze_btn = QPushButton("Analyse Sélection")
+
+        # Calibrage : Expo + WB. La sélection courante = seeds.
+        self.calibrate_exp_btn = QPushButton("Calibrate Expo")
+        self.calibrate_wb_btn = QPushButton("Calibrate WB")
+
+        # Application : Expo + WB, sur la sélection cible.
+        self.apply_exp_btn = QPushButton("Apply Expo")
+        self.apply_wb_btn = QPushButton("Apply WB")
+        # force Apply = écrase aussi les photos qui sont des seeds.
+        self.apply_force_cb = QCheckBox("Écraser seeds")
+        self.apply_force_cb.setToolTip(
+            "Décoché : ne modifie pas les photos qui sont des seeds.\n"
+            "Coché : applique sur toute la sélection, écrase les seeds."
+        )
+
         self.photo_list = QListWidget()
 
-        self.check_btn.clicked.connect(self._on_check)
+        self.test_btn.clicked.connect(self._on_check)
+        self.analyze_catalog_btn.clicked.connect(self._on_analyze_catalog)
         self.analyze_btn.clicked.connect(self._on_analyze)
-        self.calibrate_btn.clicked.connect(self._on_calibrate)
-        self.apply_btn.clicked.connect(self._on_apply)
+        self.calibrate_exp_btn.clicked.connect(self._on_calibrate_exposure)
+        self.calibrate_wb_btn.clicked.connect(self._on_calibrate)
+        self.apply_exp_btn.clicked.connect(self._on_apply_exposure)
+        self.apply_wb_btn.clicked.connect(self._on_apply)
 
         layout = QVBoxLayout()
         layout.addWidget(self.bridge_label)
         layout.addWidget(self.status_label)
-        layout.addWidget(self.check_btn)
-        layout.addWidget(self.analyze_btn)
-        layout.addWidget(self.calibrate_btn)
-        layout.addWidget(self.apply_btn)
+
+        # Ligne 1 : outils / analyses.
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(self.test_btn)
+        tools_row.addWidget(self.analyze_catalog_btn)
+        tools_row.addWidget(self.analyze_btn)
+        tools_row.addStretch()
+        layout.addLayout(tools_row)
+
+        # Ligne 2 : Calibrate (2 boutons, informatif).
+        calib_row = QHBoxLayout()
+        calib_row.addWidget(self.calibrate_exp_btn)
+        calib_row.addWidget(self.calibrate_wb_btn)
+        calib_row.addStretch()
+        layout.addLayout(calib_row)
+
+        # Ligne 3 : Apply (2 boutons) + checkbox force apply à côté.
+        apply_row = QHBoxLayout()
+        apply_row.addWidget(self.apply_exp_btn)
+        apply_row.addWidget(self.apply_wb_btn)
+        apply_row.addWidget(self.apply_force_cb)
+        apply_row.addStretch()
+        layout.addLayout(apply_row)
+
         layout.addWidget(self.photo_list)
 
         container = QWidget()
@@ -116,7 +160,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.check_btn.setEnabled(False)
+        self.test_btn.setEnabled(False)
         self.status_label.setText("Check plugin — attente du plugin Lr…")
 
         self._check_worker = JobWorker(JobType.TEST, timeout=10.0)
@@ -125,15 +169,168 @@ class MainWindow(QMainWindow):
         self._check_worker.start()
 
     def _on_check_result(self, result: JobResult) -> None:
-        self.check_btn.setEnabled(True)
+        self.test_btn.setEnabled(True)
         if result.status == "ok":
             self.status_label.setText("Plugin OK — popup affichée dans Lightroom.")
         else:
             self.status_label.setText(f"Plugin a répondu une erreur : {result.error}")
 
     def _on_check_failed(self, message: str) -> None:
-        self.check_btn.setEnabled(True)
+        self.test_btn.setEnabled(True)
         self.status_label.setText(f"Check plugin échoué : {message}")
+
+    # ------------------------------------------------------------------ #
+    # Analyse Catalogue — index métadonnées de toutes les photos (pas de pixels)
+    # ------------------------------------------------------------------ #
+    def _on_analyze_catalog(self) -> None:
+        if not job_queue.bridge_connected():
+            self.status_label.setText(
+                "Pont inactif — démarrez l'application depuis Lightroom."
+            )
+            return
+        self.analyze_catalog_btn.setEnabled(False)
+        self.photo_list.clear()
+        self.status_label.setText("Récupération du catalogue (toutes les photos)…")
+        # Métadonnées seules (EXIF + develop), pas de décodage RAW → peut être long
+        # à transiter sur un gros catalogue mais reste léger côté plugin.
+        self._worker = JobWorker(JobType.GET_CATALOG_PHOTOS, timeout=120.0)
+        self._worker.finished_result.connect(self._on_catalog_result)
+        self._worker.failed.connect(self._on_catalog_failed)
+        self._worker.start()
+
+    def _on_catalog_result(self, result: JobResult) -> None:
+        self.analyze_catalog_btn.setEnabled(True)
+        photos = result.photos
+        if not photos:
+            self.status_label.setText("Catalogue vide ou aucune photo retournée.")
+            return
+        seed_photos = [p for p in photos if seeds.is_seed(p.current_develop or {})]
+        cameras: dict[str, int] = {}
+        for p in photos:
+            cam = p.exif.camera or "?"
+            cameras[cam] = cameras.get(cam, 0) + 1
+        self.photo_list.clear()
+        self.photo_list.addItem(
+            f"Catalogue : {len(photos)} photo(s) — {len(seed_photos)} seed(s) (WB Custom)."
+        )
+        for cam, n in sorted(cameras.items(), key=lambda kv: -kv[1]):
+            self.photo_list.addItem(f"  {cam} : {n} photo(s)")
+        self.status_label.setText(
+            f"Catalogue indexé — {len(photos)} photo(s), {len(seed_photos)} seed(s)."
+        )
+
+    def _on_catalog_failed(self, message: str) -> None:
+        self.analyze_catalog_btn.setEnabled(True)
+        self.status_label.setText(f"Analyse Catalogue échouée : {message}")
+
+    # ------------------------------------------------------------------ #
+    # Calibrate Expo — apprend l'exposition choisie par le photographe (seeds)
+    # ------------------------------------------------------------------ #
+    def _on_calibrate_exposure(self) -> None:
+        if not job_queue.bridge_connected():
+            self.status_label.setText(
+                "Pont inactif — démarrez l'application depuis Lightroom."
+            )
+            return
+        self.calibrate_exp_btn.setEnabled(False)
+        self.photo_list.clear()
+        self.status_label.setText("Récupération de la sélection (calibrage expo)…")
+        self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
+        self._worker.finished_result.connect(self._on_calib_exp_photos)
+        self._worker.failed.connect(self._on_calib_exp_failed)
+        self._worker.start()
+
+    def _on_calib_exp_photos(self, result: JobResult) -> None:
+        self.calibrate_exp_btn.setEnabled(True)
+        if not result.photos:
+            self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
+            return
+        # Calcul instantané (médiane des Exposure2012 des seeds, pas de décodage RAW).
+        exposures, others = exposure.collect_exposures(result.photos)
+        try:
+            cal = exposure.calibrate(exposures)
+        except ValueError as exc:
+            self.status_label.setText(f"Calibrage expo : {exc}")
+            return
+        self.photo_list.clear()
+        self.photo_list.addItem(
+            f"Expo calibrée : {cal.exposure:+.2f} EV "
+            f"(médiane de {cal.n_seeds} seed(s), σ {cal.spread_ev:.2f} EV)."
+        )
+        self.photo_list.addItem(f"{len(others)} photo(s) sans réglage manuel.")
+        self.status_label.setText(
+            f"Calibrage expo OK — {cal.exposure:+.2f} EV sur {cal.n_seeds} seed(s). "
+            f"« Apply Expo » pour l'appliquer."
+        )
+
+    def _on_calib_exp_failed(self, message: str) -> None:
+        self.calibrate_exp_btn.setEnabled(True)
+        self.status_label.setText(f"Calibrate Expo échoué : {message}")
+
+    # ------------------------------------------------------------------ #
+    # Apply Expo — calibre puis applique l'exposition sur la sélection cible
+    # ------------------------------------------------------------------ #
+    def _on_apply_exposure(self) -> None:
+        if not job_queue.bridge_connected():
+            self.status_label.setText(
+                "Pont inactif — démarrez l'application depuis Lightroom."
+            )
+            return
+        self.apply_exp_btn.setEnabled(False)
+        self.photo_list.clear()
+        self._exp_force = self.apply_force_cb.isChecked()
+        self.status_label.setText("Récupération de la sélection (apply expo)…")
+        self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
+        self._worker.finished_result.connect(self._on_apply_exp_photos)
+        self._worker.failed.connect(self._on_apply_exp_failed)
+        self._worker.start()
+
+    def _on_apply_exp_photos(self, result: JobResult) -> None:
+        if not result.photos:
+            self.apply_exp_btn.setEnabled(True)
+            self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
+            return
+        exposures, others = exposure.collect_exposures(result.photos)
+        try:
+            cal = exposure.calibrate(exposures)
+        except ValueError as exc:
+            self.apply_exp_btn.setEnabled(True)
+            self.status_label.setText(f"Calibrage expo : {exc}")
+            return
+        # force : réécrire toute la sélection (seeds inclus) ; sinon hors seeds.
+        targets = result.photos if self._exp_force else others
+        adjustments = exposure.plan_adjustments(targets, cal)
+        if not adjustments:
+            self.apply_exp_btn.setEnabled(True)
+            self.status_label.setText(
+                "Aucune photo à corriger (toute la sélection est seed ?)."
+            )
+            return
+        mode = "toute la sélection" if self._exp_force else "hors seeds"
+        self.status_label.setText(
+            f"Application expo {cal.exposure:+.2f}EV sur {len(adjustments)} "
+            f"photo(s) ({mode})…"
+        )
+        payload = {"adjustments": [a.model_dump() for a in adjustments]}
+        self._apply_worker = JobWorker(JobType.APPLY_ADJUSTMENTS, payload, timeout=120.0)
+        self._apply_worker.finished_result.connect(self._on_apply_exp_done)
+        self._apply_worker.failed.connect(self._on_apply_exp_failed)
+        self._apply_worker.start()
+
+    def _on_apply_exp_done(self, result: JobResult) -> None:
+        self.apply_exp_btn.setEnabled(True)
+        applied = result.applied if result.applied is not None else "?"
+        total = result.total if result.total is not None else "?"
+        if result.status == "ok":
+            self.status_label.setText(
+                f"Expo : {applied}/{total} appliquée(s) dans Lightroom."
+            )
+        else:
+            self.status_label.setText(f"Expo : {applied}/{total} — {result.error}")
+
+    def _on_apply_exp_failed(self, message: str) -> None:
+        self.apply_exp_btn.setEnabled(True)
+        self.status_label.setText(f"Apply Expo échoué : {message}")
 
     def _on_result(self, result: JobResult) -> None:
         if not result.photos:
@@ -166,11 +363,9 @@ class MainWindow(QMainWindow):
                 "Pont inactif — démarrez l'application depuis Lightroom."
             )
             return
-        self.calibrate_btn.setEnabled(False)
-        self.apply_btn.setEnabled(False)
-        self._pending_adjustments = []
+        self.calibrate_wb_btn.setEnabled(False)
         self.photo_list.clear()
-        self.status_label.setText("Récupération de la sélection (seeds + à corriger)…")
+        self.status_label.setText("Récupération de la sélection (seeds)…")
         # Récupère la sélection ; les seeds = photos à WB Custom dans le lot.
         self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
         self._worker.finished_result.connect(self._on_calib_photos)
@@ -179,67 +374,105 @@ class MainWindow(QMainWindow):
 
     def _on_calib_photos(self, result: JobResult) -> None:
         if not result.photos:
-            self.calibrate_btn.setEnabled(True)
+            self.calibrate_wb_btn.setEnabled(True)
             self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
             return
         self.status_label.setText(
             f"{len(result.photos)} photo(s) — calibrage WB (décodage as-shot)…"
         )
-        self._calib_worker = CalibrateWorker(result.photos)
+        # Informatif : calibre + détecte le régime, ne planifie pas (plan=False).
+        self._calib_worker = CalibrateWorker(result.photos, plan=False)
         self._calib_worker.finished_result.connect(self._on_calib_done)
         self._calib_worker.failed.connect(self._on_calib_failed)
         self._calib_worker.start()
 
     def _on_calib_done(self, res: CalibrationResult) -> None:
-        self.calibrate_btn.setEnabled(True)
+        self.calibrate_wb_btn.setEnabled(True)
         cal = res.calibration
         self.photo_list.clear()
         self.photo_list.addItem(
             f"Calibrage : {res.n_seeds} seed(s) | pente {cal.slope_rg:.0f}K/[r/g] "
-            f"| intercept {cal.intercept:+.0f}K | Tint {cal.tint:+.0f} "
-            f"| Expo {cal.exposure:+.2f}EV"
+            f"| intercept {cal.intercept:+.0f}K | Tint {cal.tint:+.0f}"
         )
-        self.photo_list.addItem(f"Régime : {res.regime.regime.value} — {res.regime.message}")
-        self.photo_list.addItem(f"{res.n_planned} photo(s) à corriger.")
-        self._pending_adjustments = res.adjustments
-        if res.adjustments:
-            self.apply_btn.setEnabled(True)
-            self.status_label.setText(
-                f"Calibrage OK — {res.n_planned} corrections prêtes. "
-                f"« Appliquer WB au reste » pour les appliquer dans Lightroom."
-            )
-        else:
-            self.status_label.setText("Calibrage OK — aucune photo à corriger.")
+        self.photo_list.addItem(
+            f"Résidu {cal.residual_k:.0f}K | étalement {cal.temp_spread_k:.0f}K"
+        )
+        self.photo_list.addItem(
+            f"Régime : {res.regime.regime.value} — {res.regime.message}"
+        )
+        self.status_label.setText(
+            f"Calibrage WB OK — {res.n_seeds} seed(s), régime {res.regime.regime.value}. "
+            f"« Apply WB » pour appliquer à la sélection."
+        )
 
     def _on_calib_failed(self, message: str) -> None:
-        self.calibrate_btn.setEnabled(True)
+        self.calibrate_wb_btn.setEnabled(True)
         self.status_label.setText(f"Calibrage échoué : {message}")
 
     def _on_apply(self) -> None:
-        if not self._pending_adjustments:
+        if not job_queue.bridge_connected():
+            self.status_label.setText(
+                "Pont inactif — démarrez l'application depuis Lightroom."
+            )
             return
-        self.apply_btn.setEnabled(False)
-        n = len(self._pending_adjustments)
-        self.status_label.setText(f"Application de {n} correction(s) dans Lightroom…")
-        payload = {"adjustments": [a.model_dump() for a in self._pending_adjustments]}
+        self.apply_wb_btn.setEnabled(False)
+        self.photo_list.clear()
+        self._wb_force = self.apply_force_cb.isChecked()
+        self.status_label.setText("Récupération de la sélection (apply WB)…")
+        self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
+        self._worker.finished_result.connect(self._on_apply_wb_photos)
+        self._worker.failed.connect(self._on_apply_failed)
+        self._worker.start()
+
+    def _on_apply_wb_photos(self, result: JobResult) -> None:
+        if not result.photos:
+            self.apply_wb_btn.setEnabled(True)
+            self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
+            return
+        self.status_label.setText(
+            f"{len(result.photos)} photo(s) — calibrage + planification WB "
+            f"(décodage as-shot)…"
+        )
+        # Autonome : calibre sur les seeds + planifie les corrections en un coup.
+        self._calib_worker = CalibrateWorker(
+            result.photos, plan=True, force_seeds=self._wb_force
+        )
+        self._calib_worker.finished_result.connect(self._on_apply_wb_planned)
+        self._calib_worker.failed.connect(self._on_apply_failed)
+        self._calib_worker.start()
+
+    def _on_apply_wb_planned(self, res: CalibrationResult) -> None:
+        if not res.adjustments:
+            self.apply_wb_btn.setEnabled(True)
+            self.status_label.setText("Calibrage OK — aucune photo à corriger.")
+            return
+        mode = "toute la sélection" if self._wb_force else "hors seeds"
+        self.status_label.setText(
+            f"Application WB sur {res.n_planned} photo(s) ({mode}) — "
+            f"régime {res.regime.regime.value}…"
+        )
+        payload = {"adjustments": [a.model_dump() for a in res.adjustments]}
         self._apply_worker = JobWorker(JobType.APPLY_ADJUSTMENTS, payload, timeout=120.0)
         self._apply_worker.finished_result.connect(self._on_apply_done)
         self._apply_worker.failed.connect(self._on_apply_failed)
         self._apply_worker.start()
 
     def _on_apply_done(self, result: JobResult) -> None:
+        self.apply_wb_btn.setEnabled(True)
+        applied = result.applied if result.applied is not None else "?"
+        total = result.total if result.total is not None else "?"
         if result.status == "ok":
             self.status_label.setText(
-                f"{len(self._pending_adjustments)} correction(s) appliquée(s) — "
-                f"vérifiez dans Lightroom, retouchez les exceptions."
+                f"WB : {applied}/{total} correction(s) appliquée(s) dans Lightroom — "
+                f"vérifiez, retouchez les exceptions."
             )
-            self._pending_adjustments = []
         else:
-            self.apply_btn.setEnabled(True)
-            self.status_label.setText(f"Application : erreur plugin — {result.error}")
+            self.status_label.setText(
+                f"WB : {applied}/{total} appliqués — {result.error}"
+            )
 
     def _on_apply_failed(self, message: str) -> None:
-        self.apply_btn.setEnabled(True)
+        self.apply_wb_btn.setEnabled(True)
         self.status_label.setText(f"Application échouée : {message}")
 
     # ------------------------------------------------------------------ #

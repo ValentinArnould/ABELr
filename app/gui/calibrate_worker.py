@@ -42,11 +42,19 @@ class CalibrateWorker(QThread):
         photos: list[PhotoResult],
         seed_ids: set[str] | None = None,
         camera: str | None = None,
+        plan: bool = True,
+        force_seeds: bool = False,
     ) -> None:
         super().__init__()
         self._photos = photos
         self._seed_ids = seed_ids
         self._camera = camera
+        # plan=False : calibrer + détecter le régime seulement (Calibrate WB,
+        # informatif et rapide — pas de décodage as-shot des non-seeds).
+        # plan=True : planifier les corrections (Apply WB, autonome).
+        self._plan = plan
+        # force_seeds : réécrire aussi les seeds (cible = toute la sélection).
+        self._force_seeds = force_seeds
 
     def run(self) -> None:
         try:
@@ -63,9 +71,12 @@ class CalibrateWorker(QThread):
 
             cal = wb_model.calibrate(seed_list, slope)
             rep = regime.detect(cal)
-            adjustments = seeds.plan_adjustments(
-                others, cal, apply_exposure=rep.apply_exposure
-            )
+            if self._plan:
+                targets = self._photos if self._force_seeds else others
+                # WB seule : l'exposition a ses propres boutons (Calibrate/Apply Expo).
+                adjustments = seeds.plan_adjustments(targets, cal, apply_exposure=False)
+            else:
+                adjustments = []
             self.finished_result.emit(
                 CalibrationResult(
                     calibration=cal,

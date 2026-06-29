@@ -41,22 +41,37 @@ local function extractDevelop(photo)
     return out
 end
 
--- Retourne un tableau JSON (Json.array) de photos pour les photos sélectionnées.
+-- Table sérialisable JSON pour une photo (clés snake_case, develop PascalCase SDK).
+local function photoToTable(photo, catalogPath)
+    return {
+        photo_id        = photo:getRawMetadata('uuid'),
+        path            = photo:getRawMetadata('path'),
+        catalog_path    = catalogPath,
+        exif            = extractExif(photo),
+        current_develop = extractDevelop(photo),
+    }
+end
+
+local function photosToArray(photos, catalogPath)
+    local result = Json.array({})
+    for _, photo in ipairs(photos) do
+        result[#result + 1] = photoToTable(photo, catalogPath)
+    end
+    return result
+end
+
+-- Retourne un tableau JSON (Json.array) des photos sélectionnées (cible active).
 function PhotoData.getSelectedPhotos()
     local catalog     = LrApplication.activeCatalog()
     local catalogPath = catalog:getPath()  -- chemin du .lrcat → localise les .lrdata
-    local photos      = catalog:getTargetPhotos()
-    local result      = Json.array({})
-    for _, photo in ipairs(photos) do
-        result[#result + 1] = {
-            photo_id        = photo:getRawMetadata('uuid'),
-            path            = photo:getRawMetadata('path'),
-            catalog_path    = catalogPath,
-            exif            = extractExif(photo),
-            current_develop = extractDevelop(photo),
-        }
-    end
-    return result
+    return photosToArray(catalog:getTargetPhotos(), catalogPath)
+end
+
+-- Retourne un tableau JSON de TOUTES les photos du catalogue actif (index App).
+function PhotoData.getAllPhotos()
+    local catalog     = LrApplication.activeCatalog()
+    local catalogPath = catalog:getPath()
+    return photosToArray(catalog:getAllPhotos(), catalogPath)
 end
 
 return PhotoData

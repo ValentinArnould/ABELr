@@ -54,15 +54,31 @@ local function dispatch(job)
             status = 'ok',
             photos = PhotoData.getSelectedPhotos(),
         }
-    elseif jobType == 'apply_adjustments' then
-        local payload = job.payload or {}
-        local adjustments = payload.adjustments or {}
-        local applied, total = Adjustments.apply(adjustments)
-        Utils.logf('apply_adjustments : %d/%d appliqués', applied, total)
+    elseif jobType == 'get_catalog_photos' then
         return {
             job_id = jobId,
             status = 'ok',
-            photos = Json.array({}),
+            photos = PhotoData.getAllPhotos(),
+        }
+    elseif jobType == 'apply_adjustments' then
+        local payload = job.payload or {}
+        local adjustments = payload.adjustments or {}
+        local report = Adjustments.apply(adjustments)
+        local status = (report.applied > 0 or report.total == 0) and 'ok' or 'error'
+        local errMsg = nil
+        if status == 'error' then
+            errMsg = string.format('0/%d appliqués (%d matchés). %s',
+                report.total, report.matched,
+                report.errors[1] or 'aucune photo de la sélection ne correspond')
+        end
+        return {
+            job_id  = jobId,
+            status  = status,
+            error   = errMsg,
+            applied = report.applied,
+            matched = report.matched,
+            total   = report.total,
+            photos  = Json.array({}),
         }
     end
 
