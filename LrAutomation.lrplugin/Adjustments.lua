@@ -10,6 +10,7 @@
 ]]
 
 local LrApplication = import 'LrApplication'
+local LrTasks       = import 'LrTasks'
 local Utils         = require 'Utils'
 
 local Adjustments = {}
@@ -59,8 +60,11 @@ function Adjustments.apply(adjustments)
                 errors[#errors + 1] = 'develop vide pour ' .. tostring(adj.photo_id)
             else
                 matched = matched + 1
-                local ok, err = pcall(function()
-                    photo:applyDevelopSettings(adj.develop, 'Lr Automation')
+                -- LrTasks.pcall (et non pcall standard) : applyDevelopSettings peut
+                -- céder la main (yield) en interne ; yielder à travers le pcall C de
+                -- Lua 5.1 lève « Yielding is not allowed within a C or metamethod call ».
+                local ok, err = LrTasks.pcall(function()
+                    photo:applyDevelopSettings(adj.develop)
                 end)
                 if ok then
                     applied = applied + 1
