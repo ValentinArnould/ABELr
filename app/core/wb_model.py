@@ -27,6 +27,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .render_metrics import NeutralStats
+from .response import WBResponse
+
 # Pente physique r/g → Temperature (K par unité de r/g), par modèle de boîtier.
 # Mesurée empiriquement ; à étendre quand d'autres boîtiers sont calibrés.
 CAMERA_SLOPE_RG: dict[str, float] = {
@@ -106,4 +109,41 @@ def calibrate(seeds: list[Seed], slope_rg: float = DEFAULT_SLOPE_RG) -> WBCalibr
         residual_k=residual,
         temp_spread_k=spread,
         median_temp_k=float(np.median(temp)),
+    )
+
+
+# Fraction minimale de pixels neutres pour qu'un raffinement WB soit tenté.
+MIN_NEUTRAL_FRAC = 0.005
+
+
+def refine_temp_tint(
+    temp: float,
+    tint: float,
+    neutral: NeutralStats,
+    wb: WBResponse,
+    *,
+    min_neutral_frac: float = MIN_NEUTRAL_FRAC,
+    max_dtemp_k: float = 600.0,
+    max_dtint: float = 10.0,
+) -> tuple[float, float, str]:
+    """Raffine (Temperature, Tint) prédits par le modèle seed avec le cast résiduel
+    mesuré **sur les neutres du rendu** (`render_metrics.neutral_stats`).
+
+    Ne s'active que si (1) assez de neutres fiables ET (2) réponse WB calibrée. Sinon
+    on garde la prédiction seed — **jamais de gray-world global** (impasse n=1142).
+    Delta borné et Temperature re-clampée aux bornes Lr. Retourne (temp, tint, raison).
+    """
+    if neutral.n_neutral == 0 or neutral.neutral_frac < min_neutral_frac:
+        return temp, tint, "neutres insuffisants → prédiction seed conservée"
+    if not wb.is_calibrated():
+        return temp, tint, "réponse WB non calibrée → prédiction seed conservée"
+    dtemp, dtint = wb.solve(neutral.a_bias, neutral.b_bias)
+    dtemp = float(np.clip(dtemp, -max_dtemp_k, max_dtemp_k))
+    dtint = float(np.clip(dtint, -max_dtint, max_dtint))
+    new_temp = float(min(TEMP_MAX, max(TEMP_MIN, temp + dtemp)))
+    return (
+        new_temp,
+        tint + dtint,
+        f"neutres {neutral.neutral_frac:.3f} (a*={neutral.a_bias:+.1f}, b*={neutral.b_bias:+.1f}) "
+        f"→ ΔTemp={dtemp:+.0f}K ΔTint={dtint:+.1f}",
     )

@@ -17,6 +17,9 @@ local Utils         = require 'Utils'
 local Thumbnails = {}
 
 local THUMB_TIMEOUT = 15  -- secondes max pour toutes les miniatures d'un lot
+-- Délai laissé à Lr pour régénérer l'aperçu après un applyDevelopSettings, avant
+-- de demander la miniature sondée (cf. Thumbnails.fetchProbe).
+local SETTLE = 0.6
 
 -- Répertoire de sortie : {projectRoot}/tmp_thumbs (créé si absent).
 local function thumbsDir()
@@ -87,6 +90,73 @@ function Thumbnails.fetch(photos, width, height)
             end
         end
     end
+
+    return results
+end
+
+--[[
+    Thumbnails.fetchProbe(adjustments, width, height)
+
+    Rendu SONDÉ : applique des réglages temporaires, rend la miniature de l'état
+    obtenu, puis RESTAURE l'état develop d'origine. Sert au calage de la réponse
+    ∂rendu/∂curseur côté App (core.response) et à la boucle fermée d'exposition.
+
+    `adjustments` : liste de { photo_id = uuid, develop = { PascalCase = valeur } }.
+    Retourne le même format que Thumbnails.fetch ({ photo_id, thumbnail_path, error }).
+
+    ⚠️ HYPOTHÈSE BLOQUANTE À VÉRIFIER EN VRAI : requestJpegThumbnail doit refléter les
+    réglages qu'on vient d'appliquer, pas un aperçu en cache périmé. Si Lr renvoie
+    l'ancien rendu, ce chemin est inexploitable et il faut replier sur un export
+    (LrExportSession). Le délai SETTLE laisse Lr régénérer l'aperçu avant la demande.
+
+    Mute l'historique develop (apply puis restore) → réservé au calage occasionnel,
+    pas à un traitement par photo de masse.
+]]
+function Thumbnails.fetchProbe(adjustments, width, height)
+    width  = width  or 512
+    height = height or 512
+    local catalog = LrApplication.activeCatalog()
+
+    -- Index uuid → photo sur la sélection courante.
+    local byUuid = {}
+    for _, photo in ipairs(catalog:getTargetPhotos()) do
+        byUuid[photo:getRawMetadata('uuid')] = photo
+    end
+
+    -- Capture l'état d'origine + liste les cibles valides.
+    local targets, original = {}, {}
+    for _, adj in ipairs(adjustments) do
+        local photo = byUuid[adj.photo_id]
+        if photo and adj.develop then
+            original[adj.photo_id] = photo:getDevelopSettings()  -- snapshot complet
+            targets[#targets + 1]  = { photo = photo, id = adj.photo_id, develop = adj.develop }
+        end
+    end
+
+    -- 1. Applique les réglages sondés (transaction).
+    catalog:withWriteAccessDo('Lr Automation : sonde (apply)', function()
+        for _, t in ipairs(targets) do
+            LrTasks.pcall(function() t.photo:applyDevelopSettings(t.develop) end)
+        end
+    end)
+
+    -- Laisse Lr régénérer l'aperçu avant de demander les miniatures.
+    LrTasks.sleep(SETTLE)
+
+    -- 2. Rend les miniatures de l'état sondé.
+    local photos = {}
+    for _, t in ipairs(targets) do photos[#photos + 1] = t.photo end
+    local results = Thumbnails.fetch(photos, width, height)
+
+    -- 3. Restaure l'état d'origine (transaction).
+    catalog:withWriteAccessDo('Lr Automation : sonde (restore)', function()
+        for _, t in ipairs(targets) do
+            local orig = original[t.id]
+            if orig then
+                LrTasks.pcall(function() t.photo:applyDevelopSettings(orig) end)
+            end
+        end
+    end)
 
     return results
 end

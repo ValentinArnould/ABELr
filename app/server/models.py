@@ -18,6 +18,7 @@ class JobType(str, Enum):
     GET_SELECTED_PHOTOS = "get_selected_photos"
     GET_CATALOG_PHOTOS = "get_catalog_photos"  # toutes les photos du catalogue actif
     GET_THUMBNAILS = "get_thumbnails"           # miniatures JPEG de la sélection (→ analyse preview)
+    RENDER_PROBE = "render_probe"               # applique des réglages temp → miniature → restaure (calage réponse)
     APPLY_ADJUSTMENTS = "apply_adjustments"
     TEST = "test"  # ping plugin : déclenche une popup Hello World côté Lr
 

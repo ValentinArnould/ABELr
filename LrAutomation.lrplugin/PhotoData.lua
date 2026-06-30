@@ -14,11 +14,26 @@ local PhotoData = {}
 -- Noms SDK = PV2012 (Exposure2012, etc.) : ce sont les valeurs réellement réglées
 -- par l'utilisateur. WhiteBalance ("Custom" = WB posée à la main) sert de marqueur
 -- de seed côté App (core.seeds.is_seed).
+--
+-- CameraProfile + ProcessVersion : clé du modèle de réponse calibré côté App
+-- (la réponse ∂rendu/∂curseur dépend du profil DCP). Les 24 curseurs HSL servent à
+-- connaître l'état couleur courant (core.hsl). Tons (Contrast/Highlights/…) déjà là.
 local DEVELOP_KEYS = {
     'WhiteBalance', 'Temperature', 'Tint',
     'Exposure2012', 'Contrast2012', 'Highlights2012', 'Shadows2012',
     'Whites2012', 'Blacks2012', 'Clarity2012', 'Dehaze',
     'Vibrance', 'Saturation',
+    'CameraProfile', 'ProcessVersion',
+    -- HSL — 8 bandes × {Hue, Saturation, Luminance} (noms SDK).
+    'HueAdjustmentRed', 'HueAdjustmentOrange', 'HueAdjustmentYellow',
+    'HueAdjustmentGreen', 'HueAdjustmentAqua', 'HueAdjustmentBlue',
+    'HueAdjustmentPurple', 'HueAdjustmentMagenta',
+    'SaturationAdjustmentRed', 'SaturationAdjustmentOrange', 'SaturationAdjustmentYellow',
+    'SaturationAdjustmentGreen', 'SaturationAdjustmentAqua', 'SaturationAdjustmentBlue',
+    'SaturationAdjustmentPurple', 'SaturationAdjustmentMagenta',
+    'LuminanceAdjustmentRed', 'LuminanceAdjustmentOrange', 'LuminanceAdjustmentYellow',
+    'LuminanceAdjustmentGreen', 'LuminanceAdjustmentAqua', 'LuminanceAdjustmentBlue',
+    'LuminanceAdjustmentPurple', 'LuminanceAdjustmentMagenta',
 }
 
 local function extractExif(photo)

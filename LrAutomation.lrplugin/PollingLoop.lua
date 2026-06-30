@@ -93,6 +93,28 @@ local function dispatch(job)
             thumbnails = out,
             photos     = Json.array({}),
         }
+    elseif jobType == 'render_probe' then
+        -- Rendu sondé : applique des réglages temporaires, rend la miniature, restaure.
+        -- Sert au calage de la réponse ∂rendu/∂curseur et à la boucle fermée (core.response).
+        local payload     = job.payload or {}
+        local adjustments = payload.adjustments or {}
+        local width       = payload.width  or 512
+        local height      = payload.height or 512
+        local thumbs      = Thumbnails.fetchProbe(adjustments, width, height)
+        local out = Json.array({})
+        for _, t in ipairs(thumbs) do
+            out[#out + 1] = {
+                photo_id       = t.photo_id,
+                thumbnail_path = t.thumbnail_path,
+                error          = t.error,
+            }
+        end
+        return {
+            job_id     = jobId,
+            status     = 'ok',
+            thumbnails = out,
+            photos     = Json.array({}),
+        }
     elseif jobType == 'apply_adjustments' then
         local payload = job.payload or {}
         local adjustments = payload.adjustments or {}
