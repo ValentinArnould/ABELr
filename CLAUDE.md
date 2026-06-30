@@ -110,7 +110,13 @@ Lr_automation/
     │   ├── wb_model.py            # Modèle WB : Temp = pente_boîtier·(r/g as-shot) + intercept seeds
     │   ├── seeds.py               # Collecte seeds (WB Custom) + planifie les corrections WB/expo
     │   ├── regime.py              # Détecte régime physique (auto) vs artistique (repli manuel)
-    │   └── adjustments.py         # Helper de formatage du dict develop (PascalCase SDK)
+    │   ├── adjustments.py         # Helper de formatage du dict develop (PascalCase SDK)
+    │   ├── gpu.py                 # Contexte CUDA strict, budget VRAM, pool de streams
+    │   ├── gpu_raw.py             # RAW bayer → GPU : demosaic + WB + matrice → ProPhoto + stats
+    │   ├── gpu_jpeg.py            # Décodage JPEG sur GPU (nvJPEG) + extraction flux JPEG
+    │   ├── gpu_schedule.py        # Scheduler VRAM-aware : unpack CPU borné → vagues GPU
+    │   ├── render_metrics_gpu.py  # Portage torch CUDA de render_metrics (tone/neutral/bandes)
+    │   └── cache.py               # Cache SQLite (4 tables, clé uuid+hash) dans le dossier catalogue
     └── tools/                     # Scripts hors-app : mock, vérité terrain, recherche/validation
         ├── mock_plugin.py         # Mock du plugin : simule polling + résultats (tests sans Lr)
         ├── analyze_ground_truth.py# Vérité terrain : RAW → réglages develop → JPEG final (export CSV)
@@ -217,25 +223,31 @@ Constantes et conversions dans [`core/color.py`](app/core/color.py). Décodage d
 [`core/raw.py`](app/core/raw.py) (`load_linear`). Coût mesuré : **~1.5 s/photo**
 (half_size, ILCE-7M4 33MP) → parallélisation à prévoir pour les séries 500-1000.
 
-### Accélération — pourquoi le GPU n'aide pas (et ce qui aide)
+### Accélération — pipeline GPU (décision utilisateur : GPU-strict)
 
-Le CPU sature à 100 % pendant l'analyse parce que **le coût est le décodage RAW**, pas
-le calcul numpy. Verdict :
+> **Mise à jour (refonte GPU).** L'ancien verdict « le GPU n'aide pas » valait pour le chemin
+> LibRaw `postprocess` (C++ CPU-only). Sur décision utilisateur, le **décodage pixel est passé
+> sur GPU** : on n'appelle plus `postprocess`, on réécrit le pipeline. Modules : `core/gpu.py`
+> (contexte CUDA strict, budget VRAM, streams), `core/gpu_raw.py` (bayer→GPU), `core/gpu_jpeg.py`
+> (nvJPEG), `core/gpu_schedule.py` (scheduler VRAM-aware), `core/render_metrics_gpu.py`.
 
-| Étape | Coût | GPU (RTX 2080) ? |
+| Étape | Où | Détail |
 |---|---|---|
-| `rawpy.imread().postprocess` (LibRaw : démosaïquage + WB + matrice couleur) | **~1.5 s/photo, ~100 % du temps** | **Non.** LibRaw est du C++ CPU-only, aucun chemin CUDA pour l'ARW Sony. Le porter sur GPU = réécrire LibRaw (démosaïquage + opcodes + matrices) → hors sujet. |
-| `analysis` (gray-world, `exposure_stats`) + matrices `color` (`@`) | **négligeable** (réductions/3×3 sur un array half-size) | Inutile. Le transfert PCIe host↔device coûterait **plus** que le calcul lui-même (CuPy serait plus lent ici). |
+| Décompression/unpack ARW → plan bayer 16-bit | **CPU (irréductible)** | `rawpy.raw_image_visible` + métadonnées. Aucun codec GPU pour l'ARW Sony. Pas de demosaic ici. Pool **borné** aux cœurs physiques (jamais 32 → c'était la cause du gel). |
+| Black-level, WB CFA, **demosaic** (bilinéaire), matrice caméra→ProPhoto, stats (Y, gray-world) | **GPU (torch CUDA)** | `gpu_raw.process_bayer_gpu`. Matrice = réplique dcraw `cam_xyz_coeff`. |
+| Décodage JPEG (aperçu rendu + JPEG boîtier) | **GPU (nvJPEG)** | `torchvision.io.decode_jpeg(device='cuda')`, batché. `gpu_jpeg`. |
+| tone / neutral / bandes (CIELAB) | **GPU** | `render_metrics_gpu` — portage torch de `render_metrics`, validé exact vs numpy. |
 
-**Le vrai levier = paralléliser le décodage sur les cœurs CPU** (`ProcessPoolExecutor`,
-1 process par photo). LibRaw libère le GIL et chaque décode est indépendant → scaling
-quasi-linéaire avec les cœurs physiques. C'est ça qui fait tomber le temps des séries
-500-1000, pas le GPU.
+**GPU-strict** : aucun repli CPU de calcul (`gpu.require_cuda` lève si CUDA absent). La VRAM (8 Go)
+est gérée par `gpu_schedule` (vagues dimensionnées au budget, unpack CPU borné qui pré-charge la
+RAM hôte = « combinaison RAM + VRAM »). Parité vérifiée par `tools/validate_gpu_vs_libraw`
+(exposition Y : corr 1.000 ; gray-world : corr 0.97-0.9995, petit biais constant absorbé par le
+calibrage seeds).
 
-> GPU réenvisageable **seulement si** un futur algo introduit du calcul lourd par pixel
-> sur des arrays full-size restant en VRAM (ex. filtrage spatial, ML local). Tant que le
-> pipeline = « décode RAW → quelques moyennes globales », le GPU reste inutile. Profiler
-> (`py-spy`, `cProfile`) avant toute tentative — ne pas ajouter CuPy spéculativement.
+> **Cache obligatoire** (`core/cache.py`) : `LrAutomation_cache.db` dans le dossier du catalogue,
+> 4 tables (`LightroomPicture`, `SourceRAW`, `InCameraJPEG`, `PreviewJPEG`), clé `uuid` + `hash`
+> par élément (signature fichier). Les workers consultent le cache d'abord → 2e passage = zéro
+> décode. C'est le vrai gain sur les séries 500-1000, en plus du GPU.
 
 ### Aperçu rendu et résolution d'identifiant (pour la vérification / l'inspection)
 
@@ -511,7 +523,10 @@ retourne et qu'`applyDevelopSettings` attend) :
 > prouvée à n=1142) → `core/prediction.py` supprimé.
 
 ### À faire
-- [ ] Perf : paralléliser le décodage as-shot (`read_asshot_wb`) et RAW (`ProcessPoolExecutor`, 1 process/photo) pour les séries 500-1000 — **le bon levier, pas le GPU** (LibRaw = CPU-only, cf. « Accélération » du Pipeline image)
+- [x] Perf : décodage RAW/JPEG **sur GPU** (torch CUDA + nvJPEG) + scheduler VRAM-aware (`core/gpu*.py`) — remplace le chemin LibRaw `postprocess`. Voir « Accélération » du Pipeline image
+- [x] Cache SQLite des analyses (`core/cache.py`, 4 tables, clé `uuid`+`hash`) — 2e passage sans décode
+- [x] Fix gel : `ProcessPoolExecutor` non borné (32 process) remplacé par pool borné + scheduler GPU
+- [ ] Câbler le canal miniature plugin (`get_thumbnails`/`render_probe`) côté `main_window` : actuellement `thumbnail_paths` jamais rempli → l'autocorrect dépend de `Previews.lrdata` seul (cause « mesure rien » si pas d'aperçus)
 - [ ] Sélection explicite des seeds dans le GUI (au lieu de l'heuristique WB Custom seule)
 - [ ] Repli régime artistique : boucle fermée (rendu Previews.lrdata → cible → nudge) ou marquage manuel
 - [ ] GUI : `photo_panel.py` / `analysis_panel.py` — aperçus, histogrammes, outliers WB

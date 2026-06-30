@@ -31,6 +31,10 @@ class _JobEntry:
 class JobQueue:
     """Queue FIFO thread-safe avec attente bloquante du résultat."""
 
+    # Au-delà de ce délai, une entrée jamais récupérée (worker timeouté, plugin
+    # mort avant de POSTer) est considérée orpheline et évincée → borne la RAM.
+    _ENTRY_TTL = 300.0  # secondes
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._pending: deque[str] = deque()
@@ -38,6 +42,20 @@ class JobQueue:
         # Horodatage du dernier GET /jobs/pending du plugin = battement de cœur
         # du pont. Tant que le pont écoute, il poll toutes les 300ms.
         self._last_poll_at: Optional[float] = None
+
+    def _prune_locked(self, now: float) -> None:
+        """Évince les entrées orphelines trop vieilles. À appeler sous `_lock`.
+
+        Les jobs récupérés sont déjà retirés par `wait_result` ; ceci ne ramasse
+        que les orphelins (jamais consommés) pour empêcher `_jobs` de croître sans
+        fin (fuite RAM si l'app tourne longtemps avec beaucoup de jobs).
+        """
+        stale = [
+            jid for jid, e in self._jobs.items()
+            if now - e.created_at > self._ENTRY_TTL
+        ]
+        for jid in stale:
+            self._jobs.pop(jid, None)
 
     # ------------------------------------------------------------------ #
     # Côté producteur (GUI)
@@ -48,6 +66,7 @@ class JobQueue:
         job = Job(job_id=job_id, type=job_type, payload=payload or {})
         entry = _JobEntry(job)
         with self._lock:
+            self._prune_locked(time.time())
             self._jobs[job_id] = entry
             self._pending.append(job_id)
         return job_id
@@ -56,13 +75,16 @@ class JobQueue:
         """Bloque jusqu'au résultat ou au timeout. None si timeout.
 
         À appeler depuis un worker, jamais depuis le thread Qt principal
-        (sinon le GUI gèle).
+        (sinon le GUI gèle). Le résultat récupéré est aussitôt **retiré** de
+        `_jobs` (consommé → libère la RAM).
         """
         with self._lock:
             entry = self._jobs.get(job_id)
         if entry is None:
             return None
         if entry.done_event.wait(timeout):
+            with self._lock:
+                self._jobs.pop(job_id, None)
             return entry.result
         return None
 

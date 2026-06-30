@@ -43,6 +43,27 @@ def decode_jpeg_file(path: str | Path) -> np.ndarray:
     return previews.decode_rendered_preview(path)
 
 
+def resolve_render_path(
+    *,
+    thumbnail_path: str | Path | None = None,
+    preview_index: PreviewIndex | None = None,
+    id_global: str | None = None,
+) -> tuple[Path | None, RenderChannel]:
+    """Localise le **fichier** de rendu (sans décoder) selon la priorité de canal.
+
+    Pendant de `load_rendered` pour le pipeline **GPU** : on veut le chemin (pour en
+    lire les octets et décoder sur GPU via nvJPEG), pas un array décodé CPU.
+    Priorité : miniature fraîche (plugin) → aperçu Previews.lrdata → None.
+    """
+    if thumbnail_path is not None and Path(thumbnail_path).is_file():
+        return Path(thumbnail_path), RenderChannel.THUMBNAIL
+    if preview_index is not None and id_global:
+        p = preview_index.rendered_path(id_global)
+        if p is not None:
+            return p, RenderChannel.PREVIEW
+    return None, RenderChannel.NONE
+
+
 def load_rendered(
     *,
     thumbnail_path: str | Path | None = None,

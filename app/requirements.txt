@@ -11,6 +11,15 @@ PySide6
 rawpy
 numpy
 opencv-python
+
+# GPU (décodage RAW/JPEG sur GPU — politique GPU-strict, cf. core/gpu*.py)
+# Paire CUDA compatible (cu124, wheels cp313). torch fournit le runtime CUDA
+# (nvcc non requis) ; torchvision fournit nvJPEG (decode_jpeg device='cuda').
+# Installer impérativement depuis l'index PyTorch CUDA, sinon pip prend la build CPU :
+#   pip install torch==2.6.0 torchvision==0.21.0 \
+#       --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchvision==0.21.0
 # Smart Previews Lr = DNG JPEG XL (compression 52546) — rawpy/LibRaw ne sait pas
 # les lire ; tifffile + imagecodecs (libjxl) décodent les tuiles JXL 16-bit.
 tifffile

@@ -99,20 +99,24 @@ def plan_band(
     reasons: list[str] = []
     d_sat = d_lum = d_hue = 0
 
-    # --- Saturation : réduire la sursaturation -------------------------------
+    # --- Saturation : RÉDUCTION SEULE de la sursaturation --------------------
+    # Objectif utilisateur : « surtout réduire la saturation excessive ». On ne
+    # rehausse JAMAIS la saturation (sinon on copierait la sursaturation d'un JPEG
+    # boîtier punchy) → on agit uniquement quand le rendu est PLUS saturé que la
+    # référence (excès positif), et le delta est borné à ≤ 0.
     target_chroma = target.chroma if target else None
     excess = 0.0
     if target_chroma is not None:
         excess = stats.median_chroma - target_chroma  # >0 = trop saturé vs référence
-    # Sursaturation dure (pixels écrêtés en S) → pousse à réduire même sans référence.
+    # Sursaturation dure (pixels écrêtés en S) → réduire même sans référence.
     if stats.sat_clip_frac >= _SAT_CLIP_TRIGGER:
         excess = max(excess, _DEADBAND_CHROMA + 1.0)
         reasons.append(f"sat_clip={stats.sat_clip_frac:.2f}")
     # Le RAW peut interdire une réduction (bande non chargée à la capture).
     raw_blocks = target is not None and target.raw_oversat is False
-    if abs(excess) >= _DEADBAND_CHROMA and not (excess > 0 and raw_blocks):
+    if excess >= _DEADBAND_CHROMA and not raw_blocks:
         gain = resp.dchroma_dsat if abs(resp.dchroma_dsat) > 1e-9 else _NOM_DCHROMA_DSAT
-        d_sat = _clamp(-excess / gain, -_MAX_SAT, _MAX_SAT)
+        d_sat = _clamp(-excess / gain, -_MAX_SAT, 0)  # réduction seule (≤ 0)
         if d_sat:
             reasons.append(f"ΔC*={excess:+.1f}→sat{d_sat:+d}")
 
