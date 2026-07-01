@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from . import raw, render_metrics
+from .pipeline import RenderAnalysis
 from .render_metrics import BandStats, ToneStats
 
 # Plafond dur du nombre de process de lecture RAW (anti-gel). Même sur une grosse
@@ -64,14 +65,21 @@ def embedded_target_l(path: str | Path) -> float | None:
 class RawReference:
     """Tout ce qu'on tire d'une photo via UNE ouverture du RAW.
 
-    embedded_tone / embedded_bands : mesures du JPEG boîtier (cibles mode embedded).
+    embedded_tone / embedded_bands : mesures du JPEG boîtier zone nette (cibles mode
+                                     embedded ; = `sharp.tone`/`sharp.bands`).
     asshot_rg / asshot_bg          : WB as-shot (entrée du modèle WB seeds).
+    sharp / glob                   : analyse complète (tone+neutral+bandes) zone nette
+                                     et globale du JPEG boîtier (chemin GPU dual).
+    mask_sharp_frac                : fraction de pixels retenus par le masque net.
     """
 
     embedded_tone: ToneStats | None
     embedded_bands: list[BandStats] | None
     asshot_rg: float | None
     asshot_bg: float | None
+    sharp: RenderAnalysis | None = None
+    glob: RenderAnalysis | None = None
+    mask_sharp_frac: float | None = None
 
 
 def read_raw_reference(path: str | Path) -> RawReference:

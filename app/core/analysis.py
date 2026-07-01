@@ -54,6 +54,49 @@ def exposure_stats(rgb: np.ndarray) -> ExposureStats:
     )
 
 
+def parse_shutter_seconds(shutter: str | float | None) -> float | None:
+    """Convertit une vitesse d'obturation EXIF en secondes.
+
+    Accepte `"1/200"`, `"0.5"`, `"1\""` (parfois formaté par le SDK Lr) ou un float.
+    Retourne None si non interprétable.
+    """
+    if shutter is None:
+        return None
+    if isinstance(shutter, (int, float)):
+        return float(shutter) if shutter > 0 else None
+    s = str(shutter).strip().rstrip('"s ').strip()
+    try:
+        if "/" in s:
+            num, den = s.split("/", 1)
+            den_f = float(den)
+            return float(num) / den_f if den_f else None
+        v = float(s)
+        return v if v > 0 else None
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def ev100(
+    iso: float | int | None,
+    aperture: float | None,
+    shutter: str | float | None,
+) -> float | None:
+    """Exposure Value normalisé ISO 100 depuis le triangle d'exposition EXIF.
+
+    `EV100 = log2(aperture² / t) - log2(ISO/100)` où `t` = temps de pose (s).
+    Mesure la lumière ambiante de la scène **indépendamment** des pixels — sert de
+    contexte scène (plein soleil ≈ 15-16, intérieur ≈ 5-8, nuit < 3) pour le matching
+    k-NN et pour interpréter un biais de sous-exposition volontaire. None si une
+    donnée manque ou est invalide.
+    """
+    t = parse_shutter_seconds(shutter)
+    if not iso or not aperture or aperture <= 0 or t is None or t <= 0 or iso <= 0:
+        return None
+    import math
+
+    return math.log2(aperture * aperture / t) - math.log2(iso / 100.0)
+
+
 def gray_world_wb(rgb: np.ndarray) -> tuple[float, float]:
     """Estimation balance des blancs gray-world, sur RGB **linéaire**.
 

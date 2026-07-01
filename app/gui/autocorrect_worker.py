@@ -1,15 +1,21 @@
-"""Worker Qt — correction auto (expo/WB/HSL) par photo, hors thread GUI.
+"""Worker Qt — analyse (RAW + JPEG boîtier + aperçu, zone nette) et planification.
 
 Pipeline **GPU + cache** (hors thread GUI) :
-1. **Embedded boîtier** (WB as-shot + tone/bandes du JPEG appareil) : cache SQLite
-   (`InCameraJPEG` + `SourceRAW.asshot`, clé = signature du RAW) ; les manques sont
-   déballés en CPU borné puis décodés sur **GPU** (nvJPEG) via `gpu_schedule`.
-2. **Aperçu rendu courant** (tone/neutral/bandes) : cache `PreviewJPEG` (clé = signature
-   du fichier d'aperçu) ; les manques sont décodés/mesurés sur **GPU**.
-3. `autocorrect.plan(...)` → `PhotoAdjustment[]` + diagnostic.
+1. **RAW source** (tone+bandes zone nette, asshot WB, exposition, gray-world) :
+   cache `SourceRAW` (clé = signature du RAW) ; manques → décodage GPU complet
+   (`gpu_schedule.process_raw_batch`, demosaic inclus — coût dominant).
+2. **JPEG boîtier** (tone+bandes zone nette) : cache `InCameraJPEG` (même clé) ;
+   manques → décodage GPU (nvJPEG, `gpu_schedule.process_embedded_batch`).
+3. **Aperçu rendu courant** (tone/neutral/bandes zone nette) : cache `PreviewJPEG`
+   (clé = signature du fichier d'aperçu) ; manques → décodage GPU. En mode
+   `force_fresh_preview=True` (Apply), le cache n'est **jamais lu** pour l'état
+   courant (seulement écrit) — l'état mesuré doit être le plus frais possible
+   pour éviter de recalculer un delta sur un rendu périmé.
+4. Mode `analyze_only=True` ("Analyser sélection") : s'arrête après avoir peuplé
+   le cache, n'appelle pas `autocorrect.plan`.
+5. Sinon : construit le pool de seeds (`cache.list_seed_uuids` +
+   `seed_match.build_seed_vector`) et appelle `autocorrect.plan(...)`.
 
-Au 2e passage sur la même sélection (RAW/aperçus inchangés), tout vient du cache : aucun
-décode. N'applique rien : émet le plan (le `main_window` décide Aperçu vs Appliquer).
 Politique **GPU-strict** : sans CUDA utilisable, le worker échoue avec un message clair.
 """
 
@@ -20,9 +26,9 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import QThread, Signal
 
-from ..core import autocorrect, cache as cachemod, gpu, gpu_jpeg, gpu_schedule, measure, response
+from ..core import autocorrect, cache as cachemod, gpu, gpu_jpeg, gpu_schedule, measure
+from ..core import response, seed_match
 from ..core.autocorrect import PhotoMeasure, PlanDiagnostics
-from ..core.embedded_jpeg import RawReference
 from ..core.previews import PreviewIndex
 from ..server.models import PhotoAdjustment, PhotoResult
 
@@ -30,7 +36,7 @@ from ..server.models import PhotoAdjustment, PhotoResult
 @dataclass
 class AutoCorrectResult:
     adjustments: list[PhotoAdjustment]
-    diagnostics: PlanDiagnostics
+    diagnostics: PlanDiagnostics | None
     n_measured: int
     n_skipped: int
     notes: list[str] = field(default_factory=list)
@@ -46,7 +52,7 @@ def _safe(fn) -> None:
 
 
 class AutoCorrectWorker(QThread):
-    """Mesure la sélection (GPU + cache) et planifie la correction ; émet AutoCorrectResult."""
+    """Mesure la sélection (GPU + cache) et planifie/applique la correction."""
 
     finished_result = Signal(object)   # AutoCorrectResult
     progress = Signal(str)             # message d'étape
@@ -58,12 +64,16 @@ class AutoCorrectWorker(QThread):
         axes: frozenset[str] = autocorrect.DEFAULT_AXES,
         forced_embedded: bool = False,
         thumbnail_paths: dict[str, str] | None = None,
+        analyze_only: bool = False,
+        force_fresh_preview: bool = False,
     ) -> None:
         super().__init__()
         self._photos = photos
         self._axes = axes
         self._forced_embedded = forced_embedded
         self._thumbs = thumbnail_paths or {}
+        self._analyze_only = analyze_only
+        self._force_fresh_preview = force_fresh_preview
 
     def run(self) -> None:
         try:
@@ -89,17 +99,30 @@ class AutoCorrectWorker(QThread):
             idx = PreviewIndex(catalog_path) if catalog_path else None
 
             try:
-                refs = self._collect_embedded(photos, conn)
-                analysis_by_id, channels, skipped_render = self._collect_renders(
+                raw_by_id = self._collect_raw_source(photos, conn)
+                embedded_by_id = self._collect_embedded_jpeg(photos, conn)
+                render_by_id, channels, skipped_render = self._collect_renders(
                     photos, conn, idx
                 )
 
+                if self._analyze_only:
+                    n = len(raw_by_id)
+                    self.finished_result.emit(
+                        AutoCorrectResult(
+                            adjustments=[], diagnostics=None,
+                            n_measured=n, n_skipped=len(photos) - n,
+                            notes=[f"Analyse : {n}/{len(photos)} photo(s) (RAW+JPEG boîtier+aperçu)."],
+                        )
+                    )
+                    return
+
                 measures: list[PhotoMeasure] = []
                 for p in photos:
-                    ra = analysis_by_id.get(p.photo_id)
+                    ra = render_by_id.get(p.photo_id)
                     if ra is None:
                         continue
-                    r = refs.get(p.photo_id) or RawReference(None, None, None, None)
+                    raw_d = raw_by_id.get(p.photo_id) or {}
+                    emb = embedded_by_id.get(p.photo_id) or (None, None)
                     measures.append(
                         PhotoMeasure(
                             photo_id=p.photo_id,
@@ -107,24 +130,32 @@ class AutoCorrectWorker(QThread):
                             current_develop=p.current_develop or {},
                             exif_camera=p.exif.camera if p.exif else None,
                             analysis=ra,
-                            embedded_tone=r.embedded_tone,
-                            embedded_bands=r.embedded_bands,
-                            asshot_rg=r.asshot_rg,
-                            asshot_bg=r.asshot_bg,
+                            is_seed=cachemod.is_seed(conn, p.photo_id) if conn else False,
+                            raw_tone=raw_d.get("tone"),
+                            embedded_tone=emb[0],
+                            embedded_bands=emb[1],
+                            asshot_rg=raw_d.get("asshot_rg"),
+                            asshot_bg=raw_d.get("asshot_bg"),
                         )
                     )
             finally:
                 if idx is not None:
                     idx.close()
-                if conn is not None:
-                    conn.close()
 
             skipped = len(photos) - len(measures)
             if not measures:
-                self.failed.emit(self._no_render_message(len(photos), channels, idx))
+                try:
+                    msg = self._no_render_message(len(photos), channels, idx)
+                finally:
+                    if conn is not None:
+                        conn.close()
+                self.failed.emit(msg)
                 return
 
-            # Modèle de réponse calibré (caméra, profil le plus fréquent) si présent.
+            seed_pool = seed_match.build_seed_pool(conn) if conn else []
+            if conn is not None:
+                conn.close()
+
             camera = next((m.exif_camera for m in measures if m.exif_camera), None)
             profiles = Counter(
                 m.current_develop.get("CameraProfile") for m in measures
@@ -140,6 +171,7 @@ class AutoCorrectWorker(QThread):
                 forced_embedded=self._forced_embedded,
                 model=model,
                 camera=camera,
+                seed_pool=seed_pool,
             )
             self.finished_result.emit(
                 AutoCorrectResult(
@@ -153,47 +185,86 @@ class AutoCorrectWorker(QThread):
             self.failed.emit(str(exc))
 
     # ------------------------------------------------------------------ #
-    # Étape 1 : embedded boîtier (asshot + tone/bandes) — cache + GPU
+    # Étape 1 : RAW source (tone+bandes zone nette, asshot, expo, gray-world)
     # ------------------------------------------------------------------ #
-    def _collect_embedded(self, photos, conn) -> dict[str, RawReference]:
-        refs: dict[str, RawReference] = {}
+    def _collect_raw_source(self, photos, conn) -> dict[str, dict]:
+        out: dict[str, dict] = {}
         misses: list[PhotoResult] = []
         sig: dict[str, str] = {}
         for p in photos:
             s = cachemod.raw_signature(p.path)
             sig[p.photo_id] = s
-            ic = cachemod.get_in_camera_jpeg(conn, p.photo_id, s) if conn else None
-            sr = cachemod.get_source_raw(conn, p.photo_id, s) if conn else None
-            if ic is not None and sr is not None:
-                tone, bands = ic
-                refs[p.photo_id] = RawReference(tone, bands, sr["asshot_rg"], sr["asshot_bg"])
+            cached = cachemod.get_source_raw(conn, p.photo_id, s) if conn else None
+            if cached is not None and cached["tone"] is not None:
+                out[p.photo_id] = cached
             else:
                 misses.append(p)
 
         if misses:
-            self.progress.emit(f"Lecture RAW boîtier (GPU) — {len(misses)} photo(s)…")
-            got = gpu_schedule.process_embedded_batch(
+            self.progress.emit(f"Lecture RAW source (GPU, zone nette) — {len(misses)} photo(s)…")
+            got = gpu_schedule.process_raw_batch(
                 [p.path for p in misses],
-                progress=lambda d, t: self.progress.emit(f"RAW boîtier {d}/{t} (GPU)…"),
+                progress=lambda d, t: self.progress.emit(f"RAW source {d}/{t} (GPU)…"),
             )
             for p in misses:
-                r = got.get(p.path) or RawReference(None, None, None, None)
-                refs[p.photo_id] = r
+                r = got.get(p.path)
+                if r is None:
+                    continue
+                out[p.photo_id] = {
+                    "asshot_rg": r.asshot_rg, "asshot_bg": r.asshot_bg,
+                    "tone": r.tone, "bands": r.bands,
+                }
                 if conn is not None:
                     s = sig[p.photo_id]
-                    if r.embedded_tone is not None and r.embedded_bands is not None:
-                        _safe(lambda: cachemod.put_in_camera_jpeg(
-                            conn, p.photo_id, s, tone=r.embedded_tone, bands=r.embedded_bands))
                     _safe(lambda: cachemod.put_source_raw(
-                        conn, p.photo_id, s, asshot_rg=r.asshot_rg, asshot_bg=r.asshot_bg))
+                        conn, p.photo_id, s,
+                        asshot_rg=r.asshot_rg, asshot_bg=r.asshot_bg,
+                        exposure=r.exposure,
+                        grayworld_rg=r.grayworld_rg, grayworld_bg=r.grayworld_bg,
+                        tone=r.tone, bands=r.bands,
+                    ))
                     _safe(lambda: cachemod.put_picture(
                         conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
                         exif=(p.exif.model_dump() if p.exif else None),
                         current_develop=p.current_develop or {}))
-        return refs
+        return out
 
     # ------------------------------------------------------------------ #
-    # Étape 2 : aperçu rendu courant (tone/neutral/bandes) — cache + GPU
+    # Étape 2 : JPEG boîtier (tone+bandes zone nette) — cache + GPU
+    # ------------------------------------------------------------------ #
+    def _collect_embedded_jpeg(self, photos, conn) -> dict[str, tuple]:
+        out: dict[str, tuple] = {}
+        misses: list[PhotoResult] = []
+        sig: dict[str, str] = {}
+        for p in photos:
+            s = cachemod.raw_signature(p.path)
+            sig[p.photo_id] = s
+            cached = cachemod.get_in_camera_jpeg(conn, p.photo_id, s) if conn else None
+            if cached is not None:
+                out[p.photo_id] = cached
+            else:
+                misses.append(p)
+
+        if misses:
+            self.progress.emit(f"Lecture JPEG boîtier (GPU) — {len(misses)} photo(s)…")
+            got = gpu_schedule.process_embedded_batch(
+                [p.path for p in misses],
+                progress=lambda d, t: self.progress.emit(f"JPEG boîtier {d}/{t} (GPU)…"),
+            )
+            for p in misses:
+                r = got.get(p.path)
+                if r is None or r.embedded_tone is None:
+                    out[p.photo_id] = (None, None)
+                    continue
+                out[p.photo_id] = (r.embedded_tone, r.embedded_bands)
+                if conn is not None:
+                    s = sig[p.photo_id]
+                    _safe(lambda: cachemod.put_in_camera_jpeg(
+                        conn, p.photo_id, s, tone=r.embedded_tone, bands=r.embedded_bands))
+        return out
+
+    # ------------------------------------------------------------------ #
+    # Étape 3 : aperçu rendu courant (tone/neutral/bandes zone nette) — cache + GPU
     # ------------------------------------------------------------------ #
     def _collect_renders(self, photos, conn, idx):
         analysis_by_id: dict[str, object] = {}
@@ -212,7 +283,10 @@ class AutoCorrectWorker(QThread):
                 skipped += 1
                 continue
             psig = cachemod.raw_signature(path)
-            cached = cachemod.get_preview_jpeg(conn, p.photo_id, psig) if conn else None
+            cached = (
+                None if self._force_fresh_preview
+                else (cachemod.get_preview_jpeg(conn, p.photo_id, psig) if conn else None)
+            )
             if cached is not None:
                 analysis_by_id[p.photo_id] = cached
                 continue

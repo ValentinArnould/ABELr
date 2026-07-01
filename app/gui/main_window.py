@@ -1,16 +1,21 @@
-"""Fenêtre principale PySide6 — correction auto expo / WB / HSL par photo.
+"""Fenêtre principale PySide6 — seeds explicites + correction auto par axe (espace rendu).
 
-Flux unifié (espace rendu, cf. core.autocorrect) :
+Flux (cf. CLAUDE.md / plan de refonte k-NN) :
 - **Analyse Catalogue** : index métadonnées (EXIF + develop) de toutes les photos.
-- Cases **[Exposition] [WB] [HSL]** : axes à corriger. Case **[Réf JPEG embarqué]** :
-  force le JPEG boîtier comme modèle (sinon : photos retouchées de la sélection si
-  présentes, repli JPEG boîtier).
-- **Aperçu** : mesure la sélection + calcule les corrections, **affiche sans appliquer**.
-- **Appliquer** : mesure + calcule + applique via le job `apply_adjustments`.
+- **Ajouter seeds** / **Supprimer seeds** : marque/démarque la sélection comme seeds
+  dans le cache SQLite (`is_seed`) — référence de style pour le matching k-NN.
+- **Analyser sélection** : mesure RAW source + JPEG boîtier + aperçu rendu (zone
+  nette), peuple le cache. Aucune planification ni application.
+- Case **[Réf = JPEG embarqué]** : force le JPEG boîtier comme cible (sinon : k-NN
+  sur les seeds les plus proches en analyse RAW).
+- **Apply Exposition / WB / HSL** : pour chaque axe, mesure (cache frais, l'aperçu
+  rendu n'est jamais lu en cache pour l'état courant — toujours redécodé) + calcule
+  la cible (embedded ou k-NN seeds) + **applique directement** dans Lightroom.
 
-La mesure tourne dans `AutoCorrectWorker` (QThread) : lecture RAW parallèle (JPEG boîtier
-+ as-shot) + rendu courant (aperçu Previews.lrdata / miniature plugin) → `autocorrect.plan`.
-Le pont plugin est requis pour connaître la sélection et pour appliquer.
+La mesure tourne dans `AutoCorrectWorker` (QThread) : RAW (demosaic GPU, zone
+nette) + JPEG boîtier + aperçu courant (Previews.lrdata / miniature plugin) →
+`core.autocorrect.plan` (sauf en mode `analyze_only`). Le pont plugin est requis
+pour connaître la sélection et pour appliquer.
 """
 
 from __future__ import annotations
@@ -27,56 +32,65 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core import seeds
+from ..core import cache as cachemod
 from ..server.job_queue import job_queue
 from ..server.models import JobResult, JobType
 from .autocorrect_worker import AutoCorrectResult, AutoCorrectWorker
 from .job_worker import JobWorker
+
+_AXIS_LABELS = {"expo": "Exposition", "wb": "WB", "hsl": "HSL"}
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Lr Automation — correction auto")
-        self.resize(680, 520)
+        self.resize(720, 560)
 
         self._worker: JobWorker | None = None
         self._check_worker: JobWorker | None = None
         self._auto_worker: AutoCorrectWorker | None = None
         self._apply_worker: JobWorker | None = None
-        # True si l'action en cours doit appliquer après planification (Appliquer vs Aperçu).
-        self._apply_after_plan = False
+        self._seed_worker: JobWorker | None = None
+        # Axe en cours (None = analyse seule) — pour le libellé du résultat.
+        self._pending_axis: str | None = None
+        self._pending_action: str | None = None  # "seed_add" | "seed_remove" | None
 
         self.bridge_label = QLabel()
         self.status_label = QLabel("Prêt. Sélectionnez des photos dans Lightroom.")
+        self.plan_summary_label = QLabel("")
+        self.plan_summary_label.setStyleSheet("font-weight: bold;")
 
         # Outils / diagnostic.
         self.test_btn = QPushButton("Test pont")
         self.analyze_catalog_btn = QPushButton("Analyse Catalogue")
 
-        # Axes à corriger + référence.
-        self.cb_expo = QCheckBox("Exposition")
-        self.cb_wb = QCheckBox("WB")
-        self.cb_hsl = QCheckBox("HSL")
-        for cb in (self.cb_expo, self.cb_wb, self.cb_hsl):
-            cb.setChecked(True)
+        # Seeds.
+        self.add_seeds_btn = QPushButton("Ajouter seeds")
+        self.remove_seeds_btn = QPushButton("Supprimer seeds")
+        self.analyze_selection_btn = QPushButton("Analyser sélection")
+
+        # Référence + actions par axe.
         self.cb_embedded = QCheckBox("Réf = JPEG embarqué")
         self.cb_embedded.setToolTip(
-            "Décoché : les photos déjà retouchées de la sélection servent de modèle ;\n"
-            "si aucune, le JPEG boîtier de chaque photo sert de référence.\n"
-            "Coché : force le JPEG boîtier comme modèle (recale sur l'appareil)."
+            "Décoché : cible = k-NN sur les seeds dont l'analyse RAW (zone nette) est\n"
+            "la plus proche (utilise leur aperçu déjà retouché comme référence de style).\n"
+            "Coché : force le JPEG boîtier comme cible (recale sur l'appareil)."
         )
-
-        # Actions.
-        self.preview_btn = QPushButton("Aperçu (sans appliquer)")
-        self.apply_btn = QPushButton("Appliquer à la sélection")
+        self.apply_expo_btn = QPushButton("Apply Exposition")
+        self.apply_wb_btn = QPushButton("Apply WB")
+        self.apply_hsl_btn = QPushButton("Apply HSL")
 
         self.photo_list = QListWidget()
 
         self.test_btn.clicked.connect(self._on_check)
         self.analyze_catalog_btn.clicked.connect(self._on_analyze_catalog)
-        self.preview_btn.clicked.connect(lambda: self._start_autocorrect(apply_after=False))
-        self.apply_btn.clicked.connect(lambda: self._start_autocorrect(apply_after=True))
+        self.add_seeds_btn.clicked.connect(lambda: self._start_seed_toggle(True))
+        self.remove_seeds_btn.clicked.connect(lambda: self._start_seed_toggle(False))
+        self.analyze_selection_btn.clicked.connect(self._start_analyze_selection)
+        self.apply_expo_btn.clicked.connect(lambda: self._start_apply_axis("expo"))
+        self.apply_wb_btn.clicked.connect(lambda: self._start_apply_axis("wb"))
+        self.apply_hsl_btn.clicked.connect(lambda: self._start_apply_axis("hsl"))
 
         layout = QVBoxLayout()
         layout.addWidget(self.bridge_label)
@@ -88,22 +102,23 @@ class MainWindow(QMainWindow):
         tools_row.addStretch()
         layout.addLayout(tools_row)
 
+        seeds_row = QHBoxLayout()
+        seeds_row.addWidget(self.add_seeds_btn)
+        seeds_row.addWidget(self.remove_seeds_btn)
+        seeds_row.addWidget(self.analyze_selection_btn)
+        seeds_row.addStretch()
+        layout.addLayout(seeds_row)
+
         axes_row = QHBoxLayout()
-        axes_row.addWidget(QLabel("Corriger :"))
-        axes_row.addWidget(self.cb_expo)
-        axes_row.addWidget(self.cb_wb)
-        axes_row.addWidget(self.cb_hsl)
-        axes_row.addSpacing(16)
         axes_row.addWidget(self.cb_embedded)
+        axes_row.addSpacing(16)
+        axes_row.addWidget(self.apply_expo_btn)
+        axes_row.addWidget(self.apply_wb_btn)
+        axes_row.addWidget(self.apply_hsl_btn)
         axes_row.addStretch()
         layout.addLayout(axes_row)
 
-        action_row = QHBoxLayout()
-        action_row.addWidget(self.preview_btn)
-        action_row.addWidget(self.apply_btn)
-        action_row.addStretch()
-        layout.addLayout(action_row)
-
+        layout.addWidget(self.plan_summary_label)
         layout.addWidget(self.photo_list)
 
         container = QWidget()
@@ -128,19 +143,12 @@ class MainWindow(QMainWindow):
                 "Modules externes > Démarrer / connecter l'application"
             )
 
-    def _selected_axes(self) -> frozenset[str]:
-        axes = set()
-        if self.cb_expo.isChecked():
-            axes.add("expo")
-        if self.cb_wb.isChecked():
-            axes.add("wb")
-        if self.cb_hsl.isChecked():
-            axes.add("hsl")
-        return frozenset(axes)
-
     def _set_actions_enabled(self, enabled: bool) -> None:
-        self.preview_btn.setEnabled(enabled)
-        self.apply_btn.setEnabled(enabled)
+        for btn in (
+            self.add_seeds_btn, self.remove_seeds_btn, self.analyze_selection_btn,
+            self.apply_expo_btn, self.apply_wb_btn, self.apply_hsl_btn,
+        ):
+            btn.setEnabled(enabled)
 
     # ------------------------------------------------------------------ #
     # Test pont
@@ -191,14 +199,22 @@ class MainWindow(QMainWindow):
         if not photos:
             self.status_label.setText("Catalogue vide ou aucune photo retournée.")
             return
-        seed_photos = [p for p in photos if seeds.is_seed(p.current_develop or {})]
+        catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
+        n_seeds = 0
+        if catalog_path:
+            try:
+                conn = cachemod.open_cache(catalog_path)
+                n_seeds = len(cachemod.list_seed_uuids(conn))
+                conn.close()
+            except Exception:
+                pass
         cameras: dict[str, int] = {}
         for p in photos:
             cam = p.exif.camera or "?"
             cameras[cam] = cameras.get(cam, 0) + 1
         self.photo_list.clear()
         self.photo_list.addItem(
-            f"Catalogue : {len(photos)} photo(s) — {len(seed_photos)} retouchée(s) (WB Custom)."
+            f"Catalogue : {len(photos)} photo(s) — {n_seeds} seed(s) marqué(s)."
         )
         for cam, n in sorted(cameras.items(), key=lambda kv: -kv[1]):
             self.photo_list.addItem(f"  {cam} : {n} photo(s)")
@@ -209,38 +225,118 @@ class MainWindow(QMainWindow):
         self.status_label.setText(f"Analyse Catalogue échouée : {message}")
 
     # ------------------------------------------------------------------ #
-    # Aperçu / Appliquer — récupère la sélection puis lance AutoCorrectWorker
+    # Ajouter / Supprimer seeds — marquage explicite en DB, pas de décodage pixel
     # ------------------------------------------------------------------ #
-    def _start_autocorrect(self, apply_after: bool) -> None:
+    def _start_seed_toggle(self, value: bool) -> None:
         if not job_queue.bridge_connected():
             self.status_label.setText("Pont inactif — démarrez l'application depuis Lightroom.")
             return
-        axes = self._selected_axes()
-        if not axes:
-            self.status_label.setText("Cochez au moins un axe (Exposition / WB / HSL).")
+        self._pending_action = "seed_add" if value else "seed_remove"
+        self._set_actions_enabled(False)
+        self.status_label.setText("Récupération de la sélection…")
+        self._seed_worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
+        self._seed_worker.finished_result.connect(
+            lambda res: self._on_selection_for_seed_toggle(res, value)
+        )
+        self._seed_worker.failed.connect(self._on_auto_failed)
+        self._seed_worker.start()
+
+    def _on_selection_for_seed_toggle(self, result: JobResult, value: bool) -> None:
+        self._set_actions_enabled(True)
+        if not result.photos:
+            self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
             return
-        self._apply_after_plan = apply_after
+        catalog_path = next((p.catalog_path for p in result.photos if p.catalog_path), None)
+        if not catalog_path:
+            self.status_label.setText("Aucun catalog_path reçu — impossible de localiser le cache.")
+            return
+        try:
+            conn = cachemod.open_cache(catalog_path)
+            for p in result.photos:
+                cachemod.put_picture(
+                    conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
+                    exif=(p.exif.model_dump() if p.exif else None),
+                    current_develop=p.current_develop or {},
+                )
+                cachemod.set_seed(conn, p.photo_id, value)
+            conn.close()
+        except Exception as exc:
+            self.status_label.setText(f"Marquage seed échoué : {exc}")
+            return
+        verb = "marquée(s) seed" if value else "retirée(s) des seeds"
+        self.status_label.setText(f"{len(result.photos)} photo(s) {verb}.")
+
+    # ------------------------------------------------------------------ #
+    # Analyser sélection — peuple le cache (RAW+JPEG boîtier+aperçu), n'applique rien
+    # ------------------------------------------------------------------ #
+    def _start_analyze_selection(self) -> None:
+        if not job_queue.bridge_connected():
+            self.status_label.setText("Pont inactif — démarrez l'application depuis Lightroom.")
+            return
+        self._pending_axis = None
         self._set_actions_enabled(False)
         self.photo_list.clear()
+        self.plan_summary_label.setText("")
         self.status_label.setText("Récupération de la sélection…")
         self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
-        self._worker.finished_result.connect(self._on_selection_for_auto)
+        self._worker.finished_result.connect(self._on_selection_for_analyze)
         self._worker.failed.connect(self._on_auto_failed)
         self._worker.start()
 
-    def _on_selection_for_auto(self, result: JobResult) -> None:
+    def _on_selection_for_analyze(self, result: JobResult) -> None:
         if not result.photos:
             self._set_actions_enabled(True)
             self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
             return
         n = len(result.photos)
+        self.status_label.setText(f"{n} photo(s) — analyse RAW + JPEG boîtier + aperçu…")
+        self._auto_worker = AutoCorrectWorker(result.photos, analyze_only=True)
+        self._auto_worker.progress.connect(self.status_label.setText)
+        self._auto_worker.finished_result.connect(self._on_analyze_done)
+        self._auto_worker.failed.connect(self._on_auto_failed)
+        self._auto_worker.start()
+
+    def _on_analyze_done(self, res: AutoCorrectResult) -> None:
+        self._set_actions_enabled(True)
+        self.photo_list.clear()
+        for note in res.notes:
+            self.photo_list.addItem(note)
         self.status_label.setText(
-            f"{n} photo(s) — lecture RAW + mesure du rendu (peut prendre du temps)…"
+            f"Analyse terminée — {res.n_measured} mesurée(s), {res.n_skipped} sans rendu."
+        )
+
+    # ------------------------------------------------------------------ #
+    # Apply Exposition / WB / HSL — mesure (aperçu toujours frais) + applique direct
+    # ------------------------------------------------------------------ #
+    def _start_apply_axis(self, axis: str) -> None:
+        if not job_queue.bridge_connected():
+            self.status_label.setText("Pont inactif — démarrez l'application depuis Lightroom.")
+            return
+        self._pending_axis = axis
+        self._set_actions_enabled(False)
+        self.photo_list.clear()
+        self.plan_summary_label.setText("")
+        self.status_label.setText("Récupération de la sélection…")
+        self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
+        self._worker.finished_result.connect(self._on_selection_for_apply)
+        self._worker.failed.connect(self._on_auto_failed)
+        self._worker.start()
+
+    def _on_selection_for_apply(self, result: JobResult) -> None:
+        if not result.photos:
+            self._set_actions_enabled(True)
+            self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
+            return
+        axis = self._pending_axis
+        n = len(result.photos)
+        self.status_label.setText(
+            f"{n} photo(s) — mesure {_AXIS_LABELS.get(axis, axis)} (peut prendre du temps)…"
         )
         self._auto_worker = AutoCorrectWorker(
             result.photos,
-            axes=self._selected_axes(),
+            axes=frozenset({axis}),
             forced_embedded=self.cb_embedded.isChecked(),
+            force_fresh_preview=True,
         )
         self._auto_worker.progress.connect(self.status_label.setText)
         self._auto_worker.finished_result.connect(self._on_plan_ready)
@@ -250,14 +346,13 @@ class MainWindow(QMainWindow):
     def _on_plan_ready(self, res: AutoCorrectResult) -> None:
         diag = res.diagnostics
         self.photo_list.clear()
-        self.photo_list.addItem(
-            f"Mode {diag.mode} — {diag.n_seeds} modèle(s), {diag.n_targets} cible(s), "
-            f"{res.n_measured} mesurée(s), {res.n_skipped} sans rendu."
-            + (f" Régime WB : {diag.regime}." if diag.regime else "")
-        )
-        for note in diag.notes:
-            self.photo_list.addItem(f"  • {note}")
-        # Détail par photo (10 premières).
+        if diag is not None:
+            self.plan_summary_label.setText(
+                f"Mode {diag.mode} — {diag.n_seeds} seed(s), {diag.n_targets} cible(s), "
+                f"{res.n_measured} mesurée(s), {res.n_skipped} sans rendu."
+            )
+            for note in diag.notes:
+                self.photo_list.addItem(f"  • {note}")
         for adj in res.adjustments[:10]:
             keys = ", ".join(f"{k}={v}" for k, v in adj.develop.items())
             self.photo_list.addItem(f"  {adj.photo_id[:8]} → {keys}")
@@ -266,20 +361,12 @@ class MainWindow(QMainWindow):
 
         if not res.adjustments:
             self._set_actions_enabled(True)
-            self.status_label.setText("Aucune correction nécessaire (ou rien à corriger).")
+            self.status_label.setText("Aucune correction nécessaire (ou aucune cible exploitable).")
             return
 
-        if not self._apply_after_plan:
-            self._set_actions_enabled(True)
-            self.status_label.setText(
-                f"Aperçu — {len(res.adjustments)} photo(s) seraient corrigées. "
-                f"« Appliquer » pour exécuter."
-            )
-            return
-
-        # Appliquer : soumettre le job apply_adjustments.
+        axis_label = _AXIS_LABELS.get(self._pending_axis, self._pending_axis)
         self.status_label.setText(
-            f"Application de {len(res.adjustments)} correction(s) dans Lightroom…"
+            f"Application {axis_label} — {len(res.adjustments)} photo(s) dans Lightroom…"
         )
         payload = {"adjustments": [a.model_dump() for a in res.adjustments]}
         self._apply_worker = JobWorker(JobType.APPLY_ADJUSTMENTS, payload, timeout=180.0)
@@ -291,12 +378,13 @@ class MainWindow(QMainWindow):
         self._set_actions_enabled(True)
         applied = result.applied if result.applied is not None else "?"
         total = result.total if result.total is not None else "?"
+        axis_label = _AXIS_LABELS.get(self._pending_axis, self._pending_axis)
         if result.status == "ok":
             self.status_label.setText(
-                f"Appliqué : {applied}/{total} photo(s) dans Lightroom — vérifiez le rendu."
+                f"{axis_label} appliqué : {applied}/{total} photo(s) — vérifiez le rendu."
             )
         else:
-            self.status_label.setText(f"Application : {applied}/{total} — {result.error}")
+            self.status_label.setText(f"{axis_label} : {applied}/{total} — {result.error}")
 
     def _on_auto_failed(self, message: str) -> None:
         self._set_actions_enabled(True)

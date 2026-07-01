@@ -5,18 +5,26 @@ Un fichier `LrAutomation_cache.db` est créé **dans le dossier du catalogue act
 calculs pixel : les opérations consultent d'abord le cache et ne re-décodent (GPU)
 que les éléments manquants ou dont le contenu a changé.
 
-Quatre tables, **clé commune `uuid`** (= `id_global` du catalogue Lr) :
+Cinq tables, **clé commune `uuid`** (= `id_global` du catalogue Lr) :
 
-| Table            | Source décodée            | Clé de fraîcheur (`*_hash`)        |
-|------------------|---------------------------|------------------------------------|
-| `LightroomPicture` | métadonnées catalogue   | `develop_hash` (réglages develop)  |
-| `SourceRAW`        | pixels RAW (.ARW)       | `raw_hash` (taille+mtime du RAW)   |
-| `InCameraJPEG`     | JPEG boîtier embarqué   | `jpeg_hash` (sha1 des octets)      |
-| `PreviewJPEG`      | aperçu rendu Lr         | `preview_hash` (sha1 des octets)   |
+| Table                | Source décodée              | Clé de fraîcheur (`hash_*`)        |
+|----------------------|-----------------------------|------------------------------------|
+| `LightroomPicture`   | métadonnées catalogue       | `hash_develop` (réglages develop)  |
+| `SourceRAW`          | pixels RAW (.ARW)           | `hash_raw` (taille+mtime du RAW)   |
+| `InCameraJPEG`       | JPEG boîtier embarqué       | `hash_jpeg` (sha1 des octets)      |
+| `PreviewJPEG`        | aperçu rendu Lr             | `hash_preview` (sha1 des octets)   |
+| `NeutralPreviewJPEG` | rendu neutre (As Shot/Exp0) | `hash_style` (sous-ensemble style) |
 
-Chaque table porte un `hash` propre : si le hash stocké == le hash courant, les
-scalaires sont réutilisés tels quels (zéro décode) ; sinon la ligne est recalculée
-et réécrite (`INSERT OR REPLACE`).
+**Nomenclature unifiée des colonnes** (on ignore la rétrocompatibilité) :
+famille en préfixe (`luma_`/`wb_`/`tone_`/`neutral_`/`hsl_`/`delta_`/`mask_`/
+`exif_`/`profile_`/`hash_`), **portée en suffixe** `_global`/`_sharp` (jamais nue).
+Les mesures existent en paire **global** (frame entier) + **sharp** (zone nette,
+`core.sharpness`) partout où c'est pertinent — le delta global↔sharp révèle
+contre-jour / cast fond≠sujet, et le global sert de repli si le masque net dégénère.
+
+Contrôle de version par `PRAGMA user_version` : si le schéma stocké ne correspond
+pas à `SCHEMA_VERSION`, toutes les tables sont **supprimées et recréées** (pas de
+migration ligne à ligne — le cache est reconstruit depuis les RAW).
 
 SQLite standard en lecture-écriture (WAL) — cohabite avec le `.lrcat` ouvert par
 Lightroom (fichier distinct, aucun verrou sur le catalogue).
@@ -37,6 +45,36 @@ from .pipeline import RenderAnalysis
 from .render_metrics import BandStats, NeutralStats, ToneStats
 
 CACHE_FILENAME = "LrAutomation_cache.db"
+
+# Version du **schéma** (structure des tables). Un changement de structure
+# déclenche un DROP+recreate via `PRAGMA user_version`.
+SCHEMA_VERSION = 3
+
+# Salée dans les hash de fraîcheur (`raw_signature`, `blob_hash`, `style_hash`) :
+# un changement d'algorithme de mesure (nouvelles paires global/sharp, deltas…)
+# doit invalider tout le contenu caché sans migration — bump quand le calcul change.
+ANALYSIS_VERSION = "v3-dual"
+
+# Sous-ensemble "style" des réglages develop : profil DCP + ProcessVersion + HSL 24 +
+# Color Grading. Sert de clé de fraîcheur du rendu neutre (`hash_style`) — un
+# changement de Temp/Tint/Exposure ne doit PAS invalider le NeutralPreview.
+_STYLE_KEYS = (
+    "CameraProfile", "ProcessVersion",
+    "HueAdjustmentRed", "HueAdjustmentOrange", "HueAdjustmentYellow",
+    "HueAdjustmentGreen", "HueAdjustmentAqua", "HueAdjustmentBlue",
+    "HueAdjustmentPurple", "HueAdjustmentMagenta",
+    "SaturationAdjustmentRed", "SaturationAdjustmentOrange", "SaturationAdjustmentYellow",
+    "SaturationAdjustmentGreen", "SaturationAdjustmentAqua", "SaturationAdjustmentBlue",
+    "SaturationAdjustmentPurple", "SaturationAdjustmentMagenta",
+    "LuminanceAdjustmentRed", "LuminanceAdjustmentOrange", "LuminanceAdjustmentYellow",
+    "LuminanceAdjustmentGreen", "LuminanceAdjustmentAqua", "LuminanceAdjustmentBlue",
+    "LuminanceAdjustmentPurple", "LuminanceAdjustmentMagenta",
+    "ColorGradeShadowHue", "ColorGradeShadowSat", "ColorGradeShadowLum",
+    "ColorGradeMidtoneHue", "ColorGradeMidtoneSat", "ColorGradeMidtoneLum",
+    "ColorGradeHighlightHue", "ColorGradeHighlightSat", "ColorGradeHighlightLum",
+    "ColorGradeGlobalHue", "ColorGradeGlobalSat", "ColorGradeGlobalLum",
+    "ColorGradeBlending", "ColorGradeBalance",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -60,56 +98,121 @@ def open_cache(catalog_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    _init_schema(conn)
+    _ensure_schema(conn)
     return conn
+
+
+_TABLES = (
+    "LightroomPicture", "SourceRAW", "InCameraJPEG", "PreviewJPEG", "NeutralPreviewJPEG",
+)
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Crée le schéma ; DROP+recreate si `user_version` ≠ `SCHEMA_VERSION`.
+
+    On abandonne la migration incrémentale : le cache étant intégralement
+    reconstruit depuis les RAW/JPEG, un changement de structure jette et recrée
+    les tables (bien plus simple et sûr qu'une suite d'`ALTER`).
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != SCHEMA_VERSION:
+        for t in _TABLES:
+            conn.execute(f"DROP TABLE IF EXISTS {t}")
+        _init_schema(conn)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.commit()
+    else:
+        _init_schema(conn)  # CREATE IF NOT EXISTS — no-op si déjà présent
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS LightroomPicture (
-            uuid            TEXT PRIMARY KEY,
-            path            TEXT,
-            catalog_path    TEXT,
-            camera          TEXT,
-            iso             INTEGER,
-            aperture        REAL,
-            shutter_speed   TEXT,
-            focal_length    REAL,
-            current_develop TEXT,     -- JSON
-            develop_hash    TEXT,
-            cached_at       REAL
+            uuid              TEXT PRIMARY KEY,
+            path              TEXT,
+            catalog_path      TEXT,
+            exif_camera       TEXT,
+            exif_iso          INTEGER,
+            exif_aperture     REAL,
+            exif_shutter      TEXT,
+            exif_focal_length REAL,
+            profile_capture   TEXT,      -- profil créatif boîtier (IN/SH/ST/VV2…)
+            profile_dcp       TEXT,      -- CameraProfile Lr, extrait à plat
+            develop_json      TEXT,      -- JSON snapshot develop courant
+            hash_develop      TEXT,
+            hash_style        TEXT,      -- sous-ensemble style (cf. _STYLE_KEYS)
+            is_seed           INTEGER DEFAULT 0,
+            cached_at         REAL
         );
 
         CREATE TABLE IF NOT EXISTS SourceRAW (
-            uuid               TEXT PRIMARY KEY,
-            raw_hash           TEXT,
-            asshot_rg          REAL,
-            asshot_bg          REAL,
-            mean_luma          REAL,
-            median_luma        REAL,
-            clipped_highlights REAL,
-            clipped_shadows    REAL,
-            grayworld_rg       REAL,
-            grayworld_bg       REAL,
-            cached_at          REAL
+            uuid                   TEXT PRIMARY KEY,
+            hash_raw               TEXT,
+            wb_asshot_rg           REAL,
+            wb_asshot_bg           REAL,
+            luma_mean_global       REAL,
+            luma_median_global     REAL,
+            luma_clip_hi_global    REAL,
+            luma_clip_lo_global    REAL,
+            luma_mean_sharp        REAL,
+            luma_median_sharp      REAL,
+            luma_clip_hi_sharp     REAL,
+            luma_clip_lo_sharp     REAL,
+            wb_grayworld_rg_global REAL,
+            wb_grayworld_bg_global REAL,
+            wb_grayworld_rg_sharp  REAL,
+            wb_grayworld_bg_sharp  REAL,
+            mask_sharp_frac        REAL,
+            ev100                  REAL,
+            profile_capture        TEXT,
+            tone_sharp             TEXT,  -- JSON ToneStats (zone nette)
+            hsl_sharp              TEXT,  -- JSON list[BandStats] (zone nette)
+            cached_at              REAL
         );
 
         CREATE TABLE IF NOT EXISTS InCameraJPEG (
-            uuid        TEXT PRIMARY KEY,
-            jpeg_hash   TEXT,
-            tone        TEXT,   -- JSON ToneStats
-            bands       TEXT,   -- JSON list[BandStats]
-            cached_at   REAL
+            uuid              TEXT PRIMARY KEY,
+            hash_jpeg         TEXT,
+            tone_sharp        TEXT,
+            neutral_sharp     TEXT,
+            hsl_sharp         TEXT,
+            tone_global       TEXT,
+            neutral_global    TEXT,
+            hsl_global        TEXT,
+            mask_sharp_frac   REAL,
+            profile_capture   TEXT,
+            delta_luma_median REAL,   -- vs SourceRAW.luma_median_sharp (même uuid)
+            delta_wb_cast_a   REAL,
+            delta_wb_cast_b   REAL,
+            delta_hsl         TEXT,   -- JSON list de deltas par bande
+            cached_at         REAL
         );
 
         CREATE TABLE IF NOT EXISTS PreviewJPEG (
-            uuid          TEXT PRIMARY KEY,
-            preview_hash  TEXT,
-            tone          TEXT, -- JSON ToneStats
-            neutral       TEXT, -- JSON NeutralStats
-            bands         TEXT, -- JSON list[BandStats]
-            cached_at     REAL
+            uuid            TEXT PRIMARY KEY,
+            hash_preview    TEXT,
+            tone_sharp      TEXT,
+            neutral_sharp   TEXT,
+            hsl_sharp       TEXT,
+            tone_global     TEXT,
+            neutral_global  TEXT,
+            hsl_global      TEXT,
+            mask_sharp_frac REAL,
+            cached_at       REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS NeutralPreviewJPEG (
+            uuid            TEXT PRIMARY KEY,
+            hash_style      TEXT,
+            tone_sharp      TEXT,
+            neutral_sharp   TEXT,
+            hsl_sharp       TEXT,
+            tone_global     TEXT,
+            neutral_global  TEXT,
+            hsl_global      TEXT,
+            mask_sharp_frac REAL,
+            cached_at       REAL
         );
         """
     )
@@ -128,14 +231,14 @@ def raw_signature(path: str | Path) -> str:
     p = Path(path)
     try:
         st = p.stat()
-        return f"{st.st_size}:{st.st_mtime_ns}"
+        return f"{st.st_size}:{st.st_mtime_ns}:{ANALYSIS_VERSION}"
     except OSError:
         return "0:0"
 
 
 def blob_hash(data: bytes) -> str:
     """sha1 des octets (JPEG boîtier / aperçu — petits → coût négligeable)."""
-    return hashlib.sha1(data).hexdigest()
+    return hashlib.sha1(data + ANALYSIS_VERSION.encode("utf-8")).hexdigest()
 
 
 def develop_hash(develop: dict[str, Any] | None) -> str:
@@ -144,31 +247,53 @@ def develop_hash(develop: dict[str, Any] | None) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def style_hash(develop: dict[str, Any] | None) -> str:
+    """Hash du sous-ensemble **style** des réglages (cf. `_STYLE_KEYS`).
+
+    Clé de fraîcheur du rendu neutre : ne change que si le profil DCP / HSL /
+    Color Grading change — insensible à Temp/Tint/Exposure (qu'on neutralise).
+    """
+    dev = develop or {}
+    subset = {k: dev[k] for k in _STYLE_KEYS if k in dev}
+    payload = json.dumps(subset, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1((payload + ANALYSIS_VERSION).encode("utf-8")).hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # (dé)sérialisation des dataclasses ↔ JSON
 # --------------------------------------------------------------------------- #
-def _tone_to_json(t: ToneStats) -> str:
-    return json.dumps(asdict(t))
+def _tone_to_json(t: ToneStats | None) -> str | None:
+    return json.dumps(asdict(t)) if t is not None else None
 
 
-def _tone_from_json(s: str) -> ToneStats:
-    return ToneStats(**json.loads(s))
+def _tone_from_json(s: str | None) -> ToneStats | None:
+    return ToneStats(**json.loads(s)) if s else None
 
 
-def _neutral_to_json(n: NeutralStats) -> str:
-    return json.dumps(asdict(n))
+def _neutral_to_json(n: NeutralStats | None) -> str | None:
+    return json.dumps(asdict(n)) if n is not None else None
 
 
-def _neutral_from_json(s: str) -> NeutralStats:
-    return NeutralStats(**json.loads(s))
+def _neutral_from_json(s: str | None) -> NeutralStats | None:
+    return NeutralStats(**json.loads(s)) if s else None
 
 
-def _bands_to_json(bands: list[BandStats]) -> str:
-    return json.dumps([asdict(b) for b in bands])
+def _bands_to_json(bands: list[BandStats] | None) -> str | None:
+    return json.dumps([asdict(b) for b in bands]) if bands is not None else None
 
 
-def _bands_from_json(s: str) -> list[BandStats]:
-    return [BandStats(**d) for d in json.loads(s)]
+def _bands_from_json(s: str | None) -> list[BandStats] | None:
+    return [BandStats(**d) for d in json.loads(s)] if s else None
+
+
+def _analysis_from_row(row: sqlite3.Row, scope: str) -> RenderAnalysis | None:
+    """Reconstruit une RenderAnalysis depuis les colonnes `tone_<scope>` etc."""
+    tone = _tone_from_json(row[f"tone_{scope}"])
+    neutral = _neutral_from_json(row[f"neutral_{scope}"])
+    bands = _bands_from_json(row[f"hsl_{scope}"])
+    if tone is None and neutral is None and bands is None:
+        return None
+    return RenderAnalysis(tone=tone, neutral=neutral, bands=bands)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,148 +307,342 @@ def put_picture(
     catalog_path: str | None,
     exif: dict[str, Any] | None,
     current_develop: dict[str, Any] | None,
+    profile_capture: str | None = None,
 ) -> None:
-    """Insère/MAJ la ligne d'ancrage (métadonnées + snapshot develop)."""
+    """Insère/MAJ la ligne d'ancrage (métadonnées + snapshot develop).
+
+    UPSERT (pas `INSERT OR REPLACE`) : préserve `is_seed`, sinon chaque réanalyse
+    écraserait le marquage seed avec la valeur par défaut. `profile_dcp` et
+    `hash_style` sont dérivés du snapshot develop.
+    """
     exif = exif or {}
+    dev = current_develop or {}
     conn.execute(
-        """INSERT OR REPLACE INTO LightroomPicture
-           (uuid, path, catalog_path, camera, iso, aperture, shutter_speed,
-            focal_length, current_develop, develop_hash, cached_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO LightroomPicture
+           (uuid, path, catalog_path, exif_camera, exif_iso, exif_aperture,
+            exif_shutter, exif_focal_length, profile_capture, profile_dcp,
+            develop_json, hash_develop, hash_style, cached_at, is_seed)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 0)
+           ON CONFLICT(uuid) DO UPDATE SET
+               path=excluded.path, catalog_path=excluded.catalog_path,
+               exif_camera=excluded.exif_camera, exif_iso=excluded.exif_iso,
+               exif_aperture=excluded.exif_aperture, exif_shutter=excluded.exif_shutter,
+               exif_focal_length=excluded.exif_focal_length,
+               profile_capture=COALESCE(excluded.profile_capture, LightroomPicture.profile_capture),
+               profile_dcp=excluded.profile_dcp, develop_json=excluded.develop_json,
+               hash_develop=excluded.hash_develop, hash_style=excluded.hash_style,
+               cached_at=excluded.cached_at""",
         (
             uuid, path, catalog_path, exif.get("camera"), exif.get("iso"),
             exif.get("aperture"), exif.get("shutter_speed"), exif.get("focal_length"),
-            json.dumps(current_develop or {}), develop_hash(current_develop), time.time(),
+            profile_capture, dev.get("CameraProfile"),
+            json.dumps(dev), develop_hash(dev), style_hash(dev), time.time(),
         ),
     )
     conn.commit()
 
 
 # --------------------------------------------------------------------------- #
-# SourceRAW (pixels RAW : expo + as-shot WB + gray-world)
+# Seeds — marquage explicite (remplace l'heuristique WhiteBalance=="Custom")
 # --------------------------------------------------------------------------- #
-def get_source_raw(
-    conn: sqlite3.Connection, uuid: str, raw_hash: str
-) -> Optional[dict[str, Any]]:
-    """Renvoie les scalaires RAW cachés si le `raw_hash` correspond, sinon None.
+def set_seed(conn: sqlite3.Connection, uuid: str, value: bool) -> None:
+    """Marque/démarque une photo comme seed. Crée la ligne d'ancrage si absente."""
+    conn.execute(
+        "INSERT INTO LightroomPicture (uuid, is_seed, cached_at) VALUES (?,?,?) "
+        "ON CONFLICT(uuid) DO UPDATE SET is_seed=excluded.is_seed",
+        (uuid, int(value), time.time()),
+    )
+    conn.commit()
 
-    `exposure` / `grayworld_*` valent None si la ligne ne porte que la WB as-shot
-    (écrite par l'autocorrect, qui ne décode pas les pixels RAW). L'analyse pixel
-    complète (`gpu_raw` via `analysis_worker`) renseigne tous les champs.
-    """
+
+def is_seed(conn: sqlite3.Connection, uuid: str) -> bool:
     row = conn.execute(
-        "SELECT * FROM SourceRAW WHERE uuid=? AND raw_hash=?", (uuid, raw_hash)
+        "SELECT is_seed FROM LightroomPicture WHERE uuid=?", (uuid,)
     ).fetchone()
+    return bool(row["is_seed"]) if row is not None else False
+
+
+def list_seed_uuids(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute("SELECT uuid FROM LightroomPicture WHERE is_seed=1").fetchall()
+    return [r["uuid"] for r in rows]
+
+
+def get_picture(conn: sqlite3.Connection, uuid: str) -> Optional[dict[str, Any]]:
+    """Ligne `LightroomPicture` (path, current_develop, is_seed…), sans contrôle de fraîcheur."""
+    row = conn.execute("SELECT * FROM LightroomPicture WHERE uuid=?", (uuid,)).fetchone()
     if row is None:
         return None
-    exposure = (
+    return {
+        "uuid": row["uuid"], "path": row["path"], "catalog_path": row["catalog_path"],
+        "current_develop": json.loads(row["develop_json"]) if row["develop_json"] else {},
+        "profile_capture": row["profile_capture"], "profile_dcp": row["profile_dcp"],
+        "hash_style": row["hash_style"], "is_seed": bool(row["is_seed"]),
+    }
+
+
+def get_source_raw_latest(conn: sqlite3.Connection, uuid: str) -> Optional[dict[str, Any]]:
+    """Dernière analyse RAW connue pour `uuid`, **sans vérifier le hash de fraîcheur**.
+
+    Utilisé pour les seeds (vecteur k-NN) : le RAW d'un seed change rarement après
+    son marquage, et exiger une réanalyse à chaque correspondance serait coûteux.
+    """
+    row = conn.execute(
+        "SELECT * FROM SourceRAW WHERE uuid=? ORDER BY cached_at DESC LIMIT 1", (uuid,)
+    ).fetchone()
+    return _source_raw_dict(row) if row is not None else None
+
+
+def get_preview_jpeg_latest(conn: sqlite3.Connection, uuid: str) -> Optional[RenderAnalysis]:
+    """Dernier aperçu rendu connu pour `uuid` (zone nette), sans vérifier le hash
+    de fraîcheur (référence de style d'un seed — cf. `get_source_raw_latest`)."""
+    row = conn.execute(
+        "SELECT * FROM PreviewJPEG WHERE uuid=? ORDER BY cached_at DESC LIMIT 1", (uuid,)
+    ).fetchone()
+    return _analysis_from_row(row, "sharp") if row is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# SourceRAW (pixels RAW : expo + as-shot WB + gray-world, global + zone nette)
+# --------------------------------------------------------------------------- #
+def _source_raw_dict(row: sqlite3.Row) -> dict[str, Any]:
+    """Mappe une ligne SourceRAW → dict consommateur.
+
+    Clés **stables** pour les consommateurs existants (`seed_match`, worker) :
+    `asshot_rg`/`asshot_bg`/`tone`/`bands`/`exposure`/`grayworld_rg`/`grayworld_bg`
+    (= mesures globales, comportement historique) + clés `*_sharp` neuves.
+    """
+    exposure_global = (
         ExposureStats(
-            row["mean_luma"], row["median_luma"],
-            row["clipped_highlights"], row["clipped_shadows"],
+            row["luma_mean_global"], row["luma_median_global"],
+            row["luma_clip_hi_global"], row["luma_clip_lo_global"],
         )
-        if row["mean_luma"] is not None
+        if row["luma_mean_global"] is not None
+        else None
+    )
+    exposure_sharp = (
+        ExposureStats(
+            row["luma_mean_sharp"], row["luma_median_sharp"],
+            row["luma_clip_hi_sharp"], row["luma_clip_lo_sharp"],
+        )
+        if row["luma_mean_sharp"] is not None
         else None
     )
     return {
-        "asshot_rg": row["asshot_rg"], "asshot_bg": row["asshot_bg"],
-        "exposure": exposure,
-        "grayworld_rg": row["grayworld_rg"], "grayworld_bg": row["grayworld_bg"],
+        "asshot_rg": row["wb_asshot_rg"], "asshot_bg": row["wb_asshot_bg"],
+        "exposure": exposure_global, "exposure_sharp": exposure_sharp,
+        "grayworld_rg": row["wb_grayworld_rg_global"], "grayworld_bg": row["wb_grayworld_bg_global"],
+        "grayworld_rg_sharp": row["wb_grayworld_rg_sharp"],
+        "grayworld_bg_sharp": row["wb_grayworld_bg_sharp"],
+        "mask_sharp_frac": row["mask_sharp_frac"], "ev100": row["ev100"],
+        "profile_capture": row["profile_capture"],
+        "tone": _tone_from_json(row["tone_sharp"]),
+        "bands": _bands_from_json(row["hsl_sharp"]),
     }
+
+
+def get_source_raw(
+    conn: sqlite3.Connection, uuid: str, hash_raw: str
+) -> Optional[dict[str, Any]]:
+    """Renvoie les scalaires RAW cachés si le `hash_raw` correspond, sinon None."""
+    row = conn.execute(
+        "SELECT * FROM SourceRAW WHERE uuid=? AND hash_raw=?", (uuid, hash_raw)
+    ).fetchone()
+    return _source_raw_dict(row) if row is not None else None
 
 
 def put_source_raw(
     conn: sqlite3.Connection,
     uuid: str,
-    raw_hash: str,
+    hash_raw: str,
     *,
     asshot_rg: float | None,
     asshot_bg: float | None,
-    exposure: ExposureStats | None = None,
-    grayworld_rg: float | None = None,
-    grayworld_bg: float | None = None,
+    exposure_global: ExposureStats | None = None,
+    exposure_sharp: ExposureStats | None = None,
+    grayworld_global: tuple[float, float] | None = None,
+    grayworld_sharp: tuple[float, float] | None = None,
+    mask_sharp_frac: float | None = None,
+    ev100: float | None = None,
+    profile_capture: str | None = None,
+    tone: ToneStats | None = None,
+    bands: list[BandStats] | None = None,
 ) -> None:
-    """Écrit la ligne SourceRAW. `exposure`/`grayworld_*` optionnels (autocorrect =
-    WB as-shot seule ; analysis = analyse pixel complète)."""
+    """Écrit la ligne SourceRAW (paires global + zone nette). Tous les champs de
+    mesure sont optionnels (l'autocorrect peut n'écrire que la WB as-shot)."""
+    gg = grayworld_global or (None, None)
+    gs = grayworld_sharp or (None, None)
     conn.execute(
         """INSERT OR REPLACE INTO SourceRAW
-           (uuid, raw_hash, asshot_rg, asshot_bg, mean_luma, median_luma,
-            clipped_highlights, clipped_shadows, grayworld_rg, grayworld_bg, cached_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+           (uuid, hash_raw, wb_asshot_rg, wb_asshot_bg,
+            luma_mean_global, luma_median_global, luma_clip_hi_global, luma_clip_lo_global,
+            luma_mean_sharp, luma_median_sharp, luma_clip_hi_sharp, luma_clip_lo_sharp,
+            wb_grayworld_rg_global, wb_grayworld_bg_global,
+            wb_grayworld_rg_sharp, wb_grayworld_bg_sharp,
+            mask_sharp_frac, ev100, profile_capture, tone_sharp, hsl_sharp, cached_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            uuid, raw_hash, asshot_rg, asshot_bg,
-            exposure.mean_luma if exposure else None,
-            exposure.median_luma if exposure else None,
-            exposure.clipped_highlights if exposure else None,
-            exposure.clipped_shadows if exposure else None,
-            grayworld_rg, grayworld_bg, time.time(),
+            uuid, hash_raw, asshot_rg, asshot_bg,
+            exposure_global.mean_luma if exposure_global else None,
+            exposure_global.median_luma if exposure_global else None,
+            exposure_global.clipped_highlights if exposure_global else None,
+            exposure_global.clipped_shadows if exposure_global else None,
+            exposure_sharp.mean_luma if exposure_sharp else None,
+            exposure_sharp.median_luma if exposure_sharp else None,
+            exposure_sharp.clipped_highlights if exposure_sharp else None,
+            exposure_sharp.clipped_shadows if exposure_sharp else None,
+            gg[0], gg[1], gs[0], gs[1],
+            mask_sharp_frac, ev100, profile_capture,
+            _tone_to_json(tone), _bands_to_json(bands), time.time(),
         ),
     )
     conn.commit()
 
 
 # --------------------------------------------------------------------------- #
-# InCameraJPEG (JPEG boîtier : tone + bandes)
+# InCameraJPEG (JPEG boîtier : tone/neutral/bandes global + sharp + deltas vs RAW)
 # --------------------------------------------------------------------------- #
+def _delta_bands_to_json(deltas: list[dict[str, Any]] | None) -> str | None:
+    return json.dumps(deltas) if deltas is not None else None
+
+
 def get_in_camera_jpeg(
-    conn: sqlite3.Connection, uuid: str, jpeg_hash: str
-) -> Optional[tuple[ToneStats, list[BandStats]]]:
+    conn: sqlite3.Connection, uuid: str, hash_jpeg: str
+) -> Optional[dict[str, Any]]:
+    """Ligne InCameraJPEG cachée si `hash_jpeg` correspond, sinon None.
+
+    Retourne un dict : `sharp`/`global` (RenderAnalysis), deltas, `mask_sharp_frac`,
+    `profile_capture`. La clé `tone`/`bands` (zone nette) est aussi exposée pour les
+    consommateurs qui n'utilisent que la cible embedded.
+    """
     row = conn.execute(
-        "SELECT tone, bands FROM InCameraJPEG WHERE uuid=? AND jpeg_hash=?",
-        (uuid, jpeg_hash),
+        "SELECT * FROM InCameraJPEG WHERE uuid=? AND hash_jpeg=?", (uuid, hash_jpeg)
     ).fetchone()
     if row is None:
         return None
-    return _tone_from_json(row["tone"]), _bands_from_json(row["bands"])
+    sharp = _analysis_from_row(row, "sharp")
+    return {
+        "sharp": sharp,
+        "global": _analysis_from_row(row, "global"),
+        "tone": sharp.tone if sharp else None,
+        "bands": sharp.bands if sharp else None,
+        "mask_sharp_frac": row["mask_sharp_frac"],
+        "profile_capture": row["profile_capture"],
+        "delta_luma_median": row["delta_luma_median"],
+        "delta_wb_cast_a": row["delta_wb_cast_a"],
+        "delta_wb_cast_b": row["delta_wb_cast_b"],
+        "delta_hsl": json.loads(row["delta_hsl"]) if row["delta_hsl"] else None,
+    }
 
 
 def put_in_camera_jpeg(
     conn: sqlite3.Connection,
     uuid: str,
-    jpeg_hash: str,
+    hash_jpeg: str,
     *,
-    tone: ToneStats,
-    bands: list[BandStats],
+    sharp: RenderAnalysis | None,
+    glob: RenderAnalysis | None = None,
+    mask_sharp_frac: float | None = None,
+    profile_capture: str | None = None,
+    delta_luma_median: float | None = None,
+    delta_wb_cast_a: float | None = None,
+    delta_wb_cast_b: float | None = None,
+    delta_hsl: list[dict[str, Any]] | None = None,
 ) -> None:
     conn.execute(
-        """INSERT OR REPLACE INTO InCameraJPEG (uuid, jpeg_hash, tone, bands, cached_at)
-           VALUES (?,?,?,?,?)""",
-        (uuid, jpeg_hash, _tone_to_json(tone), _bands_to_json(bands), time.time()),
+        """INSERT OR REPLACE INTO InCameraJPEG
+           (uuid, hash_jpeg, tone_sharp, neutral_sharp, hsl_sharp,
+            tone_global, neutral_global, hsl_global, mask_sharp_frac, profile_capture,
+            delta_luma_median, delta_wb_cast_a, delta_wb_cast_b, delta_hsl, cached_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            uuid, hash_jpeg,
+            _tone_to_json(sharp.tone) if sharp else None,
+            _neutral_to_json(sharp.neutral) if sharp else None,
+            _bands_to_json(sharp.bands) if sharp else None,
+            _tone_to_json(glob.tone) if glob else None,
+            _neutral_to_json(glob.neutral) if glob else None,
+            _bands_to_json(glob.bands) if glob else None,
+            mask_sharp_frac, profile_capture,
+            delta_luma_median, delta_wb_cast_a, delta_wb_cast_b,
+            _delta_bands_to_json(delta_hsl), time.time(),
+        ),
     )
     conn.commit()
 
 
 # --------------------------------------------------------------------------- #
-# PreviewJPEG (aperçu rendu : analyse complète tone+neutral+bandes)
+# PreviewJPEG / NeutralPreviewJPEG (rendus : analyse complète global + sharp)
 # --------------------------------------------------------------------------- #
-def get_preview_jpeg(
-    conn: sqlite3.Connection, uuid: str, preview_hash: str
-) -> Optional[RenderAnalysis]:
-    row = conn.execute(
-        "SELECT tone, neutral, bands FROM PreviewJPEG WHERE uuid=? AND preview_hash=?",
-        (uuid, preview_hash),
-    ).fetchone()
-    if row is None:
-        return None
-    return RenderAnalysis(
-        tone=_tone_from_json(row["tone"]),
-        neutral=_neutral_from_json(row["neutral"]),
-        bands=_bands_from_json(row["bands"]),
+def _put_render_dual(
+    conn: sqlite3.Connection,
+    table: str,
+    uuid: str,
+    key_col: str,
+    key_val: str,
+    sharp: RenderAnalysis | None,
+    glob: RenderAnalysis | None,
+    mask_sharp_frac: float | None,
+) -> None:
+    conn.execute(
+        f"""INSERT OR REPLACE INTO {table}
+            (uuid, {key_col}, tone_sharp, neutral_sharp, hsl_sharp,
+             tone_global, neutral_global, hsl_global, mask_sharp_frac, cached_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            uuid, key_val,
+            _tone_to_json(sharp.tone) if sharp else None,
+            _neutral_to_json(sharp.neutral) if sharp else None,
+            _bands_to_json(sharp.bands) if sharp else None,
+            _tone_to_json(glob.tone) if glob else None,
+            _neutral_to_json(glob.neutral) if glob else None,
+            _bands_to_json(glob.bands) if glob else None,
+            mask_sharp_frac, time.time(),
+        ),
     )
+    conn.commit()
+
+
+def get_preview_jpeg(
+    conn: sqlite3.Connection, uuid: str, hash_preview: str
+) -> Optional[RenderAnalysis]:
+    """Aperçu rendu (zone nette) si `hash_preview` correspond, sinon None."""
+    row = conn.execute(
+        "SELECT * FROM PreviewJPEG WHERE uuid=? AND hash_preview=?", (uuid, hash_preview)
+    ).fetchone()
+    return _analysis_from_row(row, "sharp") if row is not None else None
 
 
 def put_preview_jpeg(
     conn: sqlite3.Connection,
     uuid: str,
-    preview_hash: str,
+    hash_preview: str,
     *,
-    analysis: RenderAnalysis,
+    sharp: RenderAnalysis,
+    glob: RenderAnalysis | None = None,
+    mask_sharp_frac: float | None = None,
 ) -> None:
-    conn.execute(
-        """INSERT OR REPLACE INTO PreviewJPEG
-           (uuid, preview_hash, tone, neutral, bands, cached_at) VALUES (?,?,?,?,?,?)""",
-        (
-            uuid, preview_hash, _tone_to_json(analysis.tone),
-            _neutral_to_json(analysis.neutral), _bands_to_json(analysis.bands), time.time(),
-        ),
-    )
-    conn.commit()
+    _put_render_dual(conn, "PreviewJPEG", uuid, "hash_preview", hash_preview,
+                     sharp, glob, mask_sharp_frac)
+
+
+def get_neutral_preview(
+    conn: sqlite3.Connection, uuid: str, hash_style: str
+) -> Optional[RenderAnalysis]:
+    """Rendu neutre (WB As Shot / Exp 0, zone nette) si `hash_style` correspond."""
+    row = conn.execute(
+        "SELECT * FROM NeutralPreviewJPEG WHERE uuid=? AND hash_style=?", (uuid, hash_style)
+    ).fetchone()
+    return _analysis_from_row(row, "sharp") if row is not None else None
+
+
+def put_neutral_preview(
+    conn: sqlite3.Connection,
+    uuid: str,
+    hash_style: str,
+    *,
+    sharp: RenderAnalysis,
+    glob: RenderAnalysis | None = None,
+    mask_sharp_frac: float | None = None,
+) -> None:
+    _put_render_dual(conn, "NeutralPreviewJPEG", uuid, "hash_style", hash_style,
+                     sharp, glob, mask_sharp_frac)

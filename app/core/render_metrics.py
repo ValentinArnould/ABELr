@@ -104,21 +104,26 @@ class ToneStats:
     tonal_frac: float
 
 
-def tone_stats(rgb_u8: np.ndarray, lab: np.ndarray | None = None) -> ToneStats:
+def tone_stats(
+    rgb_u8: np.ndarray, lab: np.ndarray | None = None, mask: np.ndarray | None = None
+) -> ToneStats:
     """Clarté perçue robuste d'un RGB uint8 sRGB rendu.
 
     Exclut les hautes lumières écrêtées (ciel, spéculaire) et les ombres mortes, qui
     ne reflètent pas le niveau d'exposition voulu, puis statistiques sur le reste.
-    `lab` peut être fourni pour éviter une reconversion (sinon calculé).
+    `lab` peut être fourni pour éviter une reconversion (sinon calculé). `mask`
+    (HxW bool, ex. zone nette `sharpness.sharp_mask`) restreint en plus les
+    pixels retenus si fourni.
     """
     if lab is None:
         lab = srgb_u8_to_lab(rgb_u8)
     lstar = lab[..., 0]
-    total = lstar.size
 
     clipped_hi_mask = (rgb_u8 >= _HIGHLIGHT_U8).any(axis=-1)
     clipped_lo_mask = lstar <= _SHADOW_L
     tonal = ~clipped_hi_mask & ~clipped_lo_mask
+    if mask is not None:
+        tonal &= mask
 
     vals = lstar[tonal]
     if vals.size == 0:  # rendu entièrement écrêté : repli sur tout
@@ -166,26 +171,30 @@ def neutral_stats(
     chroma_max: float = _NEUTRAL_CHROMA,
     l_min: float = _NEUTRAL_L_MIN,
     l_max: float = _NEUTRAL_L_MAX,
+    mask: np.ndarray | None = None,
 ) -> NeutralStats:
     """Mesure le cast résiduel **sur les neutres seulement**.
 
     Ne fait **jamais** de gray-world global (contaminé par le contenu — impasse
     prouvée n=1142). Le caller décide via `neutral_frac` si le raffinement WB est
-    fiable ; sinon il garde la prédiction seed.
+    fiable ; sinon il garde la prédiction seed. `mask` (HxW bool, ex. zone nette)
+    restreint en plus les pixels retenus si fourni.
     """
     lstar = lab[..., 0]
     chroma = np.hypot(lab[..., 1], lab[..., 2])
-    mask = (chroma < chroma_max) & (lstar >= l_min) & (lstar <= l_max)
-    n = int(mask.sum())
+    neutral_mask = (chroma < chroma_max) & (lstar >= l_min) & (lstar <= l_max)
+    if mask is not None:
+        neutral_mask &= mask
+    n = int(neutral_mask.sum())
     if n == 0:
         return NeutralStats(0.0, 0.0, 0.0, 0.0, 0)
-    a = lab[..., 1][mask]
-    b = lab[..., 2][mask]
+    a = lab[..., 1][neutral_mask]
+    b = lab[..., 2][neutral_mask]
     return NeutralStats(
         a_bias=float(np.median(a)),
         b_bias=float(np.median(b)),
         chroma=float(np.median(np.hypot(a, b))),
-        neutral_frac=float(mask.mean()),
+        neutral_frac=float(neutral_mask.mean()),
         n_neutral=n,
     )
 
@@ -256,9 +265,12 @@ def band_stats(
     rgb_u8: np.ndarray,
     lab: np.ndarray | None = None,
     min_chroma: float = _NEUTRAL_CHROMA,
+    mask: np.ndarray | None = None,
 ) -> list[BandStats]:
     """Stats par bande HSL. Les pixels quasi-neutres (C* < `min_chroma`) sont exclus
-    (la teinte d'un gris n'a pas de sens). Renvoie 8 `BandStats` (bandes vides → frac=0).
+    (la teinte d'un gris n'a pas de sens). `mask` (HxW bool, ex. zone nette)
+    restreint en plus les pixels retenus si fourni. Renvoie 8 `BandStats` (bandes
+    vides → frac=0).
     """
     if lab is None:
         lab = srgb_u8_to_lab(rgb_u8)
@@ -267,6 +279,8 @@ def band_stats(
     lstar = lab[..., 0]
 
     colored = chroma >= min_chroma
+    if mask is not None:
+        colored &= mask
     band_idx = _nearest_band(hue)
     total = hue.size
 

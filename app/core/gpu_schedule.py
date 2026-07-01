@@ -25,7 +25,7 @@ import torch
 from . import embedded_jpeg, gpu, gpu_jpeg, gpu_raw, render_metrics_gpu
 from .embedded_jpeg import RawReference
 from .gpu_raw import RawGpuResult
-from .pipeline import RenderAnalysis
+from .pipeline import RenderAnalysisDual
 
 Progress = Optional[Callable[[int, int], None]]
 
@@ -104,11 +104,17 @@ def process_embedded_batch(
         dec_by_pos = dict(zip(blob_pos, decoded))
         for i, (path, ex_) in enumerate(zip(group_paths, group_ex)):
             tone = bands = None
+            sharp = glob = None
+            mask_frac = None
             chw = dec_by_pos.get(i)
             if chw is not None:
-                ra = render_metrics_gpu.analyze_rendered_gpu(chw)
-                tone, bands = ra.tone, ra.bands
-            out[path] = RawReference(tone, bands, ex_.asshot_rg, ex_.asshot_bg)
+                dual = render_metrics_gpu.analyze_rendered_gpu_dual(chw)
+                sharp, glob, mask_frac = dual.sharp, dual.glob, dual.mask_sharp_frac
+                tone, bands = sharp.tone, sharp.bands
+            out[path] = RawReference(
+                tone, bands, ex_.asshot_rg, ex_.asshot_bg,
+                sharp=sharp, glob=glob, mask_sharp_frac=mask_frac,
+            )
             done += 1
             if progress:
                 progress(done, len(paths))
@@ -121,10 +127,13 @@ def process_embedded_batch(
 # --------------------------------------------------------------------------- #
 def analyze_render_blobs(
     items: list[tuple[str, bytes]], progress: Progress = None
-) -> dict[str, Optional[RenderAnalysis]]:
-    """Analyse une liste (clé, octets JPEG rendu) sur GPU. {clé: RenderAnalysis|None}."""
+) -> dict[str, Optional[RenderAnalysisDual]]:
+    """Analyse une liste (clé, octets JPEG rendu) sur GPU. {clé: RenderAnalysisDual|None}.
+
+    Retourne la paire global + zone nette (le caller utilise `.sharp` pour la mesure
+    d'état courant et stocke la paire complète dans le cache)."""
     gpu.require_cuda()
-    out: dict[str, Optional[RenderAnalysis]] = {}
+    out: dict[str, Optional[RenderAnalysisDual]] = {}
     if not items:
         return out
     done = 0
@@ -132,7 +141,7 @@ def analyze_render_blobs(
     for group in _chunks(items, chunk):
         decoded = gpu_jpeg.decode_blobs([blob for _, blob in group])
         for (key, _blob), chw in zip(group, decoded):
-            out[key] = render_metrics_gpu.analyze_rendered_gpu(chw) if chw is not None else None
+            out[key] = render_metrics_gpu.analyze_rendered_gpu_dual(chw) if chw is not None else None
             done += 1
             if progress:
                 progress(done, len(items))

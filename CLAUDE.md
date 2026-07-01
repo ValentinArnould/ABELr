@@ -94,10 +94,10 @@ Lr_automation/
     │   ├── job_queue.py           # Queue thread-safe, heartbeat du pont, résultats
     │   └── models.py              # Modèles Pydantic : Job, JobResult, PhotoResult, ExifData…
     ├── gui/
-    │   ├── main_window.py         # Fenêtre PySide6 : check, analyse, calibrer WB + appliquer, pont
+    │   ├── main_window.py         # Fenêtre PySide6 : seeds (ajouter/supprimer), analyser, apply par axe, pont
     │   ├── job_worker.py          # QThread : soumet un job, attend le résultat du plugin
     │   ├── analysis_worker.py     # QThread : décode + analyse chaque photo (RAW → ProPhoto linéaire)
-    │   ├── calibrate_worker.py    # QThread : seeds → calibrate → regime → plan_adjustments
+    │   ├── autocorrect_worker.py  # QThread : RAW+JPEG boîtier+aperçu (zone nette) → cache → autocorrect.plan
     │   ├── photo_panel.py         # Aperçu / liste photos — stub réservé
     │   └── analysis_panel.py      # Histogrammes / outliers WB — stub réservé
     ├── core/
@@ -107,16 +107,22 @@ Lr_automation/
     │   ├── analysis.py            # Métriques exposition (Y) + balance des blancs (gray-world), en linéaire
     │   ├── catalog.py             # Localise .lrcat + bundles .lrdata, ouvre les SQLite en lecture seule
     │   ├── previews.py            # Résout id_global → fichiers preview ; aperçu rendu (verif) + Smart Preview (inspection)
-    │   ├── wb_model.py            # Modèle WB : Temp = pente_boîtier·(r/g as-shot) + intercept seeds
-    │   ├── seeds.py               # Collecte seeds (WB Custom) + planifie les corrections WB/expo
-    │   ├── regime.py              # Détecte régime physique (auto) vs artistique (repli manuel)
+    │   ├── sharpness.py           # Masque « zone nette » (Laplacien, top 25%) CPU+GPU — restreint les histogrammes
+    │   ├── seed_match.py          # k-NN sur seeds (analyse RAW zone nette) → cible Temp/Tint/tone/bandes
+    │   ├── exposure.py            # Espace rendu : ΔEV depuis L* courant → L* cible (embedded ou seed_match)
+    │   ├── hsl.py                 # Deltas HSL par bande vs cible (embedded ou seed_match), réponse calibrée
+    │   ├── autocorrect.py         # Orchestration expo+WB+HSL par photo, modes seeds/embedded
     │   ├── adjustments.py         # Helper de formatage du dict develop (PascalCase SDK)
     │   ├── gpu.py                 # Contexte CUDA strict, budget VRAM, pool de streams
-    │   ├── gpu_raw.py             # RAW bayer → GPU : demosaic + WB + matrice → ProPhoto + stats
+    │   ├── gpu_raw.py             # RAW bayer → GPU : demosaic + WB + matrice → ProPhoto + stats + tone/bandes zone nette
     │   ├── gpu_jpeg.py            # Décodage JPEG sur GPU (nvJPEG) + extraction flux JPEG
     │   ├── gpu_schedule.py        # Scheduler VRAM-aware : unpack CPU borné → vagues GPU
-    │   ├── render_metrics_gpu.py  # Portage torch CUDA de render_metrics (tone/neutral/bandes)
-    │   └── cache.py               # Cache SQLite (4 tables, clé uuid+hash) dans le dossier catalogue
+    │   ├── render_metrics_gpu.py  # Portage torch CUDA de render_metrics (tone/neutral/bandes, masque zone nette)
+    │   └── cache.py               # Cache SQLite (4 tables, clé uuid+hash) + flag is_seed, dans le dossier catalogue
+    │
+    │   (`wb_model.py`/`regime.py` : conservés mais déréférencés du chemin live — gardés
+    │    pour `tools/validate_wb_seeds.py`/`cross_catalog_wb.py`/`seed_curve.py`, remplacés
+    │    côté GUI par `seed_match.py`, cf. Backlog)
     └── tools/                     # Scripts hors-app : mock, vérité terrain, recherche/validation
         ├── mock_plugin.py         # Mock du plugin : simule polling + résultats (tests sans Lr)
         ├── analyze_ground_truth.py# Vérité terrain : RAW → réglages develop → JPEG final (export CSV)

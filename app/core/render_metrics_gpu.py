@@ -16,7 +16,7 @@ from __future__ import annotations
 import torch
 
 from . import render_metrics as rm
-from .pipeline import RenderAnalysis
+from .pipeline import RenderAnalysis, RenderAnalysisDual
 from .render_metrics import BandStats, NeutralStats, ToneStats
 
 _DEV = "cuda"
@@ -112,11 +112,15 @@ def _hsv_hue_sat(hwc_u8: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 # --------------------------------------------------------------------------- #
 # 1. Tone (exposition L*)
 # --------------------------------------------------------------------------- #
-def tone_stats(hwc_u8: torch.Tensor, lab: torch.Tensor) -> ToneStats:
+def tone_stats(
+    hwc_u8: torch.Tensor, lab: torch.Tensor, mask: torch.Tensor | None = None
+) -> ToneStats:
     lstar = lab[..., 0]
     clipped_hi_mask = (hwc_u8 >= _HIGHLIGHT_U8).any(dim=-1)
     clipped_lo_mask = lstar <= _SHADOW_L
     tonal = (~clipped_hi_mask) & (~clipped_lo_mask)
+    if mask is not None:
+        tonal &= mask
 
     vals = lstar[tonal]
     if vals.numel() == 0:
@@ -135,20 +139,22 @@ def tone_stats(hwc_u8: torch.Tensor, lab: torch.Tensor) -> ToneStats:
 # --------------------------------------------------------------------------- #
 # 2. Neutral (cast WB sur quasi-neutres)
 # --------------------------------------------------------------------------- #
-def neutral_stats(lab: torch.Tensor) -> NeutralStats:
+def neutral_stats(lab: torch.Tensor, mask: torch.Tensor | None = None) -> NeutralStats:
     lstar = lab[..., 0]
     chroma = torch.hypot(lab[..., 1], lab[..., 2])
-    mask = (chroma < _NEUTRAL_CHROMA) & (lstar >= _NEUTRAL_L_MIN) & (lstar <= _NEUTRAL_L_MAX)
-    n = int(mask.sum())
+    neutral_mask = (chroma < _NEUTRAL_CHROMA) & (lstar >= _NEUTRAL_L_MIN) & (lstar <= _NEUTRAL_L_MAX)
+    if mask is not None:
+        neutral_mask &= mask
+    n = int(neutral_mask.sum())
     if n == 0:
         return NeutralStats(0.0, 0.0, 0.0, 0.0, 0)
-    a = lab[..., 1][mask]
-    b = lab[..., 2][mask]
+    a = lab[..., 1][neutral_mask]
+    b = lab[..., 2][neutral_mask]
     return NeutralStats(
         a_bias=_q(a, 0.5),
         b_bias=_q(b, 0.5),
         chroma=_q(torch.hypot(a, b), 0.5),
-        neutral_frac=float(mask.float().mean()),
+        neutral_frac=float(neutral_mask.float().mean()),
         n_neutral=n,
     )
 
@@ -156,12 +162,16 @@ def neutral_stats(lab: torch.Tensor) -> NeutralStats:
 # --------------------------------------------------------------------------- #
 # 3. Bandes HSL
 # --------------------------------------------------------------------------- #
-def band_stats(hwc_u8: torch.Tensor, lab: torch.Tensor) -> list[BandStats]:
+def band_stats(
+    hwc_u8: torch.Tensor, lab: torch.Tensor, mask: torch.Tensor | None = None
+) -> list[BandStats]:
     hue, sat = _hsv_hue_sat(hwc_u8)
     chroma = torch.hypot(lab[..., 1], lab[..., 2])
     lstar = lab[..., 0]
 
     colored = chroma >= _NEUTRAL_CHROMA
+    if mask is not None:
+        colored &= mask
     diff = (hue.unsqueeze(-1) - _BAND_CENTERS).abs()
     circ = torch.minimum(diff, 360.0 - diff)
     band_idx = circ.argmin(dim=-1)
@@ -193,11 +203,43 @@ def band_stats(hwc_u8: torch.Tensor, lab: torch.Tensor) -> list[BandStats]:
 # Composition (équivalent GPU de pipeline.analyze_rendered)
 # --------------------------------------------------------------------------- #
 def analyze_rendered_gpu(chw_u8: torch.Tensor) -> RenderAnalysis:
-    """Analyse un rendu décodé sur GPU (uint8 CHW) en une seule passe Lab CUDA."""
+    """Analyse un rendu décodé sur GPU (uint8 CHW) en une seule passe Lab CUDA.
+
+    Restreint tone/neutral/bandes à la **zone nette** (top 25% le plus net,
+    `sharpness.sharp_mask_gpu` sur L*) — exclut le flou de bokeh/arrière-plan
+    de l'histogramme mesuré.
+    """
+    from . import sharpness
+
     hwc = _to_hwc_u8(chw_u8)
     lab = _srgb_u8_to_lab(hwc)
+    mask = sharpness.sharp_mask_gpu(lab[..., 0])
     return RenderAnalysis(
-        tone=tone_stats(hwc, lab),
-        neutral=neutral_stats(lab),
-        bands=band_stats(hwc, lab),
+        tone=tone_stats(hwc, lab, mask=mask),
+        neutral=neutral_stats(lab, mask=mask),
+        bands=band_stats(hwc, lab, mask=mask),
     )
+
+
+def analyze_rendered_gpu_dual(chw_u8: torch.Tensor) -> RenderAnalysisDual:
+    """Équivalent GPU de `pipeline.analyze_rendered_dual` : global + zone nette.
+
+    Une seule conversion Lab CUDA + une seule carte de netteté, partagées entre les
+    deux échelles (global = `mask=None`, sharp = masque net).
+    """
+    from . import sharpness
+
+    hwc = _to_hwc_u8(chw_u8)
+    lab = _srgb_u8_to_lab(hwc)
+    mask = sharpness.sharp_mask_gpu(lab[..., 0])
+    glob = RenderAnalysis(
+        tone=tone_stats(hwc, lab, mask=None),
+        neutral=neutral_stats(lab, mask=None),
+        bands=band_stats(hwc, lab, mask=None),
+    )
+    sharp = RenderAnalysis(
+        tone=tone_stats(hwc, lab, mask=mask),
+        neutral=neutral_stats(lab, mask=mask),
+        bands=band_stats(hwc, lab, mask=mask),
+    )
+    return RenderAnalysisDual(sharp=sharp, glob=glob, mask_sharp_frac=float(mask.float().mean()))

@@ -99,8 +99,11 @@ class AnalysisWorker(QThread):
                     cachemod.put_source_raw(
                         conn, photo.photo_id, sig,
                         asshot_rg=res.asshot_rg, asshot_bg=res.asshot_bg,
-                        exposure=res.exposure,
-                        grayworld_rg=res.grayworld_rg, grayworld_bg=res.grayworld_bg,
+                        exposure_global=res.exposure, exposure_sharp=res.exposure_sharp,
+                        grayworld_global=(res.grayworld_rg, res.grayworld_bg),
+                        grayworld_sharp=(res.grayworld_rg_sharp, res.grayworld_bg_sharp),
+                        mask_sharp_frac=res.mask_sharp_frac,
+                        tone=res.tone, bands=res.bands,
                     )
                 except Exception:
                     pass

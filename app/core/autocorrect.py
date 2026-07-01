@@ -1,32 +1,36 @@
 """Orchestration de la correction automatique par photo (exposition + WB + HSL).
 
-Pur et testable (comme `exposure`/`hsl`/`wb_model`) : reçoit les mesures déjà
-collectées par le worker GUI et renvoie un `PhotoAdjustment` par photo + un diagnostic.
-Le worker Qt (`gui.autocorrect_worker`) se charge des I/O (jobs, décodage, parallélisme).
+Pur et testable (comme `exposure`/`hsl`/`seed_match`) : reçoit les mesures déjà
+collectées par le worker GUI (+ le pool de seeds déjà construit depuis le cache)
+et renvoie un `PhotoAdjustment` par photo + un diagnostic. Le worker Qt
+(`gui.autocorrect_worker`) se charge des I/O (jobs, décodage, cache, parallélisme).
 
 Modes de référence (décision utilisateur) :
-- **seeds** : la sélection contient des photos déjà retouchées (`seeds.is_seed`) → elles
-  servent de modèle de style ; les autres s'alignent dessus (les seeds NE sont PAS réécrites).
-- **embedded** (forcé OU aucun seed) : chaque photo est recalée sur son **JPEG boîtier**
-  (exposition/WB/couleurs appareil) + bridage de sursaturation.
+- **seeds** : un pool de seeds exploitables existe (marqués explicitement, cf.
+  `cache.is_seed` — plus l'heuristique `WhiteBalance=="Custom"`) → pour chaque
+  photo cible, on cherche les seeds dont l'analyse RAW (zone nette) est la plus
+  proche (`core.seed_match`), et on utilise leur aperçu rendu déjà retouché
+  comme référence de style. Les seeds eux-mêmes ne sont JAMAIS réécrits.
+- **embedded** (forcé OU aucun seed exploitable) : chaque photo est recalée sur
+  son **JPEG boîtier** (exposition/WB/couleurs appareil).
 
-Axes activables indépendamment. Les deltas HSL s'ajoutent aux valeurs de curseur courantes.
+Axes activables indépendamment. Les deltas HSL s'ajoutent aux valeurs de curseur
+courantes (`m.current_develop`) — qui doivent être fournies à jour par le worker.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
-from . import exposure as _exp
 from . import hsl as _hsl
-from . import regime as _regime
-from . import seeds as _seeds
+from . import exposure as _exp
+from . import seed_match
 from . import wb_model as _wb
 from .hsl import BandTarget
 from .pipeline import RenderAnalysis
 from .render_metrics import BandStats, ToneStats, band_is_reliable
 from .response import ResponseModel
+from .seed_match import SeedTarget, SeedVector
 from ..server.models import PhotoAdjustment
 
 DEFAULT_AXES = frozenset({"expo", "wb", "hsl"})
@@ -40,11 +44,15 @@ class PhotoMeasure:
     path: str
     current_develop: dict
     exif_camera: str | None
-    analysis: RenderAnalysis                 # rendu courant (tone/neutral/bands)
+    analysis: RenderAnalysis                 # rendu courant (tone/neutral/bands), zone nette
+    is_seed: bool = False                    # marquage explicite (cache.is_seed)
+    raw_tone: ToneStats | None = None        # RAW source, zone nette — clé du matching k-NN
     embedded_tone: ToneStats | None = None   # JPEG boîtier — clarté (cible expo embedded)
     embedded_bands: list[BandStats] | None = None  # JPEG boîtier — bandes (cible HSL embedded)
     asshot_rg: float | None = None
     asshot_bg: float | None = None
+    profile_capture: str | None = None       # profil créatif boîtier (filtre k-NN)
+    ev100: float | None = None               # contexte scène (diagnostic)
 
 
 @dataclass
@@ -52,7 +60,6 @@ class PlanDiagnostics:
     mode: str                       # "seeds" | "embedded"
     n_seeds: int
     n_targets: int
-    regime: str | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -62,40 +69,6 @@ def _f(dev: dict, key: str, default: float = 0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
-
-
-def _circular_mean_deg(values: list[float]) -> float:
-    """Moyenne circulaire de teintes (degrés) — correcte au passage 0/360."""
-    if not values:
-        return 0.0
-    ang = [math.radians(v) for v in values]
-    s = sum(math.sin(a) for a in ang)
-    c = sum(math.cos(a) for a in ang)
-    return math.degrees(math.atan2(s, c)) % 360.0
-
-
-def _seed_band_targets(seed_ms: list[PhotoMeasure]) -> dict[str, BandTarget]:
-    """Cibles HSL par bande = médiane (clarté/chroma) + moyenne circulaire (hue) des seeds."""
-    acc: dict[str, dict[str, list[float]]] = {}
-    for m in seed_ms:
-        for b in m.analysis.bands:
-            if not band_is_reliable(b):
-                continue
-            d = acc.setdefault(b.name, {"chroma": [], "l": [], "hue": []})
-            d["chroma"].append(b.median_chroma)
-            d["l"].append(b.median_l)
-            d["hue"].append(b.median_hue)
-    out: dict[str, BandTarget] = {}
-    for name, d in acc.items():
-        ch = sorted(d["chroma"])
-        ls = sorted(d["l"])
-        out[name] = BandTarget(
-            name=name,
-            chroma=ch[len(ch) // 2],
-            lstar=ls[len(ls) // 2],
-            hue=_circular_mean_deg(d["hue"]),
-        )
-    return out
 
 
 def _embedded_band_targets(m: PhotoMeasure) -> dict[str, BandTarget]:
@@ -110,6 +83,18 @@ def _embedded_band_targets(m: PhotoMeasure) -> dict[str, BandTarget]:
     return out
 
 
+def _band_targets_from_seed_match(t: SeedTarget | None) -> dict[str, BandTarget]:
+    """Cibles HSL = bandes agrégées des seeds les plus proches (déjà pondérées)."""
+    out: dict[str, BandTarget] = {}
+    if t is None or not t.bands:
+        return out
+    for b in t.bands:
+        out[b.name] = BandTarget(
+            name=b.name, chroma=b.median_chroma, lstar=b.median_l, hue=b.median_hue
+        )
+    return out
+
+
 def plan(
     measures: list[PhotoMeasure],
     *,
@@ -117,45 +102,63 @@ def plan(
     forced_embedded: bool = False,
     model: ResponseModel | None = None,
     camera: str | None = None,
+    seed_pool: list[SeedVector] | None = None,
 ) -> tuple[list[PhotoAdjustment], PlanDiagnostics]:
     """Planifie la correction par photo. Voir le docstring du module pour les modes."""
-    seed_ids = {m.photo_id for m in measures if _seeds.is_seed(m.current_develop or {})}
-    seed_ms = [m for m in measures if m.photo_id in seed_ids]
-    mode_embedded = forced_embedded or not seed_ms
-    targets = measures if mode_embedded else [m for m in measures if m.photo_id not in seed_ids]
+    seed_pool = seed_pool or []
+    targets = [m for m in measures if not m.is_seed]
+    mode_embedded = forced_embedded or not seed_pool
 
     dev_by_id: dict[str, dict] = {m.photo_id: {} for m in targets}
     diag = PlanDiagnostics(
         mode="embedded" if mode_embedded else "seeds",
-        n_seeds=len(seed_ms),
+        n_seeds=len(seed_pool),
         n_targets=len(targets),
     )
+    if mode_embedded:
+        reason = "case cochée" if forced_embedded else "aucun seed exploitable"
+        diag.notes.insert(0, f"mode JPEG embarqué ({reason})")
+    else:
+        diag.notes.insert(0, f"mode seeds — pool de {len(seed_pool)} seed(s)")
+
+    # Cible k-NN par photo, calculée une fois et réutilisée par les 3 axes.
+    match_cache: dict[str, SeedTarget | None] = {}
+
+    def _match(m: PhotoMeasure) -> SeedTarget | None:
+        if m.photo_id not in match_cache:
+            query = SeedVector(
+                photo_id=m.photo_id,
+                asshot_rg=m.asshot_rg,
+                asshot_bg=m.asshot_bg,
+                raw_median_l=m.raw_tone.median_l if m.raw_tone else None,
+                temperature=None, tint=None, preview_tone=None, preview_bands=None,
+                profile_capture=m.profile_capture, ev100=m.ev100,
+            )
+            match_cache[m.photo_id] = seed_match.match_target(query, seed_pool)
+        return match_cache[m.photo_id]
 
     # ---- Exposition --------------------------------------------------------
     if "expo" in axes:
-        seed_samples = [] if mode_embedded else [
-            _exp.ExposureSample(
-                m.photo_id, m.analysis.tone.median_l, _f(m.current_develop, "Exposure2012"),
-                embedded_l=(m.embedded_tone.median_l if m.embedded_tone else None),
-            )
-            for m in seed_ms
-        ]
-        try:
-            tgt = _exp.build_target(seed_samples)
-            samples = [
+        samples = []
+        n_resolved = 0
+        for m in targets:
+            if mode_embedded:
+                desired = m.embedded_tone.median_l if m.embedded_tone else None
+            else:
+                t = _match(m)
+                desired = t.tone.median_l if (t and t.tone) else None
+            if desired is not None:
+                n_resolved += 1
+            samples.append(
                 _exp.ExposureSample(
                     m.photo_id, m.analysis.tone.median_l, _f(m.current_develop, "Exposure2012"),
-                    embedded_l=(m.embedded_tone.median_l if m.embedded_tone else None),
+                    desired_l=desired,
                     clipped_hi=m.analysis.tone.clipped_hi, clipped_lo=m.analysis.tone.clipped_lo,
                 )
-                for m in targets
-            ]
-            for adj in _exp.plan_from_render(samples, tgt, model.exposure if model else None):
-                dev_by_id[adj.photo_id].update(adj.develop)
-            off = "—" if tgt.target_offset is None else f"{tgt.target_offset:+.1f}"
-            diag.notes.append(f"expo: réf {tgt.source}, offset L* {off}")
-        except ValueError as exc:
-            diag.notes.append(f"expo ignorée: {exc}")
+            )
+        for adj in _exp.plan_from_render(samples, model.exposure if model else None):
+            dev_by_id[adj.photo_id].update(adj.develop)
+        diag.notes.append(f"expo: {n_resolved}/{len(targets)} cible(s) résolue(s)")
 
     # ---- Balance des blancs -----------------------------------------------
     if "wb" in axes:
@@ -164,42 +167,27 @@ def plan(
                 dev_by_id[m.photo_id]["WhiteBalance"] = "As Shot"
             diag.notes.append("wb: As Shot (réf appareil)")
         else:
-            seeds_list = [
-                _wb.Seed(
-                    m.photo_id, m.asshot_rg, m.asshot_bg or 0.0,
-                    _f(m.current_develop, "Temperature", 5500), _f(m.current_develop, "Tint"),
-                    _f(m.current_develop, "Exposure2012"),
+            n_wb = 0
+            wbresp = model.wb if model else None
+            for m in targets:
+                t = _match(m)
+                if t is None or t.temperature is None:
+                    continue
+                temp = t.temperature
+                tint = t.tint if t.tint is not None else 0.0
+                if wbresp is not None:
+                    temp, tint, _ = _wb.refine_temp_tint(temp, tint, m.analysis.neutral, wbresp)
+                dev_by_id[m.photo_id].update(
+                    WhiteBalance="Custom", Temperature=round(temp), Tint=round(tint)
                 )
-                for m in seed_ms if m.asshot_rg is not None
-            ]
-            if seeds_list:
-                cam = camera or (measures[0].exif_camera if measures else None)
-                cal = _wb.calibrate(seeds_list, _wb.slope_for_camera(cam))
-                rep = _regime.detect(cal)
-                diag.regime = rep.regime.value
-                use_model = rep.regime is not _regime.Regime.ARTISTIC
-                wbresp = model.wb if model else None
-                for m in targets:
-                    if use_model and m.asshot_rg is not None:
-                        temp = cal.predict_temperature(m.asshot_rg)
-                    else:
-                        temp = cal.median_temp_k
-                    tint = cal.tint
-                    if wbresp is not None:
-                        temp, tint, _ = _wb.refine_temp_tint(temp, tint, m.analysis.neutral, wbresp)
-                    dev_by_id[m.photo_id].update(
-                        WhiteBalance="Custom", Temperature=round(temp), Tint=round(tint)
-                    )
-                diag.notes.append(f"wb: modèle seeds, régime {rep.regime.value}")
-            else:
-                diag.notes.append("wb ignorée: aucun seed exploitable (as-shot manquant)")
+                n_wb += 1
+            diag.notes.append(f"wb: {n_wb}/{len(targets)} photo(s) matchée(s) (k-NN seeds)")
 
     # ---- HSL ---------------------------------------------------------------
     if "hsl" in axes:
-        seed_targets = None if mode_embedded else _seed_band_targets(seed_ms)
         n_hsl = 0
         for m in targets:
-            tgs = _embedded_band_targets(m) if mode_embedded else seed_targets
+            tgs = _embedded_band_targets(m) if mode_embedded else _band_targets_from_seed_match(_match(m))
             deltas, _corrs = _hsl.plan_hsl(m.analysis.bands, tgs, model)
             for key, d in deltas.items():
                 cur = _f(m.current_develop, key, 0.0)

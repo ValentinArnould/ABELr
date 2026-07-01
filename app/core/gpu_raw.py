@@ -24,13 +24,19 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from . import color, gpu
+from . import color, gpu, render_metrics_gpu, sharpness
 from .analysis import (
     _HIGHLIGHT_CLIP,
     _SHADOW_CLIP,
     ExposureStats,
 )
+from .render_metrics import BandStats, ToneStats
 from .render_metrics_gpu import _q
+
+# ProPhoto(D50) linéaire → sRGB(D65) linéaire — même matrice que color.PROPHOTO_TO_SRGB,
+# utilisée ici pour donner au RAW une représentation sRGB u8 comparable (Lab/bandes) à
+# InCameraJPEG/PreviewJPEG, sans jamais servir à l'analyse d'exposition/WB (ProPhoto seul).
+_PP_TO_SRGB = torch.from_numpy(color.PROPHOTO_TO_SRGB)
 
 # ProPhoto(D50) → XYZ(D65) : primaires de sortie, adaptées D65 comme la table dcraw.
 _PP_TO_XYZ_D65 = (color._BRADFORD_D50_D65 @ color._PP_TO_XYZ_D50).astype(np.float32)
@@ -56,11 +62,29 @@ class RawBayer:
 
 @dataclass
 class RawGpuResult:
-    exposure: ExposureStats
-    grayworld_rg: float
+    exposure: ExposureStats               # exposition GLOBAL (frame entier, Y ProPhoto)
+    grayworld_rg: float                   # gray-world GLOBAL
     grayworld_bg: float
     asshot_rg: float
     asshot_bg: float
+    tone: ToneStats | None = None         # zone nette, sRGB dérivé du RAW
+    bands: list[BandStats] | None = None  # zone nette, sRGB dérivé du RAW
+    exposure_sharp: ExposureStats | None = None  # exposition ZONE NETTE (masque Laplacien)
+    grayworld_rg_sharp: float | None = None       # gray-world ZONE NETTE
+    grayworld_bg_sharp: float | None = None
+    mask_sharp_frac: float | None = None          # fraction de pixels retenus (diagnostic)
+
+
+def _prophoto_linear_to_srgb_u8_gpu(pp_hw3: torch.Tensor) -> torch.Tensor:
+    """ProPhoto linéaire (H,W,3) CUDA → sRGB uint8 (H,W,3) CUDA. Affichage/comparaison
+    histogramme uniquement (jamais pour l'exposition/WB, qui restent en ProPhoto)."""
+    M = _PP_TO_SRGB.to(pp_hw3.device)
+    srgb_lin = (pp_hw3 @ M.T).clamp(0.0, 1.0)
+    a = 0.055
+    srgb = torch.where(
+        srgb_lin <= 0.0031308, 12.92 * srgb_lin, (1 + a) * srgb_lin.clamp_min(0).pow(1 / 2.4) - a
+    )
+    return (srgb.clamp(0.0, 1.0) * 255.0).round().to(torch.uint8)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,17 +181,43 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
     # Exposition (Y de XYZ ProPhoto) — mêmes poids/seuils que analysis.exposure_stats.
     y_w = torch.tensor(color.PROPHOTO_TO_Y, dtype=torch.float32, device=dev)
     luma = pp @ y_w                                                     # N
-    total = luma.numel()
-    exposure = ExposureStats(
-        mean_luma=float(luma.mean()),
-        median_luma=_q(luma, 0.5),
-        clipped_highlights=float((pp >= _HIGHLIGHT_CLIP).any(dim=-1).sum()) / total,
-        clipped_shadows=float((luma <= _SHADOW_CLIP).sum()) / total,
-    )
-    # Gray-world ProPhoto (g/r, g/b) — comme analysis.gray_world_wb.
-    mean_rgb = pp.mean(dim=0) + 1e-9
-    grayworld_rg = float(mean_rgb[1] / mean_rgb[0])
-    grayworld_bg = float(mean_rgb[1] / mean_rgb[2])
+
+    def _exposure(pp_sub: torch.Tensor, luma_sub: torch.Tensor) -> ExposureStats:
+        """ExposureStats sur un sous-ensemble de pixels (global ou zone nette)."""
+        n = luma_sub.numel()
+        if n == 0:
+            return ExposureStats(0.0, 0.0, 0.0, 0.0)
+        return ExposureStats(
+            mean_luma=float(luma_sub.mean()),
+            median_luma=_q(luma_sub, 0.5),
+            clipped_highlights=float((pp_sub >= _HIGHLIGHT_CLIP).any(dim=-1).sum()) / n,
+            clipped_shadows=float((luma_sub <= _SHADOW_CLIP).sum()) / n,
+        )
+
+    def _grayworld(pp_sub: torch.Tensor) -> tuple[float, float]:
+        """Gray-world ProPhoto (g/r, g/b) — comme analysis.gray_world_wb."""
+        if pp_sub.numel() == 0:
+            return 0.0, 0.0
+        mean_rgb = pp_sub.mean(dim=0) + 1e-9
+        return float(mean_rgb[1] / mean_rgb[0]), float(mean_rgb[1] / mean_rgb[2])
+
+    # Global (frame entier).
+    exposure = _exposure(pp, luma)
+    grayworld_rg, grayworld_bg = _grayworld(pp)
+
+    # Tone/bandes zone nette — sRGB dérivé du ProPhoto, comparable aux JPEG (boîtier/aperçu).
+    pp_hw3 = pp.reshape(H, W, 3)
+    hwc_u8 = _prophoto_linear_to_srgb_u8_gpu(pp_hw3)
+    lab = render_metrics_gpu._srgb_u8_to_lab(hwc_u8)
+    sharp = sharpness.sharp_mask_gpu(lab[..., 0])                       # HxW bool
+    tone = render_metrics_gpu.tone_stats(hwc_u8, lab, mask=sharp)
+    bands = render_metrics_gpu.band_stats(hwc_u8, lab, mask=sharp)
+
+    # Zone nette (mêmes réductions Y/gray-world, restreintes au masque net).
+    mask_flat = sharp.reshape(-1)
+    exposure_sharp = _exposure(pp[mask_flat], luma[mask_flat])
+    grayworld_rg_sharp, grayworld_bg_sharp = _grayworld(pp[mask_flat])
+    mask_sharp_frac = float(sharp.float().mean())
 
     g = rb.wb[1] or 1.0
     return RawGpuResult(
@@ -176,6 +226,12 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
         grayworld_bg=grayworld_bg,
         asshot_rg=rb.wb[0] / g,
         asshot_bg=rb.wb[2] / g,
+        tone=tone,
+        bands=bands,
+        exposure_sharp=exposure_sharp,
+        grayworld_rg_sharp=grayworld_rg_sharp,
+        grayworld_bg_sharp=grayworld_bg_sharp,
+        mask_sharp_frac=mask_sharp_frac,
     )
 
 
