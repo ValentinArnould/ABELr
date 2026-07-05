@@ -13,3 +13,5 @@ Thumbs.db
 # Lr
 *.lrcat-journal
 essais/*
+
+tmp_thumbs/*

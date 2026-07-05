@@ -24,6 +24,9 @@ local DEVELOP_KEYS = {
     'Whites2012', 'Blacks2012', 'Clarity2012', 'Dehaze',
     'Vibrance', 'Saturation',
     'CameraProfile', 'ProcessVersion',
+    -- Recadrage : entre dans la clé de style du rendu neutre côté App (un crop
+    -- change le rendu des miniatures → l'ancre doit être recalculée).
+    'CropLeft', 'CropRight', 'CropTop', 'CropBottom', 'CropAngle',
     -- HSL — 8 bandes × {Hue, Saturation, Luminance} (noms SDK).
     'HueAdjustmentRed', 'HueAdjustmentOrange', 'HueAdjustmentYellow',
     'HueAdjustmentGreen', 'HueAdjustmentAqua', 'HueAdjustmentBlue',

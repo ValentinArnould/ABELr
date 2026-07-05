@@ -16,7 +16,10 @@ local Utils         = require 'Utils'
 
 local Thumbnails = {}
 
-local THUMB_TIMEOUT = 15  -- secondes max pour toutes les miniatures d'un lot
+local THUMB_TIMEOUT = 15  -- plancher : secondes max pour un petit lot de miniatures
+-- Budget par photo au-delà du plancher : sur une grande sélection, requestJpegThumbnail
+-- peut devoir régénérer chaque aperçu. Le timeout effectif = max(plancher, n * ce budget).
+local THUMB_SECONDS_PER_PHOTO = 0.4
 -- Délai laissé à Lr pour régénérer l'aperçu après un applyDevelopSettings, avant
 -- de demander la miniature sondée (cf. Thumbnails.fetchProbe).
 local SETTLE = 0.6
@@ -47,6 +50,9 @@ function Thumbnails.fetch(photos, width, height)
     local dir     = thumbsDir()
     local pending = #photos
     local results = {}
+    -- Timeout effectif : plancher pour un petit lot, sinon proportionnel au nombre
+    -- de photos (chaque aperçu peut demander une régénération côté Lr).
+    local timeout = math.max(THUMB_TIMEOUT, #photos * THUMB_SECONDS_PER_PHOTO)
 
     for i, photo in ipairs(photos) do
         local photoId = photo:getRawMetadata('uuid')
@@ -76,13 +82,13 @@ function Thumbnails.fetch(photos, width, height)
 
     -- Attente coopérative : LrTasks.sleep cède la main à Lr pour traiter les callbacks.
     local elapsed = 0
-    while pending > 0 and elapsed < THUMB_TIMEOUT do
+    while pending > 0 and elapsed < timeout do
         LrTasks.sleep(0.1)
         elapsed = elapsed + 0.1
     end
 
     if pending > 0 then
-        Utils.logf('Thumbnails.fetch : timeout (%ds), %d en attente', THUMB_TIMEOUT, pending)
+        Utils.logf('Thumbnails.fetch : timeout (%.1fs), %d en attente', timeout, pending)
         -- Marque comme erreur les entrées toujours en attente.
         for i = 1, #results do
             if results[i].thumbnail_path == nil and results[i].error == nil then
@@ -95,29 +101,37 @@ function Thumbnails.fetch(photos, width, height)
 end
 
 --[[
-    Thumbnails.fetchProbe(adjustments, width, height)
+    Thumbnails.fetchProbe(adjustments, width, height, settle)
 
     Rendu SONDÉ : applique des réglages temporaires, rend la miniature de l'état
     obtenu, puis RESTAURE l'état develop d'origine. Sert au calage de la réponse
-    ∂rendu/∂curseur côté App (core.response) et à la boucle fermée d'exposition.
+    ∂rendu/∂curseur côté App (core.response) et au rendu neutre d'ancrage
+    (NeutralPreview : WB As Shot + Exp 0 + HSL 0).
 
     `adjustments` : liste de { photo_id = uuid, develop = { PascalCase = valeur } }.
-    Retourne le même format que Thumbnails.fetch ({ photo_id, thumbnail_path, error }).
+    `settle`      : secondes laissées à Lr pour régénérer l'aperçu après l'apply
+                    (défaut SETTLE) — l'App peut l'augmenter en cas de rendu périmé.
+    Retourne le même format que Thumbnails.fetch, enrichi de `asshot_temp` /
+    `asshot_tint` : Temperature/Tint numériques relues APRÈS l'apply — si le probe
+    contient WhiteBalance='As Shot', c'est la seule occasion d'observer la valeur
+    numérique de l'As Shot (base d'une correction WB absolue côté App).
 
     ⚠️ HYPOTHÈSE BLOQUANTE À VÉRIFIER EN VRAI : requestJpegThumbnail doit refléter les
     réglages qu'on vient d'appliquer, pas un aperçu en cache périmé. Si Lr renvoie
     l'ancien rendu, ce chemin est inexploitable et il faut replier sur un export
-    (LrExportSession). Le délai SETTLE laisse Lr régénérer l'aperçu avant la demande.
+    (LrExportSession). Le délai settle laisse Lr régénérer l'aperçu avant la demande.
 
     Mute l'historique develop (apply puis restore) → réservé au calage occasionnel,
     pas à un traitement par photo de masse.
 ]]
-function Thumbnails.fetchProbe(adjustments, width, height)
+function Thumbnails.fetchProbe(adjustments, width, height, settle)
     width  = width  or 512
     height = height or 512
+    settle = settle or SETTLE
     local catalog = LrApplication.activeCatalog()
 
-    -- Index uuid → photo sur la sélection courante.
+    -- Index uuid → photo sur la sélection courante, avec repli findPhotoByUuid :
+    -- le probe ne doit pas dépendre de la sélection au moment où le job arrive.
     local byUuid = {}
     for _, photo in ipairs(catalog:getTargetPhotos()) do
         byUuid[photo:getRawMetadata('uuid')] = photo
@@ -127,6 +141,9 @@ function Thumbnails.fetchProbe(adjustments, width, height)
     local targets, original = {}, {}
     for _, adj in ipairs(adjustments) do
         local photo = byUuid[adj.photo_id]
+        if photo == nil then
+            photo = catalog:findPhotoByUuid(adj.photo_id)
+        end
         if photo and adj.develop then
             original[adj.photo_id] = photo:getDevelopSettings()  -- snapshot complet
             targets[#targets + 1]  = { photo = photo, id = adj.photo_id, develop = adj.develop }
@@ -140,8 +157,17 @@ function Thumbnails.fetchProbe(adjustments, width, height)
         end
     end)
 
+    -- Relit les valeurs numériques post-apply (Temperature/Tint de l'As Shot).
+    local asshotById = {}
+    for _, t in ipairs(targets) do
+        local ok, s = LrTasks.pcall(function() return t.photo:getDevelopSettings() end)
+        if ok and s then
+            asshotById[t.id] = { temp = s.Temperature, tint = s.Tint }
+        end
+    end
+
     -- Laisse Lr régénérer l'aperçu avant de demander les miniatures.
-    LrTasks.sleep(SETTLE)
+    LrTasks.sleep(settle)
 
     -- 2. Rend les miniatures de l'état sondé.
     local photos = {}
@@ -157,6 +183,15 @@ function Thumbnails.fetchProbe(adjustments, width, height)
             end
         end
     end)
+
+    -- Enrichit les résultats des valeurs As Shot relues.
+    for i = 1, #results do
+        local asshot = asshotById[results[i].photo_id]
+        if asshot then
+            results[i].asshot_temp = asshot.temp
+            results[i].asshot_tint = asshot.tint
+        end
+    end
 
     return results
 end

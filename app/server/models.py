@@ -63,11 +63,15 @@ class PhotoResult(BaseModel):
 
 
 class ThumbnailResult(BaseModel):
-    """Miniature JPEG écrite par le plugin pour une photo (job get_thumbnails)."""
+    """Miniature JPEG écrite par le plugin pour une photo (jobs get_thumbnails / render_probe)."""
 
     photo_id: str
     thumbnail_path: Optional[str] = None  # chemin absolu local du JPEG, ou None si erreur
     error: Optional[str] = None
+    # Renseignés par render_probe : Temperature/Tint numériques relues après l'apply
+    # (si le probe pose WhiteBalance='As Shot', c'est la valeur numérique de l'As Shot).
+    asshot_temp: Optional[float] = None
+    asshot_tint: Optional[float] = None
 
 
 class JobResult(BaseModel):

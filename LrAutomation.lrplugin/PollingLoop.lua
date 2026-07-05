@@ -95,18 +95,21 @@ local function dispatch(job)
         }
     elseif jobType == 'render_probe' then
         -- Rendu sondé : applique des réglages temporaires, rend la miniature, restaure.
-        -- Sert au calage de la réponse ∂rendu/∂curseur et à la boucle fermée (core.response).
+        -- Sert au calage de la réponse ∂rendu/∂curseur et au rendu neutre d'ancrage.
         local payload     = job.payload or {}
         local adjustments = payload.adjustments or {}
         local width       = payload.width  or 512
         local height      = payload.height or 512
-        local thumbs      = Thumbnails.fetchProbe(adjustments, width, height)
+        local settle      = payload.settle
+        local thumbs      = Thumbnails.fetchProbe(adjustments, width, height, settle)
         local out = Json.array({})
         for _, t in ipairs(thumbs) do
             out[#out + 1] = {
                 photo_id       = t.photo_id,
                 thumbnail_path = t.thumbnail_path,
                 error          = t.error,
+                asshot_temp    = t.asshot_temp,
+                asshot_tint    = t.asshot_tint,
             }
         end
         return {

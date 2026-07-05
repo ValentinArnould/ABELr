@@ -18,14 +18,22 @@ de lancement du process sur les séries 500-1000.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
+
+_log = logging.getLogger("lr_automation.exif_profile")
 
 # Tag maker note Sony portant le profil créatif effectif de la prise de vue.
 _TAG = "-Sony:CreativeStyle"
 
+# N'avertir qu'une fois par process de l'absence d'exiftool (sinon spam sur un lot).
+_missing_warned = False
 
-def _exiftool_available() -> bool:
+
+def exiftool_available() -> bool:
+    """True si le binaire `exiftool` répond dans le PATH. Utilisable au démarrage
+    (GUI) pour signaler la dégradation avant de lancer une série."""
     try:
         subprocess.run(
             ["exiftool", "-ver"], capture_output=True, timeout=10, check=False
@@ -33,6 +41,19 @@ def _exiftool_available() -> bool:
         return True
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def _warn_exiftool_missing() -> None:
+    """Avertit UNE fois que le profil créatif sera absent (dégradation silencieuse sinon)."""
+    global _missing_warned
+    if _missing_warned:
+        return
+    _missing_warned = True
+    _log.warning(
+        "exiftool introuvable dans le PATH — profil créatif Sony (CreativeStyle) "
+        "indisponible : le matching embedded ignore le profil (qualité dégradée). "
+        "Installer exiftool (https://exiftool.org) et l'ajouter au PATH."
+    )
 
 
 def read_capture_profile(path: str | Path) -> str | None:
@@ -64,6 +85,7 @@ def read_capture_profiles(paths: list[str]) -> dict[str, str | None]:
             capture_output=True, text=True, timeout=120, check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        _warn_exiftool_missing()  # binaire absent → avertir (une fois), pas de crash
         return out
 
     if proc.returncode not in (0, 1) or not proc.stdout.strip():

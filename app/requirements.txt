@@ -29,5 +29,14 @@ imagecodecs
 scipy
 scikit-learn
 
+# Profil créatif boîtier (core/exif_profile.py) : binaire externe **exiftool**
+# (pas un paquet pip). Lit le maker note Sony CreativeStyle, absent du SDK Lr et de
+# rawpy. Installer via https://exiftool.org (ou `winget install exiftool`) et
+# s'assurer qu'`exiftool` est dans le PATH. Absence gérée (profil → None, non bloquant).
+
 # HTTP client (tests / mock plugin)
 requests
+
+# Dev / tests unitaires (fonctions pures — `pytest app/tests -q`). Sans GPU ni RAW ;
+# les tests marqués `gpu` sont skippés si CUDA absent.
+pytest

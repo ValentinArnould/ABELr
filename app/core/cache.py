@@ -48,27 +48,28 @@ CACHE_FILENAME = "LrAutomation_cache.db"
 
 # Version du **schéma** (structure des tables). Un changement de structure
 # déclenche un DROP+recreate via `PRAGMA user_version`.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Salée dans les hash de fraîcheur (`raw_signature`, `blob_hash`, `style_hash`) :
 # un changement d'algorithme de mesure (nouvelles paires global/sharp, deltas…)
 # doit invalider tout le contenu caché sans migration — bump quand le calcul change.
-ANALYSIS_VERSION = "v3-dual"
+ANALYSIS_VERSION = "v4-neutral-anchor"
 
-# Sous-ensemble "style" des réglages develop : profil DCP + ProcessVersion + HSL 24 +
-# Color Grading. Sert de clé de fraîcheur du rendu neutre (`hash_style`) — un
-# changement de Temp/Tint/Exposure ne doit PAS invalider le NeutralPreview.
+# Sous-ensemble "style" des réglages develop = tout ce qui affecte le rendu NEUTRE
+# (probe `render_probe` : WB As Shot + Exposure2012=0 + **HSL 24 à zéro**, le reste
+# intact). Clé de fraîcheur du NeutralPreview (`hash_style`).
+#
+# - Les 24 clés HSL sont **exclues** : le probe les neutralise, donc un Apply HSL
+#   ne doit PAS invalider l'ancre (sinon re-probe complet à chaque cycle).
+# - Les réglages de ton (Contrast/Highlights/…/Dehaze/Vibrance/Saturation) et le
+#   crop sont **inclus** : ils ne sont pas neutralisés par le probe et changent le
+#   rendu neutre — sans eux l'ancre serait périmée silencieusement.
+# - Temp/Tint/Exposure restent hors clé (neutralisés par le probe).
 _STYLE_KEYS = (
     "CameraProfile", "ProcessVersion",
-    "HueAdjustmentRed", "HueAdjustmentOrange", "HueAdjustmentYellow",
-    "HueAdjustmentGreen", "HueAdjustmentAqua", "HueAdjustmentBlue",
-    "HueAdjustmentPurple", "HueAdjustmentMagenta",
-    "SaturationAdjustmentRed", "SaturationAdjustmentOrange", "SaturationAdjustmentYellow",
-    "SaturationAdjustmentGreen", "SaturationAdjustmentAqua", "SaturationAdjustmentBlue",
-    "SaturationAdjustmentPurple", "SaturationAdjustmentMagenta",
-    "LuminanceAdjustmentRed", "LuminanceAdjustmentOrange", "LuminanceAdjustmentYellow",
-    "LuminanceAdjustmentGreen", "LuminanceAdjustmentAqua", "LuminanceAdjustmentBlue",
-    "LuminanceAdjustmentPurple", "LuminanceAdjustmentMagenta",
+    "Contrast2012", "Highlights2012", "Shadows2012", "Whites2012", "Blacks2012",
+    "Clarity2012", "Dehaze", "Vibrance", "Saturation",
+    "CropLeft", "CropRight", "CropTop", "CropBottom", "CropAngle",
     "ColorGradeShadowHue", "ColorGradeShadowSat", "ColorGradeShadowLum",
     "ColorGradeMidtoneHue", "ColorGradeMidtoneSat", "ColorGradeMidtoneLum",
     "ColorGradeHighlightHue", "ColorGradeHighlightSat", "ColorGradeHighlightLum",
@@ -212,8 +213,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             neutral_global  TEXT,
             hsl_global      TEXT,
             mask_sharp_frac REAL,
+            wb_asshot_temp  REAL,   -- Temperature numérique lue après WhiteBalance='As Shot'
+            wb_asshot_tint  REAL,   -- Tint numérique idem (base d'une correction WB absolue)
             cached_at       REAL
         );
+
+        CREATE INDEX IF NOT EXISTS idx_picture_is_seed
+            ON LightroomPicture(is_seed);
         """
     )
     conn.commit()
@@ -627,12 +633,24 @@ def put_preview_jpeg(
 
 def get_neutral_preview(
     conn: sqlite3.Connection, uuid: str, hash_style: str
-) -> Optional[RenderAnalysis]:
-    """Rendu neutre (WB As Shot / Exp 0, zone nette) si `hash_style` correspond."""
+) -> Optional[dict[str, Any]]:
+    """Rendu neutre (WB As Shot / Exp 0 / HSL 0, style intact) si `hash_style` correspond.
+
+    Retourne un dict : `sharp`/`glob` (RenderAnalysis), `asshot_temp`/`asshot_tint`
+    (WB numérique de l'As Shot, lue par le plugin pendant le probe), `mask_sharp_frac`.
+    """
     row = conn.execute(
         "SELECT * FROM NeutralPreviewJPEG WHERE uuid=? AND hash_style=?", (uuid, hash_style)
     ).fetchone()
-    return _analysis_from_row(row, "sharp") if row is not None else None
+    if row is None:
+        return None
+    return {
+        "sharp": _analysis_from_row(row, "sharp"),
+        "glob": _analysis_from_row(row, "global"),
+        "asshot_temp": row["wb_asshot_temp"],
+        "asshot_tint": row["wb_asshot_tint"],
+        "mask_sharp_frac": row["mask_sharp_frac"],
+    }
 
 
 def put_neutral_preview(
@@ -643,6 +661,67 @@ def put_neutral_preview(
     sharp: RenderAnalysis,
     glob: RenderAnalysis | None = None,
     mask_sharp_frac: float | None = None,
+    asshot_temp: float | None = None,
+    asshot_tint: float | None = None,
 ) -> None:
-    _put_render_dual(conn, "NeutralPreviewJPEG", uuid, "hash_style", hash_style,
-                     sharp, glob, mask_sharp_frac)
+    conn.execute(
+        """INSERT OR REPLACE INTO NeutralPreviewJPEG
+           (uuid, hash_style, tone_sharp, neutral_sharp, hsl_sharp,
+            tone_global, neutral_global, hsl_global, mask_sharp_frac,
+            wb_asshot_temp, wb_asshot_tint, cached_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            uuid, hash_style,
+            _tone_to_json(sharp.tone) if sharp else None,
+            _neutral_to_json(sharp.neutral) if sharp else None,
+            _bands_to_json(sharp.bands) if sharp else None,
+            _tone_to_json(glob.tone) if glob else None,
+            _neutral_to_json(glob.neutral) if glob else None,
+            _bands_to_json(glob.bands) if glob else None,
+            mask_sharp_frac, asshot_temp, asshot_tint, time.time(),
+        ),
+    )
+    conn.commit()
+
+
+def get_bias_pool(
+    conn: sqlite3.Connection, hash_style: str, profile_capture: str | None
+) -> list[dict[str, Any]]:
+    """Pool de calibration du **biais de profil** : photos du cache partageant le
+    couple (profil créatif boîtier, style Lr) et disposant à la fois de la cible
+    (`InCameraJPEG`) et de l'ancre (`NeutralPreviewJPEG` au `hash_style` demandé).
+
+    Retourne, par photo : `uuid`, `t_sharp`/`t_global` (JPEG boîtier) et
+    `n_sharp`/`n_global` (rendu neutre) en RenderAnalysis. Le biais = médiane
+    robuste des deltas T−N sur ce pool (calculée par `core.autocorrect`).
+    """
+    if profile_capture is None:
+        where_prof, args = "j.profile_capture IS NULL", (hash_style,)
+    else:
+        where_prof, args = "j.profile_capture = ?", (hash_style, profile_capture)
+    rows = conn.execute(
+        f"""SELECT j.uuid AS uuid,
+                   j.tone_sharp AS jt_sharp, j.neutral_sharp AS jn_sharp, j.hsl_sharp AS jb_sharp,
+                   j.tone_global AS jt_global, j.neutral_global AS jn_global, j.hsl_global AS jb_global,
+                   n.tone_sharp AS nt_sharp, n.neutral_sharp AS nn_sharp, n.hsl_sharp AS nb_sharp,
+                   n.tone_global AS nt_global, n.neutral_global AS nn_global, n.hsl_global AS nb_global
+            FROM NeutralPreviewJPEG n
+            JOIN InCameraJPEG j ON j.uuid = n.uuid
+            WHERE n.hash_style = ? AND {where_prof}""",
+        args,
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        def _ra(prefix: str, scope: str) -> RenderAnalysis | None:
+            tone = _tone_from_json(r[f"{prefix}t_{scope}"])
+            neutral = _neutral_from_json(r[f"{prefix}n_{scope}"])
+            bands = _bands_from_json(r[f"{prefix}b_{scope}"])
+            if tone is None and neutral is None and bands is None:
+                return None
+            return RenderAnalysis(tone=tone, neutral=neutral, bands=bands)
+        out.append({
+            "uuid": r["uuid"],
+            "t_sharp": _ra("j", "sharp"), "t_global": _ra("j", "global"),
+            "n_sharp": _ra("n", "sharp"), "n_global": _ra("n", "global"),
+        })
+    return out

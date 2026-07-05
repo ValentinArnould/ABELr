@@ -33,7 +33,12 @@ class JobQueue:
 
     # Au-delà de ce délai, une entrée jamais récupérée (worker timeouté, plugin
     # mort avant de POSTer) est considérée orpheline et évincée → borne la RAM.
-    _ENTRY_TTL = 300.0  # secondes
+    # 900 s : au-dessus du plus long timeout worker légitime (render_probe sur une
+    # grosse sélection), pour ne jamais évincer un job encore attendu.
+    _ENTRY_TTL = 900.0  # secondes
+    # Borne dure de la file d'attente : au-delà, submit() refuse (plugin déconnecté
+    # + producteur en boucle = fuite RAM sinon).
+    _MAX_PENDING = 100
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -56,17 +61,30 @@ class JobQueue:
         ]
         for jid in stale:
             self._jobs.pop(jid, None)
+        if stale:
+            # Retire aussi les ids fantômes de la file (sinon ils comptent dans
+            # la borne _MAX_PENDING alors que next_pending les sauterait).
+            self._pending = deque(jid for jid in self._pending if jid in self._jobs)
 
     # ------------------------------------------------------------------ #
     # Côté producteur (GUI)
     # ------------------------------------------------------------------ #
     def submit(self, job_type: JobType, payload: Optional[dict[str, Any]] = None) -> str:
-        """Crée un job, le pousse dans la queue, retourne son job_id."""
+        """Crée un job, le pousse dans la queue, retourne son job_id.
+
+        Lève RuntimeError si la file dépasse `_MAX_PENDING` (plugin déconnecté
+        pendant que des producteurs soumettent en boucle) — mieux qu'une fuite RAM.
+        """
         job_id = str(uuid.uuid4())
         job = Job(job_id=job_id, type=job_type, payload=payload or {})
         entry = _JobEntry(job)
         with self._lock:
             self._prune_locked(time.time())
+            if len(self._pending) >= self._MAX_PENDING:
+                raise RuntimeError(
+                    f"File de jobs saturée ({self._MAX_PENDING} en attente) — "
+                    "le plugin Lightroom ne récupère plus les jobs (pont inactif ?)."
+                )
             self._jobs[job_id] = entry
             self._pending.append(job_id)
         return job_id
@@ -130,7 +148,7 @@ class JobQueue:
             entry.status = (
                 JobStatus.DONE if result.status == "ok" else JobStatus.FAILED
             )
-        entry.done_event.set()
+            entry.done_event.set()  # sous le lock : état + signal publiés atomiquement
         return True
 
     # ------------------------------------------------------------------ #

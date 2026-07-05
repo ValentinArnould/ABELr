@@ -1,20 +1,22 @@
-"""Worker Qt — analyse (RAW + JPEG boîtier + aperçu, zone nette) et planification.
+"""Worker Qt — analyse (RAW + JPEG boîtier + aperçu/ancre neutre) et planification.
 
 Pipeline **GPU + cache** (hors thread GUI) :
 1. **RAW source** (tone+bandes zone nette, asshot WB, exposition, gray-world) :
    cache `SourceRAW` (clé = signature du RAW) ; manques → décodage GPU complet
    (`gpu_schedule.process_raw_batch`, demosaic inclus — coût dominant).
-2. **JPEG boîtier** (tone+bandes zone nette) : cache `InCameraJPEG` (même clé) ;
-   manques → décodage GPU (nvJPEG, `gpu_schedule.process_embedded_batch`).
-3. **Aperçu rendu courant** (tone/neutral/bandes zone nette) : cache `PreviewJPEG`
-   (clé = signature du fichier d'aperçu) ; manques → décodage GPU. En mode
-   `force_fresh_preview=True` (Apply), le cache n'est **jamais lu** pour l'état
-   courant (seulement écrit) — l'état mesuré doit être le plus frais possible
-   pour éviter de recalculer un delta sur un rendu périmé.
-4. Mode `analyze_only=True` ("Analyser sélection") : s'arrête après avoir peuplé
-   le cache, n'appelle pas `autocorrect.plan`.
-5. Sinon : construit le pool de seeds (`cache.list_seed_uuids` +
-   `seed_match.build_seed_vector`) et appelle `autocorrect.plan(...)`.
+2. **JPEG boîtier** (tone/neutral/bandes, global + zone nette) : cache
+   `InCameraJPEG` (même clé) ; manques → décodage GPU (nvJPEG).
+3. Mesure de l'état de référence, **selon le mode** :
+   - **seeds** : aperçu rendu courant (cache `PreviewJPEG` ; en
+     `force_fresh_preview=True` le cache n'est jamais lu, seulement écrit).
+   - **embedded** : **ancre neutre** (`ensure_neutral_previews` — cache
+     `NeutralPreviewJPEG`, jobs plugin `render_probe` pour les manques). Aucune
+     mesure du rendu courant : les valeurs planifiées sont absolues (idempotentes)
+     et insensibles à la fraîcheur des aperçus Lr.
+4. Mode `analyze_only=True` ("Marquer + analyser") : s'arrête après avoir peuplé
+   le cache (RAW + JPEG boîtier + aperçu), n'appelle pas `autocorrect.plan`.
+5. Sinon : pool de seeds + (embedded) pools de biais de profil
+   (`cache.get_bias_pool`) → `autocorrect.plan(...)`.
 
 Politique **GPU-strict** : sans CUDA utilisable, le worker échoue avec un message clair.
 """
@@ -26,11 +28,13 @@ from dataclasses import dataclass, field
 
 from PySide6.QtCore import QThread, Signal
 
-from ..core import autocorrect, cache as cachemod, gpu, gpu_jpeg, gpu_schedule, measure
+from ..core import analysis as analysismod
+from ..core import autocorrect, cache as cachemod, exif_profile, gpu, gpu_jpeg, gpu_schedule, measure
 from ..core import response, seed_match
 from ..core.autocorrect import PhotoMeasure, PlanDiagnostics
 from ..core.previews import PreviewIndex
 from ..server.models import PhotoAdjustment, PhotoResult
+from .neutral_preview_worker import ensure_neutral_previews
 
 
 @dataclass
@@ -40,6 +44,10 @@ class AutoCorrectResult:
     n_measured: int
     n_skipped: int
     notes: list[str] = field(default_factory=list)
+    # Seeds marqués en DB vs réellement exploitables (analyse RAW présente).
+    # marked > usable ⇒ repli embedded silencieux à signaler côté GUI.
+    seeds_marked: int = 0
+    seeds_usable: int = 0
 
 
 def _safe(fn) -> None:
@@ -51,11 +59,52 @@ def _safe(fn) -> None:
         pass
 
 
+def _compute_deltas(raw_dict: dict | None, jpeg_sharp) -> dict:
+    """Deltas JPEG boîtier ↔ RAW (zone nette) = transformation appliquée par le profil.
+
+    - `delta_luma_median` : L* médian JPEG − L* médian RAW (rendu neutre) → lift tonal
+      du profil créatif.
+    - `delta_wb_cast_a/b` : cast a*/b* mesuré sur les neutres du JPEG (le RAW as-shot
+      sert de référence ≈ neutre) → teinte cuite par le profil.
+    - `delta_hsl` : par bande, écart chroma/sat/hue/L* JPEG − RAW.
+    Retourne un dict de kwargs prêt pour `put_in_camera_jpeg` (valeurs None si non
+    calculables)."""
+    out = {
+        "delta_luma_median": None, "delta_wb_cast_a": None,
+        "delta_wb_cast_b": None, "delta_hsl": None,
+    }
+    if jpeg_sharp is None:
+        return out
+    if jpeg_sharp.neutral is not None:
+        out["delta_wb_cast_a"] = jpeg_sharp.neutral.a_bias
+        out["delta_wb_cast_b"] = jpeg_sharp.neutral.b_bias
+    raw_tone = (raw_dict or {}).get("tone")
+    if raw_tone is not None and jpeg_sharp.tone is not None:
+        out["delta_luma_median"] = jpeg_sharp.tone.median_l - raw_tone.median_l
+    raw_bands = {b.name: b for b in ((raw_dict or {}).get("bands") or [])}
+    if jpeg_sharp.bands and raw_bands:
+        deltas = []
+        for jb in jpeg_sharp.bands:
+            rb = raw_bands.get(jb.name)
+            if rb is None:
+                continue
+            deltas.append({
+                "name": jb.name,
+                "dchroma": jb.median_chroma - rb.median_chroma,
+                "dsat": jb.median_sat - rb.median_sat,
+                "dhue": jb.median_hue - rb.median_hue,
+                "dl": jb.median_l - rb.median_l,
+            })
+        out["delta_hsl"] = deltas or None
+    return out
+
+
 class AutoCorrectWorker(QThread):
     """Mesure la sélection (GPU + cache) et planifie/applique la correction."""
 
     finished_result = Signal(object)   # AutoCorrectResult
     progress = Signal(str)             # message d'étape
+    progress_count = Signal(int, int)  # (fait, total) d'une étape → barre déterminée
     failed = Signal(str)
 
     def __init__(
@@ -74,6 +123,27 @@ class AutoCorrectWorker(QThread):
         self._thumbs = thumbnail_paths or {}
         self._analyze_only = analyze_only
         self._force_fresh_preview = force_fresh_preview
+        self._profile_cache: dict[str, str | None] = {}  # path → profil créatif boîtier
+
+    def _batch_progress(self, label: str):
+        """Callback `(done, total)` d'une étape GPU → émet le texte ET les compteurs
+        (ces derniers pilotent la barre de chargement déterminée côté GUI)."""
+        def cb(done: int, total: int) -> None:
+            self.progress.emit(f"{label} {done}/{total} (GPU)…")
+            self.progress_count.emit(done, total)
+        return cb
+
+    def _profiles(self, paths: list[str]) -> dict[str, str | None]:
+        """Profil créatif boîtier pour un lot (exiftool, batché, mémoïsé sur le worker).
+
+        Une seule invocation exiftool par lot de chemins non encore lus ; robuste à
+        l'absence d'exiftool (valeurs None)."""
+        todo = [p for p in paths if p not in self._profile_cache]
+        if todo:
+            got = exif_profile.read_capture_profiles(todo)
+            for p in todo:
+                self._profile_cache[p] = got.get(p)
+        return {p: self._profile_cache.get(p) for p in paths}
 
     def run(self) -> None:
         try:
@@ -100,59 +170,114 @@ class AutoCorrectWorker(QThread):
 
             try:
                 raw_by_id = self._collect_raw_source(photos, conn)
-                embedded_by_id = self._collect_embedded_jpeg(photos, conn)
-                render_by_id, channels, skipped_render = self._collect_renders(
-                    photos, conn, idx
-                )
+                embedded_by_id = self._collect_embedded_jpeg(photos, conn, raw_by_id)
 
                 if self._analyze_only:
+                    # Peuple aussi le cache d'aperçus (utile aux seeds futurs).
+                    self._collect_renders(photos, conn, idx)
                     n = len(raw_by_id)
+                    marked = len(cachemod.list_seed_uuids(conn)) if conn else 0
+                    usable = len(seed_match.build_seed_pool(conn)) if conn else 0
+                    if conn is not None:
+                        conn.close()
                     self.finished_result.emit(
                         AutoCorrectResult(
                             adjustments=[], diagnostics=None,
                             n_measured=n, n_skipped=len(photos) - n,
                             notes=[f"Analyse : {n}/{len(photos)} photo(s) (RAW+JPEG boîtier+aperçu)."],
+                            seeds_marked=marked, seeds_usable=usable,
                         )
                     )
                     return
 
+                seeds_marked = len(cachemod.list_seed_uuids(conn)) if conn else 0
+                seed_pool = seed_match.build_seed_pool(conn) if conn else []
+                mode_embedded = self._forced_embedded or not seed_pool
+
+                notes: list[str] = []
+                bias_pools: dict | None = None
+                channels: Counter[str] = Counter()
                 measures: list[PhotoMeasure] = []
-                for p in photos:
-                    ra = render_by_id.get(p.photo_id)
-                    if ra is None:
-                        continue
-                    raw_d = raw_by_id.get(p.photo_id) or {}
-                    emb = embedded_by_id.get(p.photo_id) or (None, None)
-                    measures.append(
-                        PhotoMeasure(
-                            photo_id=p.photo_id,
-                            path=p.path,
-                            current_develop=p.current_develop or {},
-                            exif_camera=p.exif.camera if p.exif else None,
-                            analysis=ra,
-                            is_seed=cachemod.is_seed(conn, p.photo_id) if conn else False,
-                            raw_tone=raw_d.get("tone"),
-                            embedded_tone=emb[0],
-                            embedded_bands=emb[1],
-                            asshot_rg=raw_d.get("asshot_rg"),
-                            asshot_bg=raw_d.get("asshot_bg"),
-                        )
+
+                if mode_embedded:
+                    # Ancre neutre (cache hash_style, jobs render_probe pour les
+                    # manques) — AUCUNE mesure du rendu courant.
+                    neutral_by_id, n_refreshed = ensure_neutral_previews(
+                        photos, conn, progress=self.progress.emit,
+                        progress_count=self.progress_count.emit,
                     )
+                    if n_refreshed:
+                        notes.append(f"{n_refreshed} ancre(s) neutre(s) recalibrée(s) via Lightroom.")
+                    for p in photos:
+                        nd = neutral_by_id.get(p.photo_id)
+                        emb = embedded_by_id.get(p.photo_id) or (None, None)
+                        if nd is None or (emb[0] is None and emb[1] is None):
+                            continue
+                        raw_d = raw_by_id.get(p.photo_id) or {}
+                        measures.append(
+                            PhotoMeasure(
+                                photo_id=p.photo_id,
+                                path=p.path,
+                                current_develop=p.current_develop or {},
+                                exif_camera=p.exif.camera if p.exif else None,
+                                analysis=None,
+                                is_seed=cachemod.is_seed(conn, p.photo_id) if conn else False,
+                                raw_tone=raw_d.get("tone"),
+                                embedded_sharp=emb[0],
+                                embedded_global=emb[1],
+                                neutral_sharp=nd.get("sharp"),
+                                neutral_global=nd.get("glob"),
+                                neutral_asshot_temp=nd.get("asshot_temp"),
+                                neutral_asshot_tint=nd.get("asshot_tint"),
+                                hash_style=cachemod.style_hash(p.current_develop or {}),
+                                asshot_rg=raw_d.get("asshot_rg"),
+                                asshot_bg=raw_d.get("asshot_bg"),
+                                profile_capture=raw_d.get("profile_capture"),
+                                ev100=raw_d.get("ev100"),
+                            )
+                        )
+                else:
+                    render_by_id, channels, _skipped_render = self._collect_renders(
+                        photos, conn, idx
+                    )
+                    for p in photos:
+                        ra = render_by_id.get(p.photo_id)
+                        if ra is None:
+                            continue
+                        raw_d = raw_by_id.get(p.photo_id) or {}
+                        measures.append(
+                            PhotoMeasure(
+                                photo_id=p.photo_id,
+                                path=p.path,
+                                current_develop=p.current_develop or {},
+                                exif_camera=p.exif.camera if p.exif else None,
+                                analysis=ra,
+                                is_seed=cachemod.is_seed(conn, p.photo_id) if conn else False,
+                                raw_tone=raw_d.get("tone"),
+                                asshot_rg=raw_d.get("asshot_rg"),
+                                asshot_bg=raw_d.get("asshot_bg"),
+                                profile_capture=raw_d.get("profile_capture"),
+                                ev100=raw_d.get("ev100"),
+                            )
+                        )
             finally:
                 if idx is not None:
                     idx.close()
 
             skipped = len(photos) - len(measures)
             if not measures:
-                try:
-                    msg = self._no_render_message(len(photos), channels, idx)
-                finally:
-                    if conn is not None:
-                        conn.close()
-                self.failed.emit(msg)
+                if conn is not None:
+                    conn.close()
+                if mode_embedded:
+                    self.failed.emit(
+                        f"Aucune photo mesurable sur {len(photos)} : ancre neutre ou "
+                        f"JPEG boîtier manquant(s). Vérifiez le pont plugin (jobs "
+                        f"render_probe) et que les RAW contiennent un JPEG embarqué."
+                    )
+                else:
+                    self.failed.emit(self._no_render_message(len(photos), channels, idx))
                 return
 
-            seed_pool = seed_match.build_seed_pool(conn) if conn else []
             if conn is not None:
                 conn.close()
 
@@ -172,6 +297,7 @@ class AutoCorrectWorker(QThread):
                 model=model,
                 camera=camera,
                 seed_pool=seed_pool,
+                bias_pools=bias_pools,
             )
             self.finished_result.emit(
                 AutoCorrectResult(
@@ -179,6 +305,9 @@ class AutoCorrectWorker(QThread):
                     diagnostics=diag,
                     n_measured=len(measures),
                     n_skipped=skipped,
+                    notes=notes,
+                    seeds_marked=seeds_marked,
+                    seeds_usable=len(seed_pool),
                 )
             )
         except Exception as exc:  # garde-fou
@@ -204,35 +333,50 @@ class AutoCorrectWorker(QThread):
             self.progress.emit(f"Lecture RAW source (GPU, zone nette) — {len(misses)} photo(s)…")
             got = gpu_schedule.process_raw_batch(
                 [p.path for p in misses],
-                progress=lambda d, t: self.progress.emit(f"RAW source {d}/{t} (GPU)…"),
+                progress=self._batch_progress("RAW source"),
             )
+            profiles = self._profiles([p.path for p in misses])
             for p in misses:
                 r = got.get(p.path)
                 if r is None:
                     continue
+                prof = profiles.get(p.path)
+                ev = analysismod.ev100(
+                    p.exif.iso if p.exif else None,
+                    p.exif.aperture if p.exif else None,
+                    p.exif.shutter_speed if p.exif else None,
+                )
                 out[p.photo_id] = {
                     "asshot_rg": r.asshot_rg, "asshot_bg": r.asshot_bg,
                     "tone": r.tone, "bands": r.bands,
+                    "ev100": ev, "profile_capture": prof,
                 }
                 if conn is not None:
                     s = sig[p.photo_id]
-                    _safe(lambda: cachemod.put_source_raw(
+                    _safe(lambda r=r, s=s, p=p, ev=ev, prof=prof: cachemod.put_source_raw(
                         conn, p.photo_id, s,
                         asshot_rg=r.asshot_rg, asshot_bg=r.asshot_bg,
-                        exposure=r.exposure,
-                        grayworld_rg=r.grayworld_rg, grayworld_bg=r.grayworld_bg,
+                        exposure_global=r.exposure, exposure_sharp=r.exposure_sharp,
+                        grayworld_global=(r.grayworld_rg, r.grayworld_bg),
+                        grayworld_sharp=(r.grayworld_rg_sharp, r.grayworld_bg_sharp),
+                        mask_sharp_frac=r.mask_sharp_frac, ev100=ev, profile_capture=prof,
                         tone=r.tone, bands=r.bands,
                     ))
-                    _safe(lambda: cachemod.put_picture(
+                    _safe(lambda p=p, prof=prof: cachemod.put_picture(
                         conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
                         exif=(p.exif.model_dump() if p.exif else None),
-                        current_develop=p.current_develop or {}))
+                        current_develop=p.current_develop or {}, profile_capture=prof))
         return out
 
     # ------------------------------------------------------------------ #
     # Étape 2 : JPEG boîtier (tone+bandes zone nette) — cache + GPU
     # ------------------------------------------------------------------ #
-    def _collect_embedded_jpeg(self, photos, conn) -> dict[str, tuple]:
+    def _collect_embedded_jpeg(self, photos, conn, raw_by_id) -> dict[str, tuple]:
+        """Cibles JPEG boîtier → dict {uuid: (sharp, glob)} (RenderAnalysis complètes,
+        zone nette + global — le mode embedded ancré neutre consomme les deux).
+
+        Écrit `InCameraJPEG` avec la paire global+sharp, le profil créatif et les
+        **deltas précalculés** vs `SourceRAW` (même uuid, déjà collecté = `raw_by_id`)."""
         out: dict[str, tuple] = {}
         misses: list[PhotoResult] = []
         sig: dict[str, str] = {}
@@ -241,7 +385,7 @@ class AutoCorrectWorker(QThread):
             sig[p.photo_id] = s
             cached = cachemod.get_in_camera_jpeg(conn, p.photo_id, s) if conn else None
             if cached is not None:
-                out[p.photo_id] = cached
+                out[p.photo_id] = (cached["sharp"], cached["global"])
             else:
                 misses.append(p)
 
@@ -249,18 +393,25 @@ class AutoCorrectWorker(QThread):
             self.progress.emit(f"Lecture JPEG boîtier (GPU) — {len(misses)} photo(s)…")
             got = gpu_schedule.process_embedded_batch(
                 [p.path for p in misses],
-                progress=lambda d, t: self.progress.emit(f"JPEG boîtier {d}/{t} (GPU)…"),
+                progress=self._batch_progress("JPEG boîtier"),
             )
+            profiles = self._profiles([p.path for p in misses])
             for p in misses:
                 r = got.get(p.path)
-                if r is None or r.embedded_tone is None:
+                if r is None or r.sharp is None:
                     out[p.photo_id] = (None, None)
                     continue
-                out[p.photo_id] = (r.embedded_tone, r.embedded_bands)
+                out[p.photo_id] = (r.sharp, r.glob)
                 if conn is not None:
                     s = sig[p.photo_id]
-                    _safe(lambda: cachemod.put_in_camera_jpeg(
-                        conn, p.photo_id, s, tone=r.embedded_tone, bands=r.embedded_bands))
+                    prof = profiles.get(p.path)
+                    deltas = _compute_deltas(raw_by_id.get(p.photo_id), r.sharp)
+                    _safe(lambda r=r, s=s, p=p, prof=prof, deltas=deltas:
+                          cachemod.put_in_camera_jpeg(
+                              conn, p.photo_id, s,
+                              sharp=r.sharp, glob=r.glob,
+                              mask_sharp_frac=r.mask_sharp_frac, profile_capture=prof,
+                              **deltas))
         return out
 
     # ------------------------------------------------------------------ #
@@ -304,15 +455,17 @@ class AutoCorrectWorker(QThread):
             self.progress.emit(f"Aperçus rendus (GPU) — {len(misses)} photo(s)…")
             decoded = gpu_schedule.analyze_render_blobs(
                 misses,
-                progress=lambda d, t: self.progress.emit(f"Aperçu {d}/{t} (GPU)…"),
+                progress=self._batch_progress("Aperçu"),
             )
-            for pid, ra in decoded.items():
-                if ra is None:
+            for pid, dual in decoded.items():
+                if dual is None:
                     continue
-                analysis_by_id[pid] = ra
+                analysis_by_id[pid] = dual.sharp  # état courant = zone nette
                 if conn is not None:
-                    _safe(lambda: cachemod.put_preview_jpeg(
-                        conn, pid, miss_sig[pid], analysis=ra))
+                    _safe(lambda pid=pid, dual=dual: cachemod.put_preview_jpeg(
+                        conn, pid, miss_sig[pid],
+                        sharp=dual.sharp, glob=dual.glob,
+                        mask_sharp_frac=dual.mask_sharp_frac))
         return analysis_by_id, channels, skipped
 
     # ------------------------------------------------------------------ #
