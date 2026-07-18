@@ -42,7 +42,7 @@ curl http://localhost:5000/status
 | Dossier | Rôle |
 |---|---|
 | `server/` | FastAPI (`api.py`), queue de jobs thread-safe (`job_queue.py`), modèles Pydantic (`models.py`) |
-| `gui/` | Fenêtre PySide6 (`main_window.py`), workers Qt non-bloquants (`job_worker.py` = attente plugin, `analysis_worker.py` = analyse pixel) |
+| `gui/` | Fenêtre PySide6 (`main_window.py`), workers Qt non-bloquants (`job_worker.py` = attente plugin, `autocorrect_worker.py` = mesure+plan, `neutral_preview_worker.py` = ancres neutres) |
 | `core/` | Pipeline image et analyse (voir ci-dessous) |
 | `tools/` | Mock plugin pour dev sans Lr |
 

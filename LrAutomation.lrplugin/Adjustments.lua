@@ -15,6 +15,12 @@ local Utils         = require 'Utils'
 
 local Adjustments = {}
 
+-- Taille des lots d'écriture : une transaction withWriteAccessDo par lot (et non
+-- une pour toute la sélection). Borne la durée de chaque transaction (revue Fable 5
+-- B-05 : à 500+ photos, une transaction unique dépassait le timeout GUI de 180 s)
+-- et permet de rafraîchir le heartbeat entre deux lots (L-05).
+local APPLY_CHUNK = 50
+
 -- Compte les clés d'une table (diagnostic).
 local function countKeys(t)
     local n = 0
@@ -51,29 +57,44 @@ function Adjustments.apply(adjustments)
             a and a.develop and Utils.dumpKeys(a.develop) or 'nil')
     end
 
-    catalog:withWriteAccessDo('Lr Automation : ajustements', function()
-        for _, adj in ipairs(adjustments) do
-            local photo = byUuid[adj.photo_id]
-            if not photo then
-                errors[#errors + 1] = 'uuid non sélectionné : ' .. tostring(adj.photo_id)
-            elseif not adj.develop or countKeys(adj.develop) == 0 then
-                errors[#errors + 1] = 'develop vide pour ' .. tostring(adj.photo_id)
-            else
-                matched = matched + 1
-                -- LrTasks.pcall (et non pcall standard) : applyDevelopSettings peut
-                -- céder la main (yield) en interne ; yielder à travers le pcall C de
-                -- Lua 5.1 lève « Yielding is not allowed within a C or metamethod call ».
-                local ok, err = LrTasks.pcall(function()
-                    photo:applyDevelopSettings(adj.develop)
-                end)
-                if ok then
-                    applied = applied + 1
+    -- Application par LOTS : une transaction par tranche de APPLY_CHUNK photos.
+    -- Entre deux lots : heartbeat rafraîchi (le pont ne passe plus pour mort
+    -- pendant un gros apply) et main rendue à Lr.
+    for base = 1, total, APPLY_CHUNK do
+        local hi = math.min(base + APPLY_CHUNK - 1, total)
+        catalog:withWriteAccessDo('Lr Automation : ajustements', function()
+            for i = base, hi do
+                local adj = adjustments[i]
+                local photo = byUuid[adj.photo_id]
+                if not photo then
+                    -- Repli hors sélection (revue Fable 5 L-09, même logique que
+                    -- Thumbnails.fetchProbe) : la sélection peut avoir changé entre
+                    -- la mesure et l'apply.
+                    photo = catalog:findPhotoByUuid(adj.photo_id)
+                end
+                if not photo then
+                    errors[#errors + 1] = 'uuid introuvable : ' .. tostring(adj.photo_id)
+                elseif not adj.develop or countKeys(adj.develop) == 0 then
+                    errors[#errors + 1] = 'develop vide pour ' .. tostring(adj.photo_id)
                 else
-                    errors[#errors + 1] = 'applyDevelopSettings: ' .. tostring(err)
+                    matched = matched + 1
+                    -- LrTasks.pcall (et non pcall standard) : applyDevelopSettings peut
+                    -- céder la main (yield) en interne ; yielder à travers le pcall C de
+                    -- Lua 5.1 lève « Yielding is not allowed within a C or metamethod call ».
+                    local ok, err = LrTasks.pcall(function()
+                        photo:applyDevelopSettings(adj.develop)
+                    end)
+                    if ok then
+                        applied = applied + 1
+                    else
+                        errors[#errors + 1] = 'applyDevelopSettings: ' .. tostring(err)
+                    end
                 end
             end
-        end
-    end)
+        end)
+        _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()
+        LrTasks.yield()
+    end
 
     Utils.logf('Adjustments.apply : %d/%d appliqués (%d matchés), %d erreur(s)',
         applied, total, matched, #errors)

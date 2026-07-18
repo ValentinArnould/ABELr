@@ -145,6 +145,24 @@ class EmbeddedExtract:
     jpeg_bytes: bytes | None
 
 
+def extract_from_open(r) -> EmbeddedExtract:
+    """EmbeddedExtract depuis un handle rawpy DÉJÀ ouvert.
+
+    Extrait pour l'unpack unifié du scheduler (revue Fable 5 P-02) : la même
+    ouverture rawpy sert au bayer (`gpu_raw.bayer_from_open`) ET au JPEG boîtier.
+    """
+    import rawpy
+
+    wb = list(r.camera_whitebalance)  # [R, G1, B, G2]
+    try:
+        thumb = r.extract_thumb()
+        jpeg = bytes(thumb.data) if thumb.format == rawpy.ThumbFormat.JPEG else None
+    except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
+        jpeg = None
+    g = wb[1] or 1.0
+    return EmbeddedExtract(wb[0] / g, wb[2] / g, jpeg)
+
+
 def extract_reference(path: str) -> EmbeddedExtract:
     """Ouvre le RAW (CPU) → WB as-shot + **octets** du JPEG boîtier (sans décoder).
 
@@ -156,16 +174,9 @@ def extract_reference(path: str) -> EmbeddedExtract:
 
     try:
         with rawpy.imread(str(path)) as r:
-            wb = list(r.camera_whitebalance)  # [R, G1, B, G2]
-            try:
-                thumb = r.extract_thumb()
-                jpeg = bytes(thumb.data) if thumb.format == rawpy.ThumbFormat.JPEG else None
-            except (rawpy.LibRawNoThumbnailError, rawpy.LibRawUnsupportedThumbnailError):
-                jpeg = None
+            return extract_from_open(r)
     except Exception:
         return EmbeddedExtract(None, None, None)
-    g = wb[1] or 1.0
-    return EmbeddedExtract(wb[0] / g, wb[2] / g, jpeg)
 
 
 def read_raw_references(

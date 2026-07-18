@@ -30,6 +30,11 @@ def extract_jpeg_stream(data: bytes) -> Optional[bytes]:
 
     Gère le conteneur Lr `.lrfprev` (en-tête `AgHg`) et les fichiers sans extension de
     `Previews.lrdata` : on cherche le marqueur SOI `FF D8 FF`. None si absent.
+
+    Limitation assumée (revue Fable 5 C-05) : on prend le PREMIER SOI — sur un
+    conteneur multi-flux ce serait le plus petit niveau. Sans effet en pratique :
+    `previews.find_rendered_preview` choisit déjà le fichier de niveau max, le
+    `.lrfprev` multi-niveaux n'est qu'un repli.
     """
     if data[:3] == _JPEG_SOI:
         return data

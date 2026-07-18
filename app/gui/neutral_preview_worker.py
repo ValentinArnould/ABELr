@@ -30,6 +30,7 @@ d'une correction WB absolue. Cette lecture vérifie de facto l'hypothèse
 
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from PySide6.QtCore import QThread, Signal
@@ -37,6 +38,8 @@ from PySide6.QtCore import QThread, Signal
 from ..core import cache as cachemod, gpu, gpu_jpeg, render_metrics, render_metrics_gpu
 from ..server.job_queue import job_queue
 from ..server.models import JobType, PhotoResult, ThumbnailResult
+
+_log = logging.getLogger("lr_automation.neutral_preview")
 
 # Réglages du rendu neutre : WB boîtier + exposition à plat + HSL neutralisés,
 # le reste du style (profil DCP, tons, Color Grading, crop) intact.
@@ -112,7 +115,11 @@ def _anchor_suspect(p: PhotoResult, dual, conn) -> bool:
     try:
         prev = cachemod.get_preview_jpeg_latest(conn, p.photo_id)
     except Exception:
-        return False
+        # Ne PAS avaler : sans lecture cache on ne peut pas innocenter l'ancre,
+        # et une ancre suspecte cachée empoisonne le mode embedded jusqu'au
+        # changement de style (revue Fable 5 B-03) → traiter comme suspecte.
+        _log.exception("lecture cache impossible pendant _anchor_suspect (%s)", p.photo_id)
+        return True
     if prev is None or prev.tone is None:
         return False
     return abs(dual.sharp.tone.median_l - prev.tone.median_l) < _SUSPECT_MAX_DELTA_L
@@ -164,6 +171,17 @@ def ensure_neutral_previews(
         timeout = max(_MIN_TIMEOUT, _SECONDS_PER_PHOTO * len(chunk))
         got = _probe_chunk(chunk, settle, timeout)
 
+        # Restore échoué côté plugin (revue Fable 5 L-03) : la photo est restée en
+        # état NEUTRE dans Lightroom — signal fort, à afficher, jamais silencieux.
+        restore_failed = [t.photo_id[:8] for (t, _d) in got.values() if t.restore_error]
+        if restore_failed:
+            msg = (
+                f"ATTENTION : restore échoué pour {len(restore_failed)} photo(s) — "
+                f"laissées en état neutre dans Lr : {', '.join(restore_failed)}"
+            )
+            _log.error(msg)
+            say(msg)
+
         # Garde anti-probe-périmé : retry unique avec settle long, puis échec dur.
         by_id = {p.photo_id: p for p in chunk}
         suspects = [
@@ -201,15 +219,21 @@ def ensure_neutral_previews(
                         sharp=dual.sharp, glob=dual.glob,
                         mask_sharp_frac=dual.mask_sharp_frac,
                         asshot_temp=t.asshot_temp, asshot_tint=t.asshot_tint,
+                        commit=False,
                     )
                 except Exception:
-                    pass
+                    _log.exception("put_neutral_preview a échoué (%s)", p.photo_id)
             out[p.photo_id] = {
                 "sharp": dual.sharp, "glob": dual.glob,
                 "asshot_temp": t.asshot_temp, "asshot_tint": t.asshot_tint,
                 "mask_sharp_frac": dual.mask_sharp_frac,
             }
             n_refreshed += 1
+        if conn is not None:
+            try:
+                conn.commit()  # P-07 : un commit par lot, pas par photo
+            except Exception:
+                _log.exception("commit du lot neutral impossible")
         tick(min(start + len(chunk), len(todo)), len(todo))
     return out, n_refreshed
 

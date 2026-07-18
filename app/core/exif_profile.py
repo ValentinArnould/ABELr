@@ -12,14 +12,17 @@ Tag retenu (prouvé sur ARW ILCE-7M4 réels, plusieurs jeux) : `Sony:CreativeSty
 d'énumération statique (toutes les valeurs possibles) — **pas** la valeur réelle, à
 ne pas utiliser.
 
-Extraction par lot (`-@ argfile` implicite via liste de chemins) pour amortir le coût
-de lancement du process sur les séries 500-1000.
+Extraction par lot via `-@ argfile` (fichier temporaire UTF-8) : amortit le coût de
+lancement du process sur les séries 500-1000 ET évite la limite argv Windows
+(CreateProcess ~32 767 caractères, dépassée dès ~300 chemins — revue Fable 5 A-01).
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 _log = logging.getLogger("lr_automation.exif_profile")
@@ -77,16 +80,35 @@ def read_capture_profiles(paths: list[str]) -> dict[str, str | None]:
     if not paths:
         return out
 
-    # -s3 : valeur brute (sans nom de tag). -T : sortie tabulée. -j : JSON avec
-    # SourceFile → mapping fiable même si exiftool réordonne le lot.
+    # -s3 : valeur brute (sans nom de tag). -j : JSON avec SourceFile → mapping
+    # fiable même si exiftool réordonne le lot. Chemins passés via argfile `-@`
+    # (un argument par ligne, UTF-8) : pas de limite argv Windows, et
+    # `-charset filename=UTF8` fait lire l'argfile/écrire SourceFile en UTF-8
+    # (chemins accentués FR — A-01/A-02).
+    argfile = None
     try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", suffix=".args", delete=False
+        ) as f:
+            argfile = f.name
+            f.write("-charset\nfilename=UTF8\n-j\n-s3\n")
+            f.write(_TAG + "\n")
+            for p in paths:
+                f.write(p + "\n")
         proc = subprocess.run(
-            ["exiftool", "-j", "-s3", _TAG, *paths],
-            capture_output=True, text=True, timeout=120, check=False,
+            ["exiftool", "-@", argfile],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=max(120, len(paths)), check=False,
         )
     except (OSError, subprocess.SubprocessError):
         _warn_exiftool_missing()  # binaire absent → avertir (une fois), pas de crash
         return out
+    finally:
+        if argfile is not None:
+            try:
+                os.unlink(argfile)
+            except OSError:
+                pass
 
     if proc.returncode not in (0, 1) or not proc.stdout.strip():
         return out

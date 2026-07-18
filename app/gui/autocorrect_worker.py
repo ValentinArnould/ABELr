@@ -1,11 +1,10 @@
 """Worker Qt — analyse (RAW + JPEG boîtier + aperçu/ancre neutre) et planification.
 
 Pipeline **GPU + cache** (hors thread GUI) :
-1. **RAW source** (tone+bandes zone nette, asshot WB, exposition, gray-world) :
-   cache `SourceRAW` (clé = signature du RAW) ; manques → décodage GPU complet
-   (`gpu_schedule.process_raw_batch`, demosaic inclus — coût dominant).
-2. **JPEG boîtier** (tone/neutral/bandes, global + zone nette) : cache
-   `InCameraJPEG` (même clé) ; manques → décodage GPU (nvJPEG).
+1+2. **RAW source + JPEG boîtier** en un passage fusionné (revue Fable 5 G7) :
+   caches `SourceRAW`/`InCameraJPEG` (même clé = signature du RAW) ; manques →
+   `gpu_schedule.process_combined_batch` (une ouverture rawpy par photo, demosaic
+   GPU + nvJPEG, double-buffer CPU/GPU).
 3. Mesure de l'état de référence, **selon le mode** :
    - **seeds** : aperçu rendu courant (cache `PreviewJPEG` ; en
      `force_fresh_preview=True` le cache n'est jamais lu, seulement écrit).
@@ -15,8 +14,8 @@ Pipeline **GPU + cache** (hors thread GUI) :
      et insensibles à la fraîcheur des aperçus Lr.
 4. Mode `analyze_only=True` ("Marquer + analyser") : s'arrête après avoir peuplé
    le cache (RAW + JPEG boîtier + aperçu), n'appelle pas `autocorrect.plan`.
-5. Sinon : pool de seeds + (embedded) pools de biais de profil
-   (`cache.get_bias_pool`) → `autocorrect.plan(...)`.
+5. Sinon : pool de seeds → `autocorrect.plan(...)` (le biais de profil embedded a
+   été supprimé — décision « biais ignoré », revue Fable 5 DB-06).
 
 Politique **GPU-strict** : sans CUDA utilisable, le worker échoue avec un message clair.
 """
@@ -146,6 +145,7 @@ class AutoCorrectWorker(QThread):
         return {p: self._profile_cache.get(p) for p in paths}
 
     def run(self) -> None:
+        conn = None  # fermée dans le finally — y compris sur exception (revue Fable 5 B-04)
         try:
             photos = self._photos
             if not photos:
@@ -160,7 +160,6 @@ class AutoCorrectWorker(QThread):
                 return
 
             catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
-            conn = None
             if catalog_path:
                 try:
                     conn = cachemod.open_cache(catalog_path)
@@ -169,8 +168,7 @@ class AutoCorrectWorker(QThread):
             idx = PreviewIndex(catalog_path) if catalog_path else None
 
             try:
-                raw_by_id = self._collect_raw_source(photos, conn)
-                embedded_by_id = self._collect_embedded_jpeg(photos, conn, raw_by_id)
+                raw_by_id, embedded_by_id = self._collect_raw_and_embedded(photos, conn)
 
                 if self._analyze_only:
                     # Peuple aussi le cache d'aperçus (utile aux seeds futurs).
@@ -178,8 +176,6 @@ class AutoCorrectWorker(QThread):
                     n = len(raw_by_id)
                     marked = len(cachemod.list_seed_uuids(conn)) if conn else 0
                     usable = len(seed_match.build_seed_pool(conn)) if conn else 0
-                    if conn is not None:
-                        conn.close()
                     self.finished_result.emit(
                         AutoCorrectResult(
                             adjustments=[], diagnostics=None,
@@ -195,7 +191,6 @@ class AutoCorrectWorker(QThread):
                 mode_embedded = self._forced_embedded or not seed_pool
 
                 notes: list[str] = []
-                bias_pools: dict | None = None
                 channels: Counter[str] = Counter()
                 measures: list[PhotoMeasure] = []
 
@@ -266,8 +261,6 @@ class AutoCorrectWorker(QThread):
 
             skipped = len(photos) - len(measures)
             if not measures:
-                if conn is not None:
-                    conn.close()
                 if mode_embedded:
                     self.failed.emit(
                         f"Aucune photo mesurable sur {len(photos)} : ancre neutre ou "
@@ -277,9 +270,6 @@ class AutoCorrectWorker(QThread):
                 else:
                     self.failed.emit(self._no_render_message(len(photos), channels, idx))
                 return
-
-            if conn is not None:
-                conn.close()
 
             camera = next((m.exif_camera for m in measures if m.exif_camera), None)
             profiles = Counter(
@@ -297,7 +287,6 @@ class AutoCorrectWorker(QThread):
                 model=model,
                 camera=camera,
                 seed_pool=seed_pool,
-                bias_pools=bias_pools,
             )
             self.finished_result.emit(
                 AutoCorrectResult(
@@ -312,107 +301,113 @@ class AutoCorrectWorker(QThread):
             )
         except Exception as exc:  # garde-fou
             self.failed.emit(str(exc))
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ #
-    # Étape 1 : RAW source (tone+bandes zone nette, asshot, expo, gray-world)
+    # Étapes 1+2 fusionnées : RAW source + JPEG boîtier (revue Fable 5 G7/P-02)
     # ------------------------------------------------------------------ #
-    def _collect_raw_source(self, photos, conn) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        misses: list[PhotoResult] = []
+    def _collect_raw_and_embedded(self, photos, conn) -> tuple[dict[str, dict], dict[str, tuple]]:
+        """RAW (tone+bandes zone nette, asshot, expo, gray-world) + cibles JPEG
+        boîtier {uuid: (sharp, glob)} en UN passage GPU.
+
+        Les deux caches partagent la même clé de fraîcheur (`raw_signature`) : une
+        photo manquante des deux côtés n'ouvre le conteneur ARW qu'une seule fois
+        (`gpu_schedule.process_combined_batch`, unpack unifié + double-buffer).
+        Écrit `SourceRAW`/`LightroomPicture`/`InCameraJPEG` avec les **deltas
+        précalculés** vs RAW, en UNE transaction (P-07)."""
+        raw_out: dict[str, dict] = {}
+        emb_out: dict[str, tuple] = {}
+        raw_misses: list[PhotoResult] = []
+        emb_misses: list[PhotoResult] = []
         sig: dict[str, str] = {}
         for p in photos:
             s = cachemod.raw_signature(p.path)
             sig[p.photo_id] = s
             cached = cachemod.get_source_raw(conn, p.photo_id, s) if conn else None
             if cached is not None and cached["tone"] is not None:
-                out[p.photo_id] = cached
+                raw_out[p.photo_id] = cached
             else:
-                misses.append(p)
+                raw_misses.append(p)
+            cached_j = cachemod.get_in_camera_jpeg(conn, p.photo_id, s) if conn else None
+            if cached_j is not None:
+                emb_out[p.photo_id] = (cached_j["sharp"], cached_j["global"])
+            else:
+                emb_misses.append(p)
 
-        if misses:
-            self.progress.emit(f"Lecture RAW source (GPU, zone nette) — {len(misses)} photo(s)…")
-            got = gpu_schedule.process_raw_batch(
-                [p.path for p in misses],
-                progress=self._batch_progress("RAW source"),
+        if not raw_misses and not emb_misses:
+            return raw_out, emb_out
+
+        self.progress.emit(
+            f"Lecture RAW + JPEG boîtier (GPU) — {len(raw_misses)} RAW / "
+            f"{len(emb_misses)} JPEG manquant(s)…"
+        )
+        got_raw, got_emb = gpu_schedule.process_combined_batch(
+            [p.path for p in raw_misses],
+            [p.path for p in emb_misses],
+            progress=self._batch_progress("RAW + JPEG boîtier"),
+        )
+        miss_paths = list(dict.fromkeys(p.path for p in raw_misses + emb_misses))
+        profiles = self._profiles(miss_paths)
+
+        for p in raw_misses:
+            r = got_raw.get(p.path)
+            if r is None:
+                continue
+            prof = profiles.get(p.path)
+            ev = analysismod.ev100(
+                p.exif.iso if p.exif else None,
+                p.exif.aperture if p.exif else None,
+                p.exif.shutter_speed if p.exif else None,
             )
-            profiles = self._profiles([p.path for p in misses])
-            for p in misses:
-                r = got.get(p.path)
-                if r is None:
-                    continue
+            raw_out[p.photo_id] = {
+                "asshot_rg": r.asshot_rg, "asshot_bg": r.asshot_bg,
+                "tone": r.tone, "bands": r.bands,
+                "ev100": ev, "profile_capture": prof,
+            }
+            if conn is not None:
+                s = sig[p.photo_id]
+                _safe(lambda r=r, s=s, p=p, ev=ev, prof=prof: cachemod.put_source_raw(
+                    conn, p.photo_id, s,
+                    asshot_rg=r.asshot_rg, asshot_bg=r.asshot_bg,
+                    exposure_global=r.exposure, exposure_sharp=r.exposure_sharp,
+                    grayworld_global=(r.grayworld_rg, r.grayworld_bg),
+                    grayworld_sharp=(r.grayworld_rg_sharp, r.grayworld_bg_sharp),
+                    mask_sharp_frac=r.mask_sharp_frac, ev100=ev, profile_capture=prof,
+                    tone=r.tone, bands=r.bands, commit=False,
+                ))
+                _safe(lambda p=p, prof=prof: cachemod.put_picture(
+                    conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
+                    exif=(p.exif.model_dump() if p.exif else None),
+                    current_develop=p.current_develop or {}, profile_capture=prof,
+                    commit=False))
+
+        for p in emb_misses:
+            r = got_emb.get(p.path)
+            if r is None or r.sharp is None:
+                emb_out[p.photo_id] = (None, None)
+                continue
+            emb_out[p.photo_id] = (r.sharp, r.glob)
+            if conn is not None:
+                s = sig[p.photo_id]
                 prof = profiles.get(p.path)
-                ev = analysismod.ev100(
-                    p.exif.iso if p.exif else None,
-                    p.exif.aperture if p.exif else None,
-                    p.exif.shutter_speed if p.exif else None,
-                )
-                out[p.photo_id] = {
-                    "asshot_rg": r.asshot_rg, "asshot_bg": r.asshot_bg,
-                    "tone": r.tone, "bands": r.bands,
-                    "ev100": ev, "profile_capture": prof,
-                }
-                if conn is not None:
-                    s = sig[p.photo_id]
-                    _safe(lambda r=r, s=s, p=p, ev=ev, prof=prof: cachemod.put_source_raw(
-                        conn, p.photo_id, s,
-                        asshot_rg=r.asshot_rg, asshot_bg=r.asshot_bg,
-                        exposure_global=r.exposure, exposure_sharp=r.exposure_sharp,
-                        grayworld_global=(r.grayworld_rg, r.grayworld_bg),
-                        grayworld_sharp=(r.grayworld_rg_sharp, r.grayworld_bg_sharp),
-                        mask_sharp_frac=r.mask_sharp_frac, ev100=ev, profile_capture=prof,
-                        tone=r.tone, bands=r.bands,
-                    ))
-                    _safe(lambda p=p, prof=prof: cachemod.put_picture(
-                        conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
-                        exif=(p.exif.model_dump() if p.exif else None),
-                        current_develop=p.current_develop or {}, profile_capture=prof))
-        return out
+                deltas = _compute_deltas(raw_out.get(p.photo_id), r.sharp)
+                _safe(lambda r=r, s=s, p=p, prof=prof, deltas=deltas:
+                      cachemod.put_in_camera_jpeg(
+                          conn, p.photo_id, s,
+                          sharp=r.sharp, glob=r.glob,
+                          mask_sharp_frac=r.mask_sharp_frac, profile_capture=prof,
+                          commit=False, **deltas))
 
-    # ------------------------------------------------------------------ #
-    # Étape 2 : JPEG boîtier (tone+bandes zone nette) — cache + GPU
-    # ------------------------------------------------------------------ #
-    def _collect_embedded_jpeg(self, photos, conn, raw_by_id) -> dict[str, tuple]:
-        """Cibles JPEG boîtier → dict {uuid: (sharp, glob)} (RenderAnalysis complètes,
-        zone nette + global — le mode embedded ancré neutre consomme les deux).
-
-        Écrit `InCameraJPEG` avec la paire global+sharp, le profil créatif et les
-        **deltas précalculés** vs `SourceRAW` (même uuid, déjà collecté = `raw_by_id`)."""
-        out: dict[str, tuple] = {}
-        misses: list[PhotoResult] = []
-        sig: dict[str, str] = {}
-        for p in photos:
-            s = cachemod.raw_signature(p.path)
-            sig[p.photo_id] = s
-            cached = cachemod.get_in_camera_jpeg(conn, p.photo_id, s) if conn else None
-            if cached is not None:
-                out[p.photo_id] = (cached["sharp"], cached["global"])
-            else:
-                misses.append(p)
-
-        if misses:
-            self.progress.emit(f"Lecture JPEG boîtier (GPU) — {len(misses)} photo(s)…")
-            got = gpu_schedule.process_embedded_batch(
-                [p.path for p in misses],
-                progress=self._batch_progress("JPEG boîtier"),
-            )
-            profiles = self._profiles([p.path for p in misses])
-            for p in misses:
-                r = got.get(p.path)
-                if r is None or r.sharp is None:
-                    out[p.photo_id] = (None, None)
-                    continue
-                out[p.photo_id] = (r.sharp, r.glob)
-                if conn is not None:
-                    s = sig[p.photo_id]
-                    prof = profiles.get(p.path)
-                    deltas = _compute_deltas(raw_by_id.get(p.photo_id), r.sharp)
-                    _safe(lambda r=r, s=s, p=p, prof=prof, deltas=deltas:
-                          cachemod.put_in_camera_jpeg(
-                              conn, p.photo_id, s,
-                              sharp=r.sharp, glob=r.glob,
-                              mask_sharp_frac=r.mask_sharp_frac, profile_capture=prof,
-                              **deltas))
-        return out
+        # Un seul commit pour tout le passage (revue Fable 5 P-07) : évite
+        # ~2-3 commits/photo (churn WAL) sur les gros lots.
+        if conn is not None:
+            _safe(conn.commit)
+        return raw_out, emb_out
 
     # ------------------------------------------------------------------ #
     # Étape 3 : aperçu rendu courant (tone/neutral/bandes zone nette) — cache + GPU
@@ -465,7 +460,9 @@ class AutoCorrectWorker(QThread):
                     _safe(lambda pid=pid, dual=dual: cachemod.put_preview_jpeg(
                         conn, pid, miss_sig[pid],
                         sharp=dual.sharp, glob=dual.glob,
-                        mask_sharp_frac=dual.mask_sharp_frac))
+                        mask_sharp_frac=dual.mask_sharp_frac, commit=False))
+            if conn is not None:
+                _safe(conn.commit)  # P-07 : un commit par étape
         return analysis_by_id, channels, skipped
 
     # ------------------------------------------------------------------ #

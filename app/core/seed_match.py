@@ -1,4 +1,5 @@
-"""Matching k-NN sur seeds — remplace `wb_model.py`/`regime.py` côté app live.
+"""Matching k-NN sur seeds — remplace `regime.py` côté app live (`wb_model.py`
+reste live : `refine_temp_tint` raffine Temp/Tint après le k-NN, cf. autocorrect).
 
 Au lieu d'une régression physique (pente boîtier r/g → Temperature) ou d'un
 recalage purement render-space, on cherche pour chaque photo cible les **seeds**
@@ -131,6 +132,10 @@ def k_nearest(
 
     `k` par défaut = `min(K_MAX, max(1, n_seeds // 2))`. Si le plus proche est à
     une distance quasi nulle (correspondance exacte), ne renvoie que celui-là.
+
+    Intention du `pool // 2` (revue Fable 5 A-07) : sur un petit pool (3-5 seeds),
+    moyenner la moitié du pool diluerait la cible avec des seeds éloignés — k=3
+    n'est donc atteint qu'à partir de 6 seeds, et c'est voulu.
     """
     pool = [s for s in seeds if s.photo_id != target.photo_id]
     if not pool:

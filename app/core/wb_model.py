@@ -141,9 +141,11 @@ def refine_temp_tint(
     dtemp = float(np.clip(dtemp, -max_dtemp_k, max_dtemp_k))
     dtint = float(np.clip(dtint, -max_dtint, max_dtint))
     new_temp = float(min(TEMP_MAX, max(TEMP_MIN, temp + dtemp)))
+    # Tint borné aux limites Lr ±150 (revue Fable 5 A-06), symétrique de Temperature.
+    new_tint = float(min(150.0, max(-150.0, tint + dtint)))
     return (
         new_temp,
-        tint + dtint,
+        new_tint,
         f"neutres {neutral.neutral_frac:.3f} (a*={neutral.a_bias:+.1f}, b*={neutral.b_bias:+.1f}) "
         f"→ ΔTemp={dtemp:+.0f}K ΔTint={dtint:+.1f}",
     )

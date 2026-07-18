@@ -11,9 +11,12 @@ Cinq tables, **clé commune `uuid`** (= `id_global` du catalogue Lr) :
 |----------------------|-----------------------------|------------------------------------|
 | `LightroomPicture`   | métadonnées catalogue       | `hash_develop` (réglages develop)  |
 | `SourceRAW`          | pixels RAW (.ARW)           | `hash_raw` (taille+mtime du RAW)   |
-| `InCameraJPEG`       | JPEG boîtier embarqué       | `hash_jpeg` (sha1 des octets)      |
-| `PreviewJPEG`        | aperçu rendu Lr             | `hash_preview` (sha1 des octets)   |
+| `InCameraJPEG`       | JPEG boîtier embarqué       | `hash_jpeg` = signature du RAW (le JPEG vit dedans) |
+| `PreviewJPEG`        | aperçu rendu Lr             | `hash_preview` = signature du fichier source |
 | `NeutralPreviewJPEG` | rendu neutre (As Shot/Exp0) | `hash_style` (sous-ensemble style) |
+
+`hash_jpeg`/`hash_preview` = `raw_signature` (taille:mtime salée), PAS un sha1 des
+octets (revue Fable 5 DB-02 — l'ancienne doc décrivait un mécanisme inexistant).
 
 **Nomenclature unifiée des colonnes** (on ignore la rétrocompatibilité) :
 famille en préfixe (`luma_`/`wb_`/`tone_`/`neutral_`/`hsl_`/`delta_`/`mask_`/
@@ -50,10 +53,10 @@ CACHE_FILENAME = "LrAutomation_cache.db"
 # déclenche un DROP+recreate via `PRAGMA user_version`.
 SCHEMA_VERSION = 4
 
-# Salée dans les hash de fraîcheur (`raw_signature`, `blob_hash`, `style_hash`) :
+# Salée dans les hash de fraîcheur (`raw_signature`, `style_hash`) :
 # un changement d'algorithme de mesure (nouvelles paires global/sharp, deltas…)
 # doit invalider tout le contenu caché sans migration — bump quand le calcul change.
-ANALYSIS_VERSION = "v4-neutral-anchor"
+ANALYSIS_VERSION = "v5-style-keys-g2wb"  # bump G1 (revue Fable 5) : DB-01 clés style + C-01 garde cam_mul[G2]
 
 # Sous-ensemble "style" des réglages develop = tout ce qui affecte le rendu NEUTRE
 # (probe `render_probe` : WB As Shot + Exposure2012=0 + **HSL 24 à zéro**, le reste
@@ -68,13 +71,23 @@ ANALYSIS_VERSION = "v4-neutral-anchor"
 _STYLE_KEYS = (
     "CameraProfile", "ProcessVersion",
     "Contrast2012", "Highlights2012", "Shadows2012", "Whites2012", "Blacks2012",
-    "Clarity2012", "Dehaze", "Vibrance", "Saturation",
+    "Clarity2012", "Dehaze", "Vibrance", "Saturation", "Texture",
     "CropLeft", "CropRight", "CropTop", "CropBottom", "CropAngle",
-    "ColorGradeShadowHue", "ColorGradeShadowSat", "ColorGradeShadowLum",
+    # Color Grading — noms SDK hybrides (revue Fable 5 DB-01) : ombres/HL Hue+Sat
+    # = SplitToning*, le reste ColorGrade*. Les anciens noms ColorGradeShadowHue…
+    # n'existent pas dans le SDK et ne matchaient jamais.
+    "SplitToningShadowHue", "SplitToningShadowSaturation",
+    "SplitToningHighlightHue", "SplitToningHighlightSaturation",
+    "SplitToningBalance",
+    "ColorGradeShadowLum", "ColorGradeHighlightLum",
     "ColorGradeMidtoneHue", "ColorGradeMidtoneSat", "ColorGradeMidtoneLum",
-    "ColorGradeHighlightHue", "ColorGradeHighlightSat", "ColorGradeHighlightLum",
     "ColorGradeGlobalHue", "ColorGradeGlobalSat", "ColorGradeGlobalLum",
-    "ColorGradeBlending", "ColorGradeBalance",
+    "ColorGradeBlending",
+    # Courbes : paramétrique + points (tables JSON), non neutralisées par le probe.
+    "ParametricShadows", "ParametricDarks", "ParametricLights", "ParametricHighlights",
+    "ParametricShadowSplit", "ParametricMidtoneSplit", "ParametricHighlightSplit",
+    "ToneCurveName2012", "ToneCurvePV2012",
+    "ToneCurvePV2012Red", "ToneCurvePV2012Green", "ToneCurvePV2012Blue",
 )
 
 
@@ -239,12 +252,9 @@ def raw_signature(path: str | Path) -> str:
         st = p.stat()
         return f"{st.st_size}:{st.st_mtime_ns}:{ANALYSIS_VERSION}"
     except OSError:
-        return "0:0"
-
-
-def blob_hash(data: bytes) -> str:
-    """sha1 des octets (JPEG boîtier / aperçu — petits → coût négligeable)."""
-    return hashlib.sha1(data + ANALYSIS_VERSION.encode("utf-8")).hexdigest()
+        # Repli salé lui aussi (revue Fable 5 DB-04) : jamais écrit en base en
+        # pratique (le décodage échoue avant), mais pas de collision inter-versions.
+        return f"0:0:{ANALYSIS_VERSION}"
 
 
 def develop_hash(develop: dict[str, Any] | None) -> str:
@@ -314,12 +324,17 @@ def put_picture(
     exif: dict[str, Any] | None,
     current_develop: dict[str, Any] | None,
     profile_capture: str | None = None,
+    commit: bool = True,
 ) -> None:
     """Insère/MAJ la ligne d'ancrage (métadonnées + snapshot develop).
 
     UPSERT (pas `INSERT OR REPLACE`) : préserve `is_seed`, sinon chaque réanalyse
     écraserait le marquage seed avec la valeur par défaut. `profile_dcp` et
     `hash_style` sont dérivés du snapshot develop.
+
+    `commit=False` : l'appelant regroupe plusieurs écritures dans une transaction
+    et committe lui-même (revue Fable 5 P-07/DB-03 — un commit par boucle gelait
+    le GUI et payait ~1 500 commits par run).
     """
     exif = exif or {}
     dev = current_develop or {}
@@ -345,20 +360,22 @@ def put_picture(
             json.dumps(dev), develop_hash(dev), style_hash(dev), time.time(),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # --------------------------------------------------------------------------- #
 # Seeds — marquage explicite (remplace l'heuristique WhiteBalance=="Custom")
 # --------------------------------------------------------------------------- #
-def set_seed(conn: sqlite3.Connection, uuid: str, value: bool) -> None:
+def set_seed(conn: sqlite3.Connection, uuid: str, value: bool, commit: bool = True) -> None:
     """Marque/démarque une photo comme seed. Crée la ligne d'ancrage si absente."""
     conn.execute(
         "INSERT INTO LightroomPicture (uuid, is_seed, cached_at) VALUES (?,?,?) "
         "ON CONFLICT(uuid) DO UPDATE SET is_seed=excluded.is_seed",
         (uuid, int(value), time.time()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def is_seed(conn: sqlite3.Connection, uuid: str) -> bool:
@@ -393,7 +410,7 @@ def get_source_raw_latest(conn: sqlite3.Connection, uuid: str) -> Optional[dict[
     son marquage, et exiger une réanalyse à chaque correspondance serait coûteux.
     """
     row = conn.execute(
-        "SELECT * FROM SourceRAW WHERE uuid=? ORDER BY cached_at DESC LIMIT 1", (uuid,)
+        "SELECT * FROM SourceRAW WHERE uuid=?", (uuid,)
     ).fetchone()
     return _source_raw_dict(row) if row is not None else None
 
@@ -402,7 +419,7 @@ def get_preview_jpeg_latest(conn: sqlite3.Connection, uuid: str) -> Optional[Ren
     """Dernier aperçu rendu connu pour `uuid` (zone nette), sans vérifier le hash
     de fraîcheur (référence de style d'un seed — cf. `get_source_raw_latest`)."""
     row = conn.execute(
-        "SELECT * FROM PreviewJPEG WHERE uuid=? ORDER BY cached_at DESC LIMIT 1", (uuid,)
+        "SELECT * FROM PreviewJPEG WHERE uuid=?", (uuid,)
     ).fetchone()
     return _analysis_from_row(row, "sharp") if row is not None else None
 
@@ -472,6 +489,7 @@ def put_source_raw(
     profile_capture: str | None = None,
     tone: ToneStats | None = None,
     bands: list[BandStats] | None = None,
+    commit: bool = True,
 ) -> None:
     """Écrit la ligne SourceRAW (paires global + zone nette). Tous les champs de
     mesure sont optionnels (l'autocorrect peut n'écrire que la WB as-shot)."""
@@ -501,7 +519,8 @@ def put_source_raw(
             _tone_to_json(tone), _bands_to_json(bands), time.time(),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -553,6 +572,7 @@ def put_in_camera_jpeg(
     delta_wb_cast_a: float | None = None,
     delta_wb_cast_b: float | None = None,
     delta_hsl: list[dict[str, Any]] | None = None,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO InCameraJPEG
@@ -573,7 +593,8 @@ def put_in_camera_jpeg(
             _delta_bands_to_json(delta_hsl), time.time(),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -588,6 +609,7 @@ def _put_render_dual(
     sharp: RenderAnalysis | None,
     glob: RenderAnalysis | None,
     mask_sharp_frac: float | None,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         f"""INSERT OR REPLACE INTO {table}
@@ -605,7 +627,8 @@ def _put_render_dual(
             mask_sharp_frac, time.time(),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_preview_jpeg(
@@ -626,9 +649,10 @@ def put_preview_jpeg(
     sharp: RenderAnalysis,
     glob: RenderAnalysis | None = None,
     mask_sharp_frac: float | None = None,
+    commit: bool = True,
 ) -> None:
     _put_render_dual(conn, "PreviewJPEG", uuid, "hash_preview", hash_preview,
-                     sharp, glob, mask_sharp_frac)
+                     sharp, glob, mask_sharp_frac, commit)
 
 
 def get_neutral_preview(
@@ -663,6 +687,7 @@ def put_neutral_preview(
     mask_sharp_frac: float | None = None,
     asshot_temp: float | None = None,
     asshot_tint: float | None = None,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO NeutralPreviewJPEG
@@ -681,47 +706,5 @@ def put_neutral_preview(
             mask_sharp_frac, asshot_temp, asshot_tint, time.time(),
         ),
     )
-    conn.commit()
-
-
-def get_bias_pool(
-    conn: sqlite3.Connection, hash_style: str, profile_capture: str | None
-) -> list[dict[str, Any]]:
-    """Pool de calibration du **biais de profil** : photos du cache partageant le
-    couple (profil créatif boîtier, style Lr) et disposant à la fois de la cible
-    (`InCameraJPEG`) et de l'ancre (`NeutralPreviewJPEG` au `hash_style` demandé).
-
-    Retourne, par photo : `uuid`, `t_sharp`/`t_global` (JPEG boîtier) et
-    `n_sharp`/`n_global` (rendu neutre) en RenderAnalysis. Le biais = médiane
-    robuste des deltas T−N sur ce pool (calculée par `core.autocorrect`).
-    """
-    if profile_capture is None:
-        where_prof, args = "j.profile_capture IS NULL", (hash_style,)
-    else:
-        where_prof, args = "j.profile_capture = ?", (hash_style, profile_capture)
-    rows = conn.execute(
-        f"""SELECT j.uuid AS uuid,
-                   j.tone_sharp AS jt_sharp, j.neutral_sharp AS jn_sharp, j.hsl_sharp AS jb_sharp,
-                   j.tone_global AS jt_global, j.neutral_global AS jn_global, j.hsl_global AS jb_global,
-                   n.tone_sharp AS nt_sharp, n.neutral_sharp AS nn_sharp, n.hsl_sharp AS nb_sharp,
-                   n.tone_global AS nt_global, n.neutral_global AS nn_global, n.hsl_global AS nb_global
-            FROM NeutralPreviewJPEG n
-            JOIN InCameraJPEG j ON j.uuid = n.uuid
-            WHERE n.hash_style = ? AND {where_prof}""",
-        args,
-    ).fetchall()
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        def _ra(prefix: str, scope: str) -> RenderAnalysis | None:
-            tone = _tone_from_json(r[f"{prefix}t_{scope}"])
-            neutral = _neutral_from_json(r[f"{prefix}n_{scope}"])
-            bands = _bands_from_json(r[f"{prefix}b_{scope}"])
-            if tone is None and neutral is None and bands is None:
-                return None
-            return RenderAnalysis(tone=tone, neutral=neutral, bands=bands)
-        out.append({
-            "uuid": r["uuid"],
-            "t_sharp": _ra("j", "sharp"), "t_global": _ra("j", "global"),
-            "n_sharp": _ra("n", "sharp"), "n_global": _ra("n", "global"),
-        })
-    return out
+    if commit:
+        conn.commit()

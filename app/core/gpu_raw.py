@@ -90,6 +90,22 @@ def _prophoto_linear_to_srgb_u8_gpu(pp_hw3: torch.Tensor) -> torch.Tensor:
 # --------------------------------------------------------------------------- #
 # CPU : unpack mince (pas de demosaic)
 # --------------------------------------------------------------------------- #
+def bayer_from_open(r) -> RawBayer:
+    """RawBayer depuis un handle rawpy DÉJÀ ouvert.
+
+    Extrait pour l'unpack unifié du scheduler (revue Fable 5 P-02) : la même
+    ouverture rawpy sert au bayer ET au JPEG boîtier (`embedded_jpeg.extract_from_open`).
+    """
+    bayer = r.raw_image_visible.copy()           # uint16 HxW
+    pattern = np.asarray(r.raw_pattern).copy()   # 2x2
+    color_desc = r.color_desc.decode("ascii")    # "RGBG"
+    wb = tuple(float(x) for x in r.camera_whitebalance)
+    black = tuple(float(x) for x in r.black_level_per_channel)
+    white = float(r.white_level)
+    cam_xyz = np.asarray(r.rgb_xyz_matrix, np.float32)[:3, :3].copy()
+    return RawBayer(bayer, pattern, color_desc, wb, black, white, cam_xyz)
+
+
 def unpack_raw(path: str) -> RawBayer | None:
     """Déballe le RAW via rawpy (CPU) : bayer + métadonnées. None si illisible.
 
@@ -99,16 +115,9 @@ def unpack_raw(path: str) -> RawBayer | None:
 
     try:
         with rawpy.imread(str(path)) as r:
-            bayer = r.raw_image_visible.copy()           # uint16 HxW
-            pattern = np.asarray(r.raw_pattern).copy()   # 2x2
-            color_desc = r.color_desc.decode("ascii")    # "RGBG"
-            wb = tuple(float(x) for x in r.camera_whitebalance)
-            black = tuple(float(x) for x in r.black_level_per_channel)
-            white = float(r.white_level)
-            cam_xyz = np.asarray(r.rgb_xyz_matrix, np.float32)[:3, :3].copy()
+            return bayer_from_open(r)
     except Exception:
         return None
-    return RawBayer(bayer, pattern, color_desc, wb, black, white, cam_xyz)
 
 
 # --------------------------------------------------------------------------- #
@@ -150,13 +159,21 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
     dev = gpu.device()
     H, W = rb.bayer.shape
 
-    bayer = torch.from_numpy(rb.bayer.astype(np.float32)).to(dev)
+    # H2D en uint16 (48 Mo) puis cast float32 SUR GPU — au lieu d'un astype float32
+    # côté CPU qui doublait le trafic PCIe et allouait 96 Mo hôte (revue Fable 5 P-06).
+    bayer = torch.from_numpy(rb.bayer).to(dev).to(torch.float32)
     pat = torch.from_numpy(rb.pattern.astype(np.int64)).to(dev)          # 2x2
     idx = pat.repeat((H + 1) // 2, (W + 1) // 2)[:H, :W]                 # HxW index 0..3
 
     black_v = torch.tensor(rb.black, dtype=torch.float32, device=dev)    # (4,)
     # WB normalisée au vert (index 1) : neutre → (g,g,g).
-    wb_arr = torch.tensor(rb.wb, dtype=torch.float32, device=dev)
+    # Convention dcraw/LibRaw : cam_mul[G2]==0 signifie « G2 = G1 » — sans cette
+    # garde les sites G2 seraient multipliés par 0 (canal vert faussé au demosaic).
+    # No-op sur Sony ARW (G2=G1 déjà), casse d'autres boîtiers sinon (C-01).
+    wb = list(rb.wb)
+    if len(wb) > 3 and wb[3] == 0:
+        wb[3] = wb[1]
+    wb_arr = torch.tensor(wb, dtype=torch.float32, device=dev)
     green = wb_arr[1] if wb_arr[1] != 0 else torch.tensor(1.0, device=dev)
     wb_norm = wb_arr / green
 

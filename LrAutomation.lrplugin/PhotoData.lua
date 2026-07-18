@@ -13,7 +13,7 @@ local PhotoData = {}
 -- Sous-ensemble de develop settings utile à l'analyse batch.
 -- Noms SDK = PV2012 (Exposure2012, etc.) : ce sont les valeurs réellement réglées
 -- par l'utilisateur. WhiteBalance ("Custom" = WB posée à la main) sert de marqueur
--- de seed côté App (core.seeds.is_seed).
+-- historique côté App (les seeds sont marqués en DB via cache.is_seed).
 --
 -- CameraProfile + ProcessVersion : clé du modèle de réponse calibré côté App
 -- (la réponse ∂rendu/∂curseur dépend du profil DCP). Les 24 curseurs HSL servent à
@@ -37,6 +37,22 @@ local DEVELOP_KEYS = {
     'LuminanceAdjustmentRed', 'LuminanceAdjustmentOrange', 'LuminanceAdjustmentYellow',
     'LuminanceAdjustmentGreen', 'LuminanceAdjustmentAqua', 'LuminanceAdjustmentBlue',
     'LuminanceAdjustmentPurple', 'LuminanceAdjustmentMagenta',
+    -- Style non neutralisé par le probe : entre dans hash_style côté App
+    -- (revue Fable 5 DB-01). Noms hybrides Color Grading : ombres/HL Hue+Sat =
+    -- SplitToning*, le reste ColorGrade* (cf. lr15_sdk_api_reference §Color Grading).
+    'Texture',
+    'SplitToningShadowHue', 'SplitToningShadowSaturation',
+    'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
+    'SplitToningBalance',
+    'ColorGradeShadowLum', 'ColorGradeHighlightLum',
+    'ColorGradeMidtoneHue', 'ColorGradeMidtoneSat', 'ColorGradeMidtoneLum',
+    'ColorGradeGlobalHue', 'ColorGradeGlobalSat', 'ColorGradeGlobalLum',
+    'ColorGradeBlending',
+    'ParametricShadows', 'ParametricDarks', 'ParametricLights', 'ParametricHighlights',
+    'ParametricShadowSplit', 'ParametricMidtoneSplit', 'ParametricHighlightSplit',
+    -- Courbe par points : tables de nombres (sérialisées telles quelles en JSON).
+    'ToneCurveName2012', 'ToneCurvePV2012',
+    'ToneCurvePV2012Red', 'ToneCurvePV2012Green', 'ToneCurvePV2012Blue',
 }
 
 local function extractExif(photo)

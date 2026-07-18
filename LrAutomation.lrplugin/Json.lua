@@ -143,20 +143,35 @@ local function decodeString(s, i)
                 local hex = s:sub(i + 2, i + 5)
                 local code = tonumber(hex, 16)
                 if not code then error('Json: \\u invalide à ' .. i) end
-                -- UTF-8 encodage minimal (BMP)
+                i = i + 6
+                -- Paire surrogate (revue Fable 5 L-08) : \uD800-DBFF suivie de
+                -- \uDC00-DFFF → code point astral, encodé UTF-8 sur 4 octets.
+                if code >= 0xD800 and code <= 0xDBFF and s:sub(i, i + 1) == '\\u' then
+                    local lo = tonumber(s:sub(i + 2, i + 5), 16)
+                    if lo and lo >= 0xDC00 and lo <= 0xDFFF then
+                        code = 0x10000 + (code - 0xD800) * 0x400 + (lo - 0xDC00)
+                        i = i + 6
+                    end
+                end
+                -- UTF-8 encodage minimal
                 if code < 0x80 then
                     buf[#buf + 1] = string.char(code)
                 elseif code < 0x800 then
                     buf[#buf + 1] = string.char(
                         0xC0 + math.floor(code / 0x40),
                         0x80 + (code % 0x40))
-                else
+                elseif code < 0x10000 then
                     buf[#buf + 1] = string.char(
                         0xE0 + math.floor(code / 0x1000),
                         0x80 + (math.floor(code / 0x40) % 0x40),
                         0x80 + (code % 0x40))
+                else
+                    buf[#buf + 1] = string.char(
+                        0xF0 + math.floor(code / 0x40000),
+                        0x80 + (math.floor(code / 0x1000) % 0x40),
+                        0x80 + (math.floor(code / 0x40) % 0x40),
+                        0x80 + (code % 0x40))
                 end
-                i = i + 6
             else
                 buf[#buf + 1] = UNESCAPES[nxt] or nxt
                 i = i + 2

@@ -12,7 +12,10 @@ from app.core import cache
 
 
 def test_raw_signature_missing_file():
-    assert cache.raw_signature("does/not/exist.arw") == "0:0"
+    # Repli fichier absent : salé ANALYSIS_VERSION lui aussi (revue Fable 5 DB-04).
+    sig = cache.raw_signature("does/not/exist.arw")
+    assert sig.startswith("0:0")
+    assert cache.ANALYSIS_VERSION in sig
 
 
 def test_raw_signature_encodes_size_mtime_and_version(tmp_path):
@@ -22,16 +25,6 @@ def test_raw_signature_encodes_size_mtime_and_version(tmp_path):
     parts = sig.split(":")
     assert parts[0] == "5"  # taille en octets
     assert cache.ANALYSIS_VERSION in sig  # salage de version présent
-
-
-def test_blob_hash_deterministic_and_salted():
-    import hashlib
-
-    h1 = cache.blob_hash(b"abc")
-    assert h1 == cache.blob_hash(b"abc")
-    assert h1 != cache.blob_hash(b"abd")
-    # Le hash inclut le sel de version → différent du sha1 brut des octets.
-    assert h1 != hashlib.sha1(b"abc").hexdigest()
 
 
 def test_develop_hash_is_order_independent():
@@ -66,7 +59,13 @@ def test_style_hash_changes_on_style_axes():
         ("Contrast2012", 25),
         ("Clarity2012", 30),
         ("CropLeft", 0.1),
-        ("ColorGradeShadowHue", 200),
+        # Clés ajoutées par la revue Fable 5 DB-01 (noms SDK réels — les anciens
+        # ColorGradeShadowHue etc. n'existaient pas).
+        ("SplitToningShadowHue", 200),
+        ("ColorGradeMidtoneHue", 120),
+        ("Texture", 30),
+        ("ParametricShadows", -20),
+        ("ToneCurvePV2012", [0, 0, 128, 140, 255, 255]),
     ):
         moved = dict(base)
         moved[key] = val

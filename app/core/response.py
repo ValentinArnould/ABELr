@@ -22,6 +22,7 @@ remplacées par la mesure (sondage) — voir scripts de validation.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -171,18 +172,28 @@ def _cache_file(camera: str | None, profile: str | None) -> Path:
 
 
 def load(camera: str | None, profile: str | None) -> ResponseModel:
-    """Charge le modèle caché pour (caméra, profil), ou un modèle vide (priors nominaux)."""
+    """Charge le modèle caché pour (caméra, profil), ou un modèle vide (priors nominaux).
+
+    Un JSON de cache corrompu/tronqué retombe sur le modèle vide (revue Fable 5
+    A-05) : une donnée jetable ne doit jamais faire échouer toute l'analyse.
+    """
     f = _cache_file(camera, profile)
     if not f.is_file():
         return ResponseModel(camera=camera or "unknown", profile=profile or "unknown")
-    data = json.loads(f.read_text(encoding="utf-8"))
-    return ResponseModel(
-        camera=data.get("camera", camera or "unknown"),
-        profile=data.get("profile", profile or "unknown"),
-        exposure=ExposureResponse(**data.get("exposure", {})),
-        wb=WBResponse(**data.get("wb", {})),
-        bands={k: BandResponse(**v) for k, v in data.get("bands", {}).items()},
-    )
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        return ResponseModel(
+            camera=data.get("camera", camera or "unknown"),
+            profile=data.get("profile", profile or "unknown"),
+            exposure=ExposureResponse(**data.get("exposure", {})),
+            wb=WBResponse(**data.get("wb", {})),
+            bands={k: BandResponse(**v) for k, v in data.get("bands", {}).items()},
+        )
+    except Exception:
+        logging.getLogger("lr_automation.response").exception(
+            "modèle de réponse illisible (%s) — repli sur les priors", f
+        )
+        return ResponseModel(camera=camera or "unknown", profile=profile or "unknown")
 
 
 def save(model: ResponseModel) -> Path:

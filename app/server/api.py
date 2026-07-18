@@ -50,14 +50,24 @@ def bridge() -> dict:
 
 
 @app.get("/jobs/pending")
-def jobs_pending(response: Response) -> dict:
-    """Le plugin récupère le prochain job. 204 si aucun job en attente."""
+def jobs_pending() -> Response:
+    """Le plugin récupère le prochain job. 204 (sans corps — RFC) si aucun job."""
     job_queue.mark_poll()  # battement de cœur du pont
     job = job_queue.next_pending()
     if job is None:
-        response.status_code = status.HTTP_204_NO_CONTENT
-        return {}
-    return job.model_dump(mode="json")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # Sérialisation APRÈS le pop (le job est déjà IN_PROGRESS) : en cas d'échec,
+    # marquer le job FAILED et libérer le worker qui l'attend, au lieu de le
+    # laisser pendre jusqu'au TTL 900 s (revue Fable 5 B-02).
+    try:
+        payload = job.model_dump_json()
+    except Exception as exc:
+        job_queue.submit_result(JobResult(
+            job_id=job.job_id, status="error",
+            error=f"payload non sérialisable côté serveur : {exc}",
+        ))
+        raise HTTPException(status_code=500, detail="payload non sérialisable")
+    return Response(content=payload, media_type="application/json")
 
 
 @app.post("/shutdown")

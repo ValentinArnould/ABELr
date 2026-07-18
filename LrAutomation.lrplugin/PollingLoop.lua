@@ -110,6 +110,7 @@ local function dispatch(job)
                 error          = t.error,
                 asshot_temp    = t.asshot_temp,
                 asshot_tint    = t.asshot_tint,
+                restore_error  = t.restore_error,
             }
         end
         return {
@@ -123,16 +124,28 @@ local function dispatch(job)
         local adjustments = payload.adjustments or {}
         local report = Adjustments.apply(adjustments)
         local status = (report.applied > 0 or report.total == 0) and 'ok' or 'error'
+        -- Résumé d'erreurs TOUJOURS joint quand il y en a (revue Fable 5 L-04) :
+        -- un apply PARTIEL (status='ok' avec des échecs) ne perd plus les causes.
+        local errorsSummary = nil
+        if #report.errors > 0 then
+            local parts = {}
+            for i = 1, math.min(5, #report.errors) do parts[#parts + 1] = report.errors[i] end
+            errorsSummary = table.concat(parts, ' | ')
+            if #report.errors > 5 then
+                errorsSummary = errorsSummary .. string.format(' | +%d autres', #report.errors - 5)
+            end
+        end
         local errMsg = nil
         if status == 'error' then
             errMsg = string.format('0/%d appliqués (%d matchés). %s',
                 report.total, report.matched,
-                report.errors[1] or 'aucune photo de la sélection ne correspond')
+                report.errors[1] or 'aucune photo ne correspond')
         end
         return {
             job_id  = jobId,
             status  = status,
             error   = errMsg,
+            errors_summary = errorsSummary,
             applied = report.applied,
             matched = report.matched,
             total   = report.total,
@@ -149,12 +162,22 @@ local function dispatch(job)
 end
 
 local function pollOnce()
-    local job, status = HttpClient.get('/jobs/pending', 5)
+    local job, status, rawBody = HttpClient.get('/jobs/pending', 5)
     if status == nil then
         return false   -- App non démarrée : on réessaiera
     end
-    if status == 204 or job == nil then
+    if status == 204 then
         return true    -- connecté, pas de job
+    end
+    if job == nil then
+        -- 200 avec body indécodable ≠ « pas de job » : le job vient d'être popé
+        -- côté App (IN_PROGRESS) et serait perdu jusqu'au TTL 900 s. On ne peut
+        -- pas le récupérer ici, mais on LOGGUE (revue Fable 5 L-06).
+        if status == 200 then
+            Utils.logf('pollOnce : HTTP 200 mais body indécodable (%d octets) — job perdu ? body=%s',
+                rawBody and #rawBody or 0, string.sub(tostring(rawBody), 1, 200))
+        end
+        return true
     end
 
     Utils.logf('Job reçu : type=%s id=%s', tostring(job.type), tostring(job.job_id))
@@ -185,8 +208,23 @@ local function pollOnce()
         })
     end
 
-    local _, postStatus = HttpClient.postJsonRaw('/jobs/' .. job.job_id .. '/result', payload, 10)
-    Utils.logf('POST result → HTTP %s', tostring(postStatus))
+    -- POST du résultat avec retries (revue Fable 5 L-07) : le job a déjà été
+    -- EXÉCUTÉ (apply compris) — perdre le POST fait timeouter le worker App alors
+    -- que le travail est fait. status nil = perte réseau → 2 retries avec backoff.
+    local postStatus
+    for attempt = 1, 3 do
+        local _, st = HttpClient.postJsonRaw('/jobs/' .. job.job_id .. '/result', payload, 10)
+        postStatus = st
+        if postStatus ~= nil then break end
+        Utils.logf('POST result : échec réseau (tentative %d/3), retry…', attempt)
+        LrTasks.sleep(0.5 * attempt)
+    end
+    if postStatus == nil then
+        Utils.logf('POST result : ABANDON après 3 tentatives — résultat du job %s perdu (travail déjà exécuté)',
+            tostring(job.job_id))
+    else
+        Utils.logf('POST result → HTTP %s', tostring(postStatus))
+    end
     return true
 end
 

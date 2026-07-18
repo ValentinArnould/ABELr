@@ -64,7 +64,7 @@ Singleton `job_queue`, FIFO thread-safe. Cycle : `submit()` → `wait_result(tim
 
 `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`,
 `apply_adjustments` — dispatchés dans [`PollingLoop.lua`](../LrAutomation.lrplugin/PollingLoop.lua)
-(≈ lignes 43-149).
+(≈ lignes 47-121).
 
 ### Côté plugin (`LrAutomation.lrplugin/`, 14 fichiers Lua)
 
@@ -77,7 +77,7 @@ Singleton `job_queue`, FIFO thread-safe. Cycle : `submit()` → `wait_result(tim
 | `AppLauncher.lua` | Start/stop/relaunch du process Python via `launch_app.ps1` |
 | `PollingLoop.lua` | Boucle 300 ms, dispatch jobs, heartbeat `_G.LR_AUTOMATION_BRIDGE_HEARTBEAT` (timeout 5 s) |
 | `HttpClient.lua` | Wrappers GET/POST JSON (LrHttp) |
-| `PhotoData.lua` | Extraction path/EXIF/develop settings/catalog_path (**42 `DEVELOP_KEYS`**) |
+| `PhotoData.lua` | Extraction path/EXIF/develop settings/catalog_path (**71 `DEVELOP_KEYS`**) |
 | `Adjustments.lua` | `applyDevelopSettings` batch dans `withWriteAccessDo` |
 | `Thumbnails.lua` | `requestJpegThumbnail` (`fetch`) + cycle apply/render/restore (`fetchProbe` → `render_probe`) |
 | `Json.lua` | JSON encodeur/décodeur embarqué |
@@ -99,7 +99,7 @@ Venv attendu en `app/.venv` (cf. `launch_app.ps1`).
 | `gpu.py` | Contexte CUDA strict, budget VRAM, pool de streams | `require_cuda()`, `GpuUnavailable` |
 | `gpu_raw.py` | Bayer → demosaic + WB + matrice → ProPhoto + stats (GPU) | `analyze_raw_gpu()` |
 | `gpu_jpeg.py` | Décodage JPEG GPU (nvJPEG) + extraction flux | `decode_blobs()`, `extract_jpeg_stream()` |
-| `gpu_schedule.py` | Scheduler VRAM-aware : unpack CPU borné → vagues GPU | `process_raw_batch()`, `process_embedded_batch()`, `analyze_render_blobs()` |
+| `gpu_schedule.py` | Scheduler VRAM-aware : unpack unifié (1 ouverture rawpy), double-buffer CPU/GPU, vagues par pipeline (revue Fable 5 G7) | `process_combined_batch()` (+ wrappers `process_raw_batch()`/`process_embedded_batch()`), `analyze_render_blobs()` |
 | `analysis.py` | Métriques exposition (Y) + gray-world en linéaire | `ExposureStats`, `ev100()` |
 | `render_metrics.py` | Tone L* / neutral a*b* / bandes HSL en CIELAB (numpy, source de vérité) | `tone_stats()`, `neutral_stats()`, `band_stats()` |
 | `render_metrics_gpu.py` | Portage torch CUDA de `render_metrics` (constantes importées de la version numpy) | `analyze_rendered_gpu_dual()` |
@@ -136,12 +136,14 @@ maintenant en DB via `cache`, matching via `seed_match`). `core/prediction.py` n
 | `job_worker.py` | live | QThread générique : soumet un job, attend le résultat plugin |
 | `autocorrect_worker.py` | live | QThread : RAW+JPEG boîtier+aperçu (zone nette) → cache → `autocorrect.plan` ; mode `analyze_only` |
 | `neutral_preview_worker.py` | live | QThread : ancres neutres (`render_probe`) → cache `NeutralPreviewJPEG` |
-| `analysis_worker.py` | **MORT** | `AnalysisWorker` jamais instancié — cf. PLAN.md étape 1 (suppression) |
 | `photo_panel.py` / `analysis_panel.py` | **STUB** | Vides, réservés (aperçus / histogrammes) |
+
+> `analysis_worker.py` supprimé (PLAN étape 1, revue Fable 5) — garde de
+> non-réapparition : `app/tests/test_no_dead_modules.py`.
 
 ### `server/`
 `api.py` (routes), `job_queue.py` (queue + heartbeat), `models.py` (Pydantic : `Job`, `JobResult`,
-`PhotoResult`, `ExifData`, `PhotoAdjustment`, enum `JobType`).
+`PhotoResult`, `ThumbnailResult`, `ExifData`, `PhotoAdjustment`, enums `JobType` / `JobStatus`).
 
 ---
 
@@ -175,7 +177,7 @@ LibRaw `postprocess`.
 | Décompression/unpack ARW → plan bayer 16-bit | **CPU irréductible** (pool borné aux cœurs physiques) |
 | Black-level, WB CFA, demosaic, matrice → ProPhoto, stats | **GPU** (`gpu_raw`) |
 | Décodage JPEG (aperçu rendu + JPEG boîtier) | **GPU** nvJPEG (`gpu_jpeg`) |
-| tone / neutral / bandes (CIELAB) | **GPU** (`render_metrics_gpu`, validé exact vs numpy) |
+| tone / neutral / bandes (CIELAB) | **GPU** (`render_metrics_gpu`, validé exact vs numpy ≤ 8 M px ; au-delà, quantiles sous-échantillonnés — biais négligeable, cf. REVIEW_FABLE5 C-04) |
 
 Aucun repli CPU de calcul : `gpu.require_cuda()` lève `GpuUnavailable` si CUDA absent, le worker
 échoue avec un message clair. VRAM gérée par `gpu_schedule` (vagues dimensionnées au budget).
@@ -187,16 +189,16 @@ Parité vérifiée par `tools/validate_gpu_vs_libraw` (exposition Y corr 1.000 ;
 ## 5. Cache SQLite (`core/cache.py`)
 
 `LrAutomation_cache.db` dans le dossier du catalogue actif. `SCHEMA_VERSION = 4`,
-`ANALYSIS_VERSION = "v4-neutral-anchor"` salée dans les hash (bump = rebuild complet, pas de
-migration ligne à ligne). Les workers consultent le cache d'abord → 2ᵉ passage = zéro décode.
+`ANALYSIS_VERSION = "v5-style-keys-g2wb"` salée dans les hash (bump = rebuild complet, pas de
+migration ligne à ligne ; v5 = revue Fable 5 G1 : clés style complétées + garde cam_mul[G2]). Les workers consultent le cache d'abord → 2ᵉ passage = zéro décode.
 C'est le vrai gain sur les séries 500-1000, en plus du GPU.
 
 | Table | Clé hash | Contenu |
 |---|---|---|
 | `LightroomPicture` | `hash_develop` | path, EXIF, `current_develop`, flag `is_seed`, profils DCP/capture |
 | `SourceRAW` | `hash_raw` (taille:mtime:ANALYSIS_VERSION) | WB as-shot, expo global+sharp, gray-world global+sharp, tone/hsl zone nette, ev100 |
-| `InCameraJPEG` | `hash_jpeg` (SHA1 + version) | tone/neutral/hsl global+sharp, deltas RAW↔JPEG précalculés |
-| `PreviewJPEG` | `hash_preview` (SHA1 + version) | mesures du rendu courant (état-dépendant) |
+| `InCameraJPEG` | `hash_jpeg` (= signature RAW taille:mtime+version — le JPEG vit dans le .ARW) | tone/neutral/hsl global+sharp, deltas RAW↔JPEG précalculés |
+| `PreviewJPEG` | `hash_preview` (= signature fichier source + version) | mesures du rendu courant (état-dépendant) |
 | `NeutralPreviewJPEG` | `hash_style` | ancre neutre + `wb_asshot_temp/tint` |
 
 `is_seed` : marqué/démarqué en DB (pas de décode pixel). k-NN `seed_match` lit le pool de seeds.
@@ -251,7 +253,7 @@ Apply sur un aperçu à jour donne un delta ≈ 0.
   périmée. Repli prévu non câblé : canal `RenderChannel.EXPORT` (`Thumbnails.fetchProbeExport` +
   job `render_probe_export`). À valider en conditions réelles (convergence 2ᵉ Aperçu ≈ 0). Cf.
   PLAN.md étape 8.
-- `analysis_worker.py` mort, panneaux GUI (`photo_panel`, `analysis_panel`) au stade stub.
+- Panneaux GUI (`photo_panel`, `analysis_panel`) au stade stub.
 
 ---
 

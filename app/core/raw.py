@@ -93,7 +93,10 @@ def load_thumbnail(path: str | Path) -> np.ndarray | None:
         import cv2
 
         data = np.frombuffer(thumb.data, dtype=np.uint8)
-        return cv2.imdecode(data, cv2.IMREAD_COLOR)[:, :, ::-1]  # BGR->RGB
+        bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if bgr is None:  # JPEG embarqué corrompu (revue Fable 5 C-03)
+            return None
+        return bgr[:, :, ::-1]  # BGR->RGB
     if thumb.format == rawpy.ThumbFormat.BITMAP:
         return thumb.data
     return None

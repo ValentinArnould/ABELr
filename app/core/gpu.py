@@ -17,7 +17,6 @@ conteneur ARW par LibRaw, **irréductible** : aucun codec GPU n'existe pour l'AR
 from __future__ import annotations
 
 import threading
-from functools import lru_cache
 
 import torch
 
@@ -26,9 +25,17 @@ class GpuUnavailable(RuntimeError):
     """Levée quand un GPU CUDA est requis (politique stricte) mais indisponible."""
 
 
-@lru_cache(maxsize=1)
+# Seul le SUCCÈS est mémoïsé (revue Fable 5 C-02) : un échec d'init transitoire
+# (OOM au lancement, driver occupé) mémorisé par lru_cache condamnait le process
+# jusqu'au redémarrage alors que le GPU était revenu.
+_cuda_ok = False
+
+
 def _diagnose() -> str | None:
-    """Retourne un message d'erreur si CUDA est inutilisable, sinon None (mémoïsé)."""
+    """Retourne un message d'erreur si CUDA est inutilisable, sinon None."""
+    global _cuda_ok
+    if _cuda_ok:
+        return None
     if not torch.cuda.is_available():
         return (
             "torch.cuda.is_available() == False — driver NVIDIA absent, ou build torch "
@@ -39,6 +46,7 @@ def _diagnose() -> str | None:
         torch.zeros(1, device="cuda")  # force l'init du contexte CUDA
     except Exception as exc:  # contexte cassé, OOM au démarrage, etc.
         return f"initialisation du contexte CUDA échouée : {exc}"
+    _cuda_ok = True
     return None
 
 

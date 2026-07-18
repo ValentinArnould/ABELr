@@ -31,7 +31,6 @@ est croppé, pas le JPEG boîtier — le masque net s'ancre sur le sujet commun)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from statistics import median
 
 from . import hsl as _hsl
 from . import exposure as _exp
@@ -56,11 +55,9 @@ _EXPO_DEADBAND_EV = 0.10
 _WB_CAST_DEADBAND = 3.0
 # Fraction minimale de pixels quasi-neutres pour qu'un cast soit fiable.
 _MIN_NEUTRAL_FRAC = 0.02
-# Pool de biais : n ≥ _BIAS_FULL_N → confiance pleine ; n ≥ _BIAS_MIN_N → utilisé
-# avec note « faible confiance » ; en dessous → axe sauté (appliquer un delta brut
-# contredirait la sémantique déviation-seule).
+# Confiance pleine du ProfileBias partagé (biais nul, cf. _plan_embedded : la
+# décision « biais ignoré » a supprimé le pool de calibration — revue Fable 5 DB-06).
 _BIAS_FULL_N = 8
-_BIAS_MIN_N = 3
 # Aire de crop (fraction du cadre) sous laquelle on mesure en zone nette plutôt
 # qu'en global (cadres trop différents entre JPEG boîtier et rendu croppé).
 _CROP_AREA_MIN = 0.8
@@ -171,56 +168,6 @@ def _pair_for(
     return None, None, variant
 
 
-def compute_profile_bias(
-    pairs: list[tuple[RenderAnalysis, RenderAnalysis]],
-) -> ProfileBias | None:
-    """Biais T−N d'un pool de calibration (médianes robustes composante par composante).
-
-    Retourne None si aucune paire avec tone exploitable. Le caller décide de la
-    confiance selon `ProfileBias.n` (cf. `_BIAS_FULL_N`/`_BIAS_MIN_N`).
-    """
-    d_l: list[float] = []
-    d_a: list[float] = []
-    d_b: list[float] = []
-    d_bands: dict[str, list[tuple[float, float, float]]] = {}
-    for t, n in pairs:
-        if t is None or n is None:
-            continue
-        if t.tone is not None and n.tone is not None:
-            d_l.append(t.tone.median_l - n.tone.median_l)
-        if (
-            t.neutral is not None and n.neutral is not None
-            and t.neutral.neutral_frac >= _MIN_NEUTRAL_FRAC
-            and n.neutral.neutral_frac >= _MIN_NEUTRAL_FRAC
-        ):
-            d_a.append(t.neutral.a_bias - n.neutral.a_bias)
-            d_b.append(t.neutral.b_bias - n.neutral.b_bias)
-        n_bands = {b.name: b for b in (n.bands or []) if band_is_reliable(b)}
-        for tb in t.bands or []:
-            nb = n_bands.get(tb.name)
-            if nb is None or not band_is_reliable(tb):
-                continue
-            d_bands.setdefault(tb.name, []).append((
-                tb.median_chroma - nb.median_chroma,
-                tb.median_l - nb.median_l,
-                _hue_diff(tb.median_hue, nb.median_hue),
-            ))
-    if not d_l:
-        return None
-    bias = ProfileBias(n=len(d_l), l=median(d_l))
-    if d_a:
-        bias.cast_a = median(d_a)
-        bias.cast_b = median(d_b)
-    for name, samples in d_bands.items():
-        if len(samples) >= _BIAS_MIN_N:
-            bias.bands[name] = (
-                median(s[0] for s in samples),
-                median(s[1] for s in samples),
-                median(s[2] for s in samples),
-            )
-    return bias
-
-
 def _embedded_band_targets(
     t: RenderAnalysis, bias: ProfileBias, *, ignore_bias: bool = False
 ) -> dict[str, BandTarget]:
@@ -269,41 +216,6 @@ def _band_targets_from_seed_match(t: SeedTarget | None) -> dict[str, BandTarget]
     return out
 
 
-def _build_bias_by_group(
-    targets: list[PhotoMeasure],
-    bias_pools: dict | None,
-) -> dict[tuple[str | None, str | None], dict[str, ProfileBias | None]]:
-    """Biais par groupe (profile_capture, hash_style) × variante ("global"/"sharp").
-
-    Le pool = lignes cache (`cache.get_bias_pool`, incluent normalement déjà les
-    photos du lot puisque le worker cache T et N avant de planifier) ∪ mesures du
-    lot (repli si l'écriture cache a échoué), dédupliquées par uuid.
-    """
-    groups: dict[tuple[str | None, str | None], dict[str, dict[str, tuple]]] = {}
-    for key_source, rows in (bias_pools or {}).items():
-        by_variant = groups.setdefault(key_source, {"global": {}, "sharp": {}})
-        for row in rows:
-            uuid = row.get("uuid")
-            if row.get("t_global") is not None and row.get("n_global") is not None:
-                by_variant["global"][uuid] = (row["t_global"], row["n_global"])
-            if row.get("t_sharp") is not None and row.get("n_sharp") is not None:
-                by_variant["sharp"][uuid] = (row["t_sharp"], row["n_sharp"])
-    for m in targets:
-        key = (m.profile_capture, m.hash_style)
-        by_variant = groups.setdefault(key, {"global": {}, "sharp": {}})
-        if m.embedded_global is not None and m.neutral_global is not None:
-            by_variant["global"].setdefault(m.photo_id, (m.embedded_global, m.neutral_global))
-        if m.embedded_sharp is not None and m.neutral_sharp is not None:
-            by_variant["sharp"].setdefault(m.photo_id, (m.embedded_sharp, m.neutral_sharp))
-    out: dict[tuple[str | None, str | None], dict[str, ProfileBias | None]] = {}
-    for key, by_variant in groups.items():
-        out[key] = {
-            variant: compute_profile_bias(list(pairs.values()))
-            for variant, pairs in by_variant.items()
-        }
-    return out
-
-
 def plan(
     measures: list[PhotoMeasure],
     *,
@@ -312,13 +224,8 @@ def plan(
     model: ResponseModel | None = None,
     camera: str | None = None,
     seed_pool: list[SeedVector] | None = None,
-    bias_pools: dict | None = None,
 ) -> tuple[list[PhotoAdjustment], PlanDiagnostics]:
-    """Planifie la correction par photo. Voir le docstring du module pour les modes.
-
-    `bias_pools` (mode embedded) : {(profile_capture, hash_style): lignes
-    `cache.get_bias_pool`} — pool de calibration du biais de profil.
-    """
+    """Planifie la correction par photo. Voir le docstring du module pour les modes."""
     seed_pool = seed_pool or []
     targets = [m for m in measures if not m.is_seed]
     mode_embedded = forced_embedded or not seed_pool
@@ -448,7 +355,8 @@ def _plan_embedded(
                 continue
             dtemp, dtint = wbresp.solve(e_a, e_b)
             temp = max(2000.0, min(12000.0, m.neutral_asshot_temp + max(-600.0, min(600.0, dtemp))))
-            tint = (m.neutral_asshot_tint or 0.0) + max(-10.0, min(10.0, dtint))
+            # Tint borné aux limites Lr ±150 (revue Fable 5 A-06), comme Temperature.
+            tint = max(-150.0, min(150.0, (m.neutral_asshot_tint or 0.0) + max(-10.0, min(10.0, dtint))))
             dev_by_id[m.photo_id].update(
                 WhiteBalance="Custom", Temperature=round(temp), Tint=round(tint)
             )
@@ -550,8 +458,12 @@ def _plan_seeds(
                 continue
             temp = t.temperature
             tint = t.tint if t.tint is not None else 0.0
-            if wbresp is not None:
+            # Garde `neutral is not None` (revue Fable 5 A-04) : une RenderAnalysis
+            # servie du cache peut ne pas porter de NeutralStats — sans la garde,
+            # une seule photo faisait échouer tout le run (AttributeError).
+            if wbresp is not None and m.analysis.neutral is not None:
                 temp, tint, _ = _wb.refine_temp_tint(temp, tint, m.analysis.neutral, wbresp)
+            tint = max(-150.0, min(150.0, tint))  # borne Lr ±150 (A-06)
             dev_by_id[m.photo_id].update(
                 WhiteBalance="Custom", Temperature=round(temp), Tint=round(tint)
             )

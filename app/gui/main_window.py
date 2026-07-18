@@ -449,13 +449,17 @@ class MainWindow(QMainWindow):
             return
         try:
             conn = cachemod.open_cache(catalog_path)
+            # Transaction UNIQUE (revue Fable 5 DB-03) : 2 commits/photo sur le
+            # thread Qt gelaient le GUI plusieurs secondes à 300+ photos.
             for p in photos:
                 cachemod.put_picture(
                     conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
                     exif=(p.exif.model_dump() if p.exif else None),
                     current_develop=p.current_develop or {},
+                    commit=False,
                 )
-                cachemod.set_seed(conn, p.photo_id, value)
+                cachemod.set_seed(conn, p.photo_id, value, commit=False)
+            conn.commit()
             conn.close()
         except Exception as exc:
             self.status_label.setText(f"Marquage référence échoué : {exc}")
@@ -563,13 +567,37 @@ class MainWindow(QMainWindow):
         if not self._require_bridge():
             return
         if self._pending_adjustments is not None:
-            adjustments = self._pending_adjustments
-            self._pending_adjustments = None
-            self._pending_ids = frozenset()
+            # Revue Fable 5 B-01 : ne pas rejouer un plan d'Aperçu si la sélection
+            # Lr a changé entre-temps (apply partiel/incohérent sinon). On re-fetch
+            # la sélection et on compare à `_pending_ids` avant de soumettre.
             self._set_actions_enabled(False)
-            self._submit_apply(adjustments)
+            self._progress_busy()
+            self.status_label.setText("Vérification de la sélection avant application…")
+            self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
+            self._worker.finished_result.connect(self._on_apply_selection_check)
+            self._worker.failed.connect(self._on_auto_failed)
+            self._worker.start()
         else:
             self._begin("apply")
+
+    def _on_apply_selection_check(self, result: JobResult) -> None:
+        adjustments = self._pending_adjustments
+        pending_ids = self._pending_ids
+        self._pending_adjustments = None
+        self._pending_ids = frozenset()
+        if adjustments is None:  # défensif : plan consommé entre-temps
+            self._set_actions_enabled(True)
+            self._progress_done()
+            self.status_label.setText("Plan d'Aperçu introuvable — relancez Aperçu.")
+            return
+        current_ids = frozenset(p.photo_id for p in result.photos)
+        if current_ids != pending_ids:
+            self.status_label.setText(
+                "Sélection modifiée depuis l'Aperçu — nouvelle mesure + planification…"
+            )
+            self._begin("apply")
+            return
+        self._submit_apply(adjustments)
 
     def _submit_apply(self, adjustments: list) -> None:
         if not adjustments:
@@ -582,7 +610,10 @@ class MainWindow(QMainWindow):
             f"Application — {len(adjustments)} photo(s) dans Lightroom…"
         )
         payload = {"adjustments": [a.model_dump() for a in adjustments]}
-        self._apply_worker = JobWorker(JobType.APPLY_ADJUSTMENTS, payload, timeout=180.0)
+        # Timeout ∝ n (revue Fable 5 B-05) : le plugin applique par lots de 50 avec
+        # heartbeat, mais une grosse sélection dépasse largement 180 s au total.
+        timeout = max(180.0, len(adjustments) * 2.0)
+        self._apply_worker = JobWorker(JobType.APPLY_ADJUSTMENTS, payload, timeout=timeout)
         self._apply_worker.finished_result.connect(self._on_apply_done)
         self._apply_worker.failed.connect(self._on_auto_failed)
         self._apply_worker.start()
@@ -593,9 +624,12 @@ class MainWindow(QMainWindow):
         applied = result.applied if result.applied is not None else "?"
         total = result.total if result.total is not None else "?"
         if result.status == "ok":
-            self.status_label.setText(
-                f"Appliqué : {applied}/{total} photo(s) — vérifiez le rendu dans Lightroom."
-            )
+            msg = f"Appliqué : {applied}/{total} photo(s) — vérifiez le rendu dans Lightroom."
+            if result.errors_summary:
+                # Apply partiel (revue Fable 5 L-04) : causes d'échec affichées.
+                msg += f" Échecs : {result.errors_summary}"
+                self.photo_list.insertItem(0, f"⚠ Apply partiel — {result.errors_summary}")
+            self.status_label.setText(msg)
         else:
             self.status_label.setText(f"Application : {applied}/{total} — {result.error}")
 

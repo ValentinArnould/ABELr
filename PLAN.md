@@ -20,8 +20,11 @@ Règles de travail : [`CLAUDE.md`](CLAUDE.md).
 
 ## Étapes
 
-- [ ] **1 — Supprimer le code mort.**
+- [x] **1 — Supprimer le code mort.** *(fait 2026-07-18, revue Fable 5 — `test_no_dead_modules.py` vert)*
   Supprimer `app/gui/analysis_worker.py` (`AnalysisWorker` jamais instancié ni importé — vérifié).
+  Note (revue Fable 5, Passe 0) : `analysis_worker` est le seul importeur GUI direct de
+  `gpu_raw`/`raw` — leur statut live tient par la chaîne `gpu_schedule`/`embedded_jpeg`.
+  Sa suppression ne tue aucun module core, mais fait de `gpu_schedule` l'unique entrant de `gpu_raw`.
   - *Vérif préalable* : `grep -rn "analysis_worker\|AnalysisWorker" app` ne renvoie que la définition.
   - *Test non-rég* : créer `app/tests/test_no_dead_modules.py` qui importe chaque module de
     `app/core/*` et `app/gui/*` (smoke import, sauf ceux exigeant Qt display → `importlib` avec
@@ -95,4 +98,31 @@ Non automatisable sans Lr ouvert (ou sans MCP Lr exposé) — **hors cases à co
 - Repli régime artistique : `core/regime.py` n'est plus consulté par le chemin live (k-NN). À
   revalider si le matching s'avère instable sur de petits pools de seeds.
 - `core/image_source.py` : tool-only — le retirer si les `tools/` qui l'utilisent sont archivés.
-- Perf : parallélisation des séries 500-1000 déjà couverte par GPU + cache ; re-profiler avant tout Rust.
+- Perf : GPU + cache en place, mais la Passe 2 (REVIEW_FABLE5.md) identifie des pertes
+  structurelles (pas de recouvrement CPU/GPU, double ouverture rawpy, vagues JPEG sous-dimensionnées).
+  Profiler (`py-spy`/`torch.profiler`) puis traiter G7 avant d'envisager Rust.
+
+## Backlog revue Fable 5 (2026-07-18) — items 🟠 (détail : documentation/REVIEW_FABLE5.md, Passe 3)
+
+Implémentation 2026-07-18 : **tous les items 🟠 + l'essentiel des 🟡/⚪ livrés** (voir
+Journal Passe 4 de REVIEW_FABLE5.md). Tests : 78/78 verts, parité GPU revalidée.
+
+- [x] **G3 — Durcir `Thumbnails.lua`** (L-01/L-02/L-03) : retours de `requestJpegThumbnail`
+  retenus, nom de fichier unique par appel (génération), échecs de restore remontés
+  (`restore_error` jusqu'au GUI).
+- [x] **B-01 — Vérifier `_pending_ids` avant Apply** : re-fetch sélection, re-planification si écart.
+- [x] **G2 — exiftool argfile** (A-01/A-02) : `-@ argfile` temp UTF-8 + `encoding="utf-8"`.
+- [x] **G1 — Bump `ANALYSIS_VERSION` commun** (DB-01/C-01) : `DEVELOP_KEYS` 44→71 clés,
+  `_STYLE_KEYS` corrigées (noms SDK réels `SplitToning*`) + Texture/ToneCurve/Parametric,
+  garde `cam_mul[G2]==0` — bump unique `v5-style-keys-g2wb` (rebuild cache au 1ᵉʳ run).
+- [x] **G7 — Refonte scheduler GPU** (P-01/P-02/P-03, +P-06) : `process_combined_batch`
+  (unpack unifié, double-buffer, vagues par pipeline, `empty_cache` réactif, H2D uint16).
+  Parité revalidée (`validate_gpu_vs_libraw` : expo corr 1.000, gray-world 0.996-0.9995).
+
+Restant (non traité, décision de périmètre) :
+
+- [ ] **G9 — Micro-passe métriques GPU** (P-04/P-05) : hoister hue/sat/chroma du dual,
+  regrouper les syncs scalaires. **Parité bit-exacte exigée** (sinon bump `ANALYSIS_VERSION`) —
+  à faire avec profilage (`torch.profiler`) à l'appui.
+- [ ] **P-10 — `_probe_chunk` décode une à une** : cohérence plus que perf (dominé par le
+  rendu Lr) ; batcher via `analyze_render_blobs` à l'occasion.

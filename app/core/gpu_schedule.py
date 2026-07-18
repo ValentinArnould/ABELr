@@ -1,37 +1,55 @@
 """Scheduler VRAM-aware — nourrit le GPU sans saturer les 8 Go (combinaison RAM+VRAM).
 
 Politique : décodage pixel **sur GPU**, unpack/I-O conteneur sur CPU **borné**. Deux
-étages :
+étages, refondus par la revue Fable 5 (G7 : P-01/P-02/P-03/P-06) :
 
 - **Producteur CPU borné** (`ThreadPoolExecutor`, cœurs physiques) : `rawpy` libère le
-  GIL → vrai parallélisme pour déballer bayers/octets JPEG en **RAM hôte**. Borné (jamais
-  les 32 process qui gelaient le PC).
-- **Consommateur GPU en vagues** : traite par **chunks dimensionnés à la VRAM libre**
-  (`gpu.vram_budget_bytes`), libère la VRAM entre vagues (`gpu.empty_cache`). Le RAW est
-  traité séquentiellement sur GPU (pic VRAM = 1 image, sûr sur 8 Go) pendant que le CPU
-  déballe la vague suivante ; le JPEG est décodé par lot (nvJPEG) par vague.
+  GIL → vrai parallélisme pour déballer bayers/octets JPEG en **RAM hôte**. Le pool
+  déballe la vague N+1 **pendant** que le GPU traite la vague N (double-buffer, P-01) —
+  au plus 2 vagues en vol en RAM.
+- **Unpack unifié** (P-02) : un chemin qui manque à la fois côté RAW et côté JPEG
+  boîtier n'ouvre le conteneur ARW qu'UNE fois (`_unpack_combined` : bayer + WB
+  as-shot + octets du thumb dans le même `with rawpy.imread`).
+- **Consommateur GPU en vagues dimensionnées PAR PIPELINE** (P-03) : le RAW pleine
+  résolution et les JPEG (~15× plus petits) ont chacun leur estimation de VRAM — les
+  vagues nvJPEG passent de 3-5 à 30-60 images. `empty_cache` n'est plus systématique
+  (sync + flush allocateur par vague) : réactif sur OOM + hygiène périodique.
 
 Aucun repli CPU de **calcul** (GPU-strict) : si CUDA manque, `gpu.require_cuda` lève.
+Parité mesures inchangée (mêmes kernels, seul l'ordonnancement change) — à revalider
+par `tools/validate_gpu_vs_libraw` après tout changement ici.
 """
 
 from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 import torch
 
 from . import embedded_jpeg, gpu, gpu_jpeg, gpu_raw, render_metrics_gpu
-from .embedded_jpeg import RawReference
-from .gpu_raw import RawGpuResult
+from .embedded_jpeg import EmbeddedExtract, RawReference
+from .gpu_raw import RawBayer, RawGpuResult
 from .pipeline import RenderAnalysisDual
 
 Progress = Optional[Callable[[int, int], None]]
 
-# Estimation grossière de la VRAM transitoire par image pleine résolution (~24-33MP) :
-# décodage + tampons float du demosaic/Lab. Sert à dimensionner les vagues.
-_EST_BYTES_PER_IMG = 33_000_000 * 36
+# Estimations de VRAM transitoire par image, PAR PIPELINE (revue Fable 5 P-03) :
+# - RAW pleine résolution (~24-33 MP) : demosaic + Lab + broadcast des bandes.
+# - JPEG décodé (aperçu/boîtier, ~0.5-3 MP) : ~15× plus petit. Une estimation
+#   unique taille-RAW donnait des vagues nvJPEG de 3-5 images (batching inutile).
+_EST_BYTES_RAW_IMG = 33_000_000 * 36
+_EST_BYTES_JPEG_IMG = 80_000_000
+
+# Plafonds de vague (bornent aussi la RAM hôte : 2 vagues en vol avec le prefetch).
+_WAVE_CAP_RAW = 16
+_WAVE_CAP_JPEG = 64
+
+# Hygiène allocateur : empty_cache toutes les N vagues seulement (P-03 — l'appel
+# systématique par vague coûtait un sync + cudaMalloc repayé à la vague suivante).
+_EMPTY_CACHE_EVERY = 8
 
 
 def _cpu_workers() -> int:
@@ -40,13 +58,13 @@ def _cpu_workers() -> int:
     return max(1, min(logical // 2, 8))
 
 
-def _wave_size() -> int:
+def _wave_size(est_bytes_per_img: int, cap: int) -> int:
     """Taille de vague GPU = budget VRAM / estimation par image (au moins 1)."""
     try:
         budget = gpu.vram_budget_bytes()
     except Exception:
         return 4
-    return max(1, min(16, budget // _EST_BYTES_PER_IMG))
+    return max(1, min(cap, budget // est_bytes_per_img))
 
 
 def _chunks(seq: list, n: int):
@@ -54,72 +72,163 @@ def _chunks(seq: list, n: int):
         yield seq[i : i + n]
 
 
+def _maybe_empty_cache(wave_idx: int) -> None:
+    if (wave_idx + 1) % _EMPTY_CACHE_EVERY == 0:
+        gpu.empty_cache()
+
+
+def _with_oom_retry(fn, *args):
+    """Exécute un pas GPU ; sur OOM, rend la VRAM cachée et retente UNE fois."""
+    try:
+        return fn(*args)
+    except torch.cuda.OutOfMemoryError:
+        gpu.empty_cache()
+        return fn(*args)
+
+
 # --------------------------------------------------------------------------- #
-# RAW : unpack CPU borné (parallèle) → process GPU séquentiel par vague
+# Unpack unifié (P-02) : UNE ouverture rawpy → bayer et/ou référence embedded
+# --------------------------------------------------------------------------- #
+@dataclass
+class _CombinedUnpack:
+    bayer: RawBayer | None
+    extract: EmbeddedExtract | None
+
+
+def _unpack_combined(args: tuple[str, bool, bool]) -> _CombinedUnpack:
+    """(path, need_bayer, need_jpeg) → bayer et/ou extract, une seule ouverture."""
+    path, need_bayer, need_jpeg = args
+    import rawpy
+
+    bayer: RawBayer | None = None
+    extract: EmbeddedExtract | None = None
+    try:
+        with rawpy.imread(str(path)) as r:
+            if need_bayer:
+                bayer = gpu_raw.bayer_from_open(r)
+            if need_jpeg:
+                extract = embedded_jpeg.extract_from_open(r)
+    except Exception:
+        pass  # RAW illisible → (None, None), même contrat que unpack_raw/extract_reference
+    return _CombinedUnpack(bayer, extract)
+
+
+# --------------------------------------------------------------------------- #
+# Passage combiné RAW + JPEG boîtier (double-buffer CPU/GPU, P-01)
+# --------------------------------------------------------------------------- #
+def process_combined_batch(
+    raw_paths: list[str],
+    embedded_paths: list[str],
+    progress: Progress = None,
+) -> tuple[dict[str, Optional[RawGpuResult]], dict[str, RawReference]]:
+    """Décode RAW et/ou JPEG boîtier en un passage.
+
+    Un chemin présent dans les deux listes n'ouvre le conteneur qu'une fois.
+    Retourne ({chemin: RawGpuResult|None}, {chemin: RawReference}) — clés limitées
+    aux listes demandées. `progress` compte une unité par analyse produite
+    (len(raw_paths) + len(embedded_paths) au total).
+    """
+    gpu.require_cuda()
+    raw_out: dict[str, Optional[RawGpuResult]] = {}
+    emb_out: dict[str, RawReference] = {}
+    need_raw = set(raw_paths)
+    need_emb = set(embedded_paths)
+    all_paths = list(dict.fromkeys([*raw_paths, *embedded_paths]))
+    if not all_paths:
+        return raw_out, emb_out
+
+    total = len(raw_paths) + len(embedded_paths)
+    done = 0
+
+    def _tick() -> None:
+        nonlocal done
+        done += 1
+        if progress:
+            progress(done, total)
+
+    workers = _cpu_workers()
+    # Vague dimensionnée pour la charge la plus lourde présente ; au moins la
+    # largeur du pool CPU pour que le prefetch occupe tous les workers.
+    if need_raw:
+        wave = max(workers, _wave_size(_EST_BYTES_RAW_IMG, _WAVE_CAP_RAW))
+    else:
+        wave = max(workers, _wave_size(_EST_BYTES_JPEG_IMG, _WAVE_CAP_JPEG))
+    waves = list(_chunks(all_paths, wave))
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+
+        def _submit(wave_paths: list[str]):
+            return [
+                ex.submit(_unpack_combined, (p, p in need_raw, p in need_emb))
+                for p in wave_paths
+            ]
+
+        next_futs = _submit(waves[0])
+        for wi, wave_paths in enumerate(waves):
+            futs = next_futs
+            # Double-buffer (P-01) : la vague N+1 se déballe sur le pool CPU
+            # pendant que ce thread consomme la vague N sur GPU.
+            next_futs = _submit(waves[wi + 1]) if wi + 1 < len(waves) else []
+
+            extracts: list[tuple[str, EmbeddedExtract]] = []
+            for path, fut in zip(wave_paths, futs):
+                cu = fut.result()
+                if path in need_raw:
+                    raw_out[path] = (
+                        _with_oom_retry(gpu_raw.process_bayer_gpu, cu.bayer)
+                        if cu.bayer is not None else None
+                    )
+                    _tick()
+                if path in need_emb:
+                    extracts.append(
+                        (path, cu.extract or EmbeddedExtract(None, None, None))
+                    )
+
+            # JPEG boîtier de la vague : décodage nvJPEG PAR LOT + métriques dual.
+            if extracts:
+                blobs = [e.jpeg_bytes for _, e in extracts if e.jpeg_bytes]
+                pos = [i for i, (_, e) in enumerate(extracts) if e.jpeg_bytes]
+                decoded = _with_oom_retry(gpu_jpeg.decode_blobs, blobs) if blobs else []
+                dec_by_pos = dict(zip(pos, decoded))
+                for i, (path, e) in enumerate(extracts):
+                    tone = bands = None
+                    sharp = glob = mask_frac = None
+                    chw = dec_by_pos.get(i)
+                    if chw is not None:
+                        dual = _with_oom_retry(
+                            render_metrics_gpu.analyze_rendered_gpu_dual, chw
+                        )
+                        sharp, glob, mask_frac = dual.sharp, dual.glob, dual.mask_sharp_frac
+                        tone, bands = sharp.tone, sharp.bands
+                    emb_out[path] = RawReference(
+                        tone, bands, e.asshot_rg, e.asshot_bg,
+                        sharp=sharp, glob=glob, mask_sharp_frac=mask_frac,
+                    )
+                    _tick()
+
+            _maybe_empty_cache(wi)
+
+    gpu.empty_cache()  # fin de lot : rendre la VRAM mise en cache par l'allocateur
+    return raw_out, emb_out
+
+
+# --------------------------------------------------------------------------- #
+# API historiques — wrappers du passage combiné
 # --------------------------------------------------------------------------- #
 def process_raw_batch(
     paths: list[str], progress: Progress = None
 ) -> dict[str, Optional[RawGpuResult]]:
     """Décode un lot de RAW sur GPU. {chemin: RawGpuResult|None}."""
-    gpu.require_cuda()
-    out: dict[str, Optional[RawGpuResult]] = {}
-    if not paths:
-        return out
-    workers = _cpu_workers()
-    chunk = max(workers, _wave_size())
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for group in _chunks(paths, chunk):
-            bayers = list(ex.map(gpu_raw.unpack_raw, group))  # CPU parallèle borné
-            for path, rb in zip(group, bayers):               # GPU séquentiel (VRAM-safe)
-                out[path] = gpu_raw.process_bayer_gpu(rb) if rb is not None else None
-                done += 1
-                if progress:
-                    progress(done, len(paths))
-            gpu.empty_cache()
-    return out
+    raw_out, _ = process_combined_batch(paths, [], progress=progress)
+    return raw_out
 
 
-# --------------------------------------------------------------------------- #
-# JPEG boîtier embarqué : extract CPU borné → décode + métriques GPU par vague
-# --------------------------------------------------------------------------- #
 def process_embedded_batch(
     paths: list[str], progress: Progress = None
 ) -> dict[str, RawReference]:
     """WB as-shot + tone/bandes du JPEG boîtier, décodage **GPU**. {chemin: RawReference}."""
-    gpu.require_cuda()
-    out: dict[str, RawReference] = {}
-    if not paths:
-        return out
-    workers = _cpu_workers()
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        extracts = list(ex.map(embedded_jpeg.extract_reference, paths))  # CPU parallèle
-
-    done = 0
-    chunk = max(1, _wave_size())
-    for group_paths, group_ex in zip(_chunks(paths, chunk), _chunks(extracts, chunk)):
-        blobs = [e.jpeg_bytes for e in group_ex if e.jpeg_bytes is not None]
-        blob_pos = [i for i, e in enumerate(group_ex) if e.jpeg_bytes is not None]
-        decoded = gpu_jpeg.decode_blobs(blobs) if blobs else []
-        dec_by_pos = dict(zip(blob_pos, decoded))
-        for i, (path, ex_) in enumerate(zip(group_paths, group_ex)):
-            tone = bands = None
-            sharp = glob = None
-            mask_frac = None
-            chw = dec_by_pos.get(i)
-            if chw is not None:
-                dual = render_metrics_gpu.analyze_rendered_gpu_dual(chw)
-                sharp, glob, mask_frac = dual.sharp, dual.glob, dual.mask_sharp_frac
-                tone, bands = sharp.tone, sharp.bands
-            out[path] = RawReference(
-                tone, bands, ex_.asshot_rg, ex_.asshot_bg,
-                sharp=sharp, glob=glob, mask_sharp_frac=mask_frac,
-            )
-            done += 1
-            if progress:
-                progress(done, len(paths))
-        gpu.empty_cache()
-    return out
+    _, emb_out = process_combined_batch([], paths, progress=progress)
+    return emb_out
 
 
 # --------------------------------------------------------------------------- #
@@ -137,13 +246,17 @@ def analyze_render_blobs(
     if not items:
         return out
     done = 0
-    chunk = max(1, _wave_size())
-    for group in _chunks(items, chunk):
-        decoded = gpu_jpeg.decode_blobs([blob for _, blob in group])
+    chunk = max(1, _wave_size(_EST_BYTES_JPEG_IMG, _WAVE_CAP_JPEG))
+    for wi, group in enumerate(_chunks(items, chunk)):
+        decoded = _with_oom_retry(gpu_jpeg.decode_blobs, [blob for _, blob in group])
         for (key, _blob), chw in zip(group, decoded):
-            out[key] = render_metrics_gpu.analyze_rendered_gpu_dual(chw) if chw is not None else None
+            out[key] = (
+                _with_oom_retry(render_metrics_gpu.analyze_rendered_gpu_dual, chw)
+                if chw is not None else None
+            )
             done += 1
             if progress:
                 progress(done, len(items))
-        gpu.empty_cache()
+        _maybe_empty_cache(wi)
+    gpu.empty_cache()
     return out

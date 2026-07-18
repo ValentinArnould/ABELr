@@ -1,8 +1,10 @@
 --[[
     Thumbnails.lua — récupération de miniatures JPEG via requestJpegThumbnail.
 
-    Écrit chaque miniature dans {projectRoot}/tmp_thumbs/{photo_id}.jpg pour que
+    Écrit chaque miniature dans {projectRoot}/tmp_thumbs/{photo_id}_{gen}.jpg pour que
     l'App Python puisse les lire directement (même machine, pas d'encodage base64).
+    {gen} = génération du fetch (nom unique par appel, cf. revue Fable 5 L-02) ;
+    les fichiers des générations passées sont purgés deux fetches plus tard.
 
     requestJpegThumbnail est async : on attend les callbacks via LrTasks.sleep.
     Timeout THUMB_TIMEOUT secondes si Lr ne génère pas la miniature (preview manquante).
@@ -33,6 +35,26 @@ local function thumbsDir()
     return dir
 end
 
+-- Génération de fetch : suffixe les fichiers de sortie (un nom unique par appel)
+-- et arme la garde anti-callback-tardif (revue Fable 5 L-01/L-02). Sans elle, un
+-- callback arrivant après timeout pouvait écraser le fichier frais du job suivant
+-- (l'App mesurait des pixels périmés) ou muter un `results` déjà renvoyé.
+local fetchGen = 0
+-- Fichiers écrits par génération, purgés deux générations plus tard (l'App a
+-- alors consommé les JPEG — elle les lit dès le retour du job).
+local staleFiles = {}
+
+local function purgeStaleFiles(currentGen)
+    for g, paths in pairs(staleFiles) do
+        if g <= currentGen - 2 then
+            for _, p in ipairs(paths) do
+                LrFileUtils.delete(p)
+            end
+            staleFiles[g] = nil
+        end
+    end
+end
+
 --[[
     Thumbnails.fetch(photos, width, height)
 
@@ -54,13 +76,29 @@ function Thumbnails.fetch(photos, width, height)
     -- de photos (chaque aperçu peut demander une régénération côté Lr).
     local timeout = math.max(THUMB_TIMEOUT, #photos * THUMB_SECONDS_PER_PHOTO)
 
+    fetchGen = fetchGen + 1
+    local gen  = fetchGen
+    local done = false      -- vrai après l'attente : les callbacks tardifs n'écrivent plus rien
+    purgeStaleFiles(gen)
+
+    -- Rétention des objets requête (L-01) : la valeur de retour de
+    -- requestJpegThumbnail doit rester référencée pendant toute l'attente, sinon
+    -- le GC peut la collecter et le callback ne tire jamais (timeouts fantômes).
+    local requests = {}
+
     for i, photo in ipairs(photos) do
         local photoId = photo:getRawMetadata('uuid')
-        local outPath = LrPathUtils.child(dir, photoId .. '.jpg')
+        -- Nom unique par appel (L-02) : un callback tardif du job N écrit dans le
+        -- fichier du job N, jamais dans celui du job N+1.
+        local outPath = LrPathUtils.child(dir, string.format('%s_%d.jpg', photoId, gen))
         results[i]    = { photo_id = photoId, thumbnail_path = nil, error = nil }
 
         -- requestJpegThumbnail est async : callback déclenché quand la miniature est prête.
-        photo:requestJpegThumbnail(width, height, function(jpeg, err)
+        requests[i] = photo:requestJpegThumbnail(width, height, function(jpeg, err)
+            if done or gen ~= fetchGen then
+                Utils.logf('Thumbnail : callback tardif ignoré (gen %d) pour %s', gen, photoId)
+                return
+            end
             if jpeg and #jpeg > 0 then
                 local f = io.open(outPath, 'wb')
                 if f then
@@ -81,11 +119,15 @@ function Thumbnails.fetch(photos, width, height)
     end
 
     -- Attente coopérative : LrTasks.sleep cède la main à Lr pour traiter les callbacks.
+    -- Le heartbeat est rafraîchi pendant l'attente (L-05) : un lot long ne doit pas
+    -- faire passer le pont pour mort côté App (seuil 5 s < durée d'un gros fetch).
     local elapsed = 0
     while pending > 0 and elapsed < timeout do
+        _G.LR_AUTOMATION_BRIDGE_HEARTBEAT = os.time()
         LrTasks.sleep(0.1)
         elapsed = elapsed + 0.1
     end
+    done = true
 
     if pending > 0 then
         Utils.logf('Thumbnails.fetch : timeout (%.1fs), %d en attente', timeout, pending)
@@ -96,6 +138,16 @@ function Thumbnails.fetch(photos, width, height)
             end
         end
     end
+
+    -- Mémorise les fichiers écrits pour la purge différée (gen + 2).
+    local written = {}
+    for i = 1, #results do
+        if results[i].thumbnail_path then written[#written + 1] = results[i].thumbnail_path end
+    end
+    staleFiles[gen] = written
+
+    -- `requests` gardé vivant jusqu'ici volontairement (rétention L-01).
+    requests = nil
 
     return results
 end
@@ -174,22 +226,37 @@ function Thumbnails.fetchProbe(adjustments, width, height, settle)
     for _, t in ipairs(targets) do photos[#photos + 1] = t.photo end
     local results = Thumbnails.fetch(photos, width, height)
 
-    -- 3. Restaure l'état d'origine (transaction).
+    -- 3. Restaure l'état d'origine (transaction). Un échec de restore laisse la
+    -- photo en état NEUTRE (WB As Shot / Exp 0 / HSL 0) : il doit remonter dans le
+    -- résultat du job, jamais être avalé (revue Fable 5 L-03).
+    local restoreErrors = {}
     catalog:withWriteAccessDo('Lr Automation : sonde (restore)', function()
         for _, t in ipairs(targets) do
             local orig = original[t.id]
             if orig then
-                LrTasks.pcall(function() t.photo:applyDevelopSettings(orig) end)
+                local ok, err = LrTasks.pcall(function() t.photo:applyDevelopSettings(orig) end)
+                if not ok then
+                    restoreErrors[t.id] = tostring(err or 'restore failed')
+                    Utils.logf('fetchProbe : RESTORE ÉCHOUÉ pour %s — photo laissée en état neutre : %s',
+                        t.id, tostring(err))
+                end
             end
         end
     end)
 
-    -- Enrichit les résultats des valeurs As Shot relues.
+    -- Enrichit les résultats des valeurs As Shot relues + erreurs de restore.
     for i = 1, #results do
         local asshot = asshotById[results[i].photo_id]
         if asshot then
             results[i].asshot_temp = asshot.temp
             results[i].asshot_tint = asshot.tint
+        end
+        local restoreErr = restoreErrors[results[i].photo_id]
+        if restoreErr then
+            results[i].restore_error = restoreErr
+            -- L'échec de restore prime : la miniature rendue est celle d'un état
+            -- que la photo ne quittera pas — signal fort côté App.
+            results[i].error = results[i].error or ('restore failed: ' .. restoreErr)
         end
     end
 

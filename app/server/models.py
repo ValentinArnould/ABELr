@@ -72,6 +72,9 @@ class ThumbnailResult(BaseModel):
     # (si le probe pose WhiteBalance='As Shot', c'est la valeur numérique de l'As Shot).
     asshot_temp: Optional[float] = None
     asshot_tint: Optional[float] = None
+    # render_probe : le restore de l'état d'origine a échoué — la photo est restée
+    # en état neutre (revue Fable 5 L-03). Signal fort : à remonter à l'utilisateur.
+    restore_error: Optional[str] = None
 
 
 class JobResult(BaseModel):
@@ -86,6 +89,9 @@ class JobResult(BaseModel):
     applied: Optional[int] = None
     matched: Optional[int] = None
     total: Optional[int] = None
+    # Résumé des erreurs d'un apply PARTIEL (status='ok' mais des photos ont échoué)
+    # — revue Fable 5 L-04 : les textes d'erreur ne sont plus perdus.
+    errors_summary: Optional[str] = None
 
 
 class PhotoAdjustment(BaseModel):

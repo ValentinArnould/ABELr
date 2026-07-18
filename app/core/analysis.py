@@ -8,8 +8,9 @@ Deux sources d'entrée :
   l'exposition choisie par l'utilisateur (r=0.937 sur vérité terrain n=10, vs 0.914 RAW).
   WB masquée sur tons moyens (validée sur previews exposées — invalide à expo ≈ 0).
 
-Métriques consommées par `gui.analysis_worker` (affichage). Le calcul des
-corrections WB/expo vit dans `core.wb_model` / `core.seeds`.
+Consommé par `gui.autocorrect_worker` (`ev100`, `ExposureStats`) et par la parité
+GPU (`core.gpu_raw` réutilise les seuils de clipping). Le calcul des corrections
+vit dans `core.seed_match` / `core.wb_model` / `core.autocorrect`.
 """
 
 from __future__ import annotations
@@ -64,7 +65,9 @@ def parse_shutter_seconds(shutter: str | float | None) -> float | None:
         return None
     if isinstance(shutter, (int, float)):
         return float(shutter) if shutter > 0 else None
-    s = str(shutter).strip().rstrip('"s ').strip()
+    # Lr localisé FR formate les poses lentes avec une virgule (« 0,4 s ») —
+    # normaliser avant float() (revue Fable 5 A-03).
+    s = str(shutter).strip().rstrip('"s ').strip().replace(",", ".")
     try:
         if "/" in s:
             num, den = s.split("/", 1)
