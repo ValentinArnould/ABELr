@@ -1,7 +1,7 @@
 --[[
-    MenuRelaunch.lua — Bibliothèque > Modules externes > Relancer l'application.
-    Arrêt propre de l'instance existante puis redémarrage. Vide le cache des
-    modules du plugin pour appliquer le nouveau code après un rechargement.
+    MenuRelaunch.lua — Library > Plug-in Extras > Relaunch the application.
+    Cleanly stops the existing instance then restarts it. Clears the plugin's
+    module cache so new code takes effect after a reload.
 ]]
 
 if package and package.loaded then

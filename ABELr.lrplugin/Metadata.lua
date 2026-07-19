@@ -1,16 +1,16 @@
 --[[
-    Metadata.lua — écriture des métadonnées de classement et mots-clés (jobs Phase 2).
+    Metadata.lua — writes rating/flag/keyword metadata (Phase 2 jobs).
 
-    setRating / setFlagColor / setKeywords. Toute écriture dans withWriteAccessDo,
-    par lots (heartbeat rafraîchi entre deux lots comme Adjustments.apply). Retourne
-    { applied, total, errors } — converti en errors_summary par PollingLoop.batchResult.
+    setRating / setFlagColor / setKeywords. All writes inside withWriteAccessDo,
+    in batches (heartbeat refreshed between batches, like Adjustments.apply). Returns
+    { applied, total, errors } — converted to errors_summary by PollingLoop.batchResult.
 
-    APIs SDK utilisées (réf. lr15_sdk_api_reference.md §5) :
-      photo:setRawMetadata('rating'|'pickStatus'|'colorNameForLabel', v)   [confirmé]
-      catalog:createKeyword(name, synonyms, includeOnExport, parent, returnExisting) [confirmé]
-      photo:addKeyword(kw) / :removeKeyword(kw)                             [confirmé]
-    ⚠️ kw:getName() n'est pas listé dans la réf — méthode LrKeyword canonique,
-       À CONFIRMER au 1er run en Lr (cf. règle CLAUDE.md sur les méthodes non vérifiées).
+    SDK APIs used (ref. lr15_sdk_api_reference.md §5):
+      photo:setRawMetadata('rating'|'pickStatus'|'colorNameForLabel', v)   [confirmed]
+      catalog:createKeyword(name, synonyms, includeOnExport, parent, returnExisting) [confirmed]
+      photo:addKeyword(kw) / :removeKeyword(kw)                             [confirmed]
+    ⚠️ kw:getName() is not listed in the reference — canonical LrKeyword method,
+       TO CONFIRM on the first live Lr run (cf. CLAUDE.md rule on unverified methods).
 ]]
 
 local LrApplication = import 'LrApplication'
@@ -23,15 +23,15 @@ local Metadata = {}
 local CHUNK = 50
 local FLAG_TO_PICK = { pick = 1, reject = -1, none = 0 }
 
--- Ajoute les uuids manquants comme erreurs (non trouvés = non appliqués).
+-- Adds missing uuids as errors (not found = not applied).
 local function pushMissing(errors, missing)
     for _, id in ipairs(missing) do
-        errors[#errors + 1] = 'uuid introuvable : ' .. tostring(id)
+        errors[#errors + 1] = 'uuid not found: ' .. tostring(id)
     end
 end
 
--- Applique `writeFn(photo)` à chaque photo matchée, par lots withWriteAccessDo.
--- Retourne (applied). Les erreurs par photo sont poussées dans `errors`.
+-- Applies `writeFn(photo)` to each matched photo, in withWriteAccessDo batches.
+-- Returns (applied). Per-photo errors are pushed into `errors`.
 local function applyBatched(actionName, matched, errors, writeFn)
     local catalog = LrApplication.activeCatalog()
     local applied = 0
@@ -54,36 +54,36 @@ local function applyBatched(actionName, matched, errors, writeFn)
     return applied
 end
 
--- rating : 0-5.
+-- rating: 0-5.
 function Metadata.setRating(photoIds, rating)
     local matched, missing = PhotoLookup.resolve(photoIds)
     local errors = {}
     pushMissing(errors, missing)
-    Utils.logf('Metadata.setRating : %d/%d matchés, rating=%s',
+    Utils.logf('Metadata.setRating: %d/%d matched, rating=%s',
         #matched, #photoIds, tostring(rating))
-    local applied = applyBatched('ABELr : note', matched, errors, function(photo)
+    local applied = applyBatched('ABELr: rating', matched, errors, function(photo)
         photo:setRawMetadata('rating', rating)
     end)
     return { applied = applied, total = #photoIds, errors = errors }
 end
 
--- flag : 'pick'|'reject'|'none' ou nil ; color : nom couleur / 'none' ou nil.
+-- flag: 'pick'|'reject'|'none' or nil; color: color name / 'none' or nil.
 function Metadata.setFlagColor(photoIds, flag, color)
     local matched, missing = PhotoLookup.resolve(photoIds)
     local errors = {}
     pushMissing(errors, missing)
-    -- 'none' → 0 (0 est truthy en Lua, donc bien conservé) ; nil → nil (on ne touche pas).
+    -- 'none' -> 0 (0 is truthy in Lua, so it's preserved correctly); nil -> nil (untouched).
     local pick = flag and FLAG_TO_PICK[flag] or nil
-    Utils.logf('Metadata.setFlagColor : %d/%d matchés, flag=%s color=%s',
+    Utils.logf('Metadata.setFlagColor: %d/%d matched, flag=%s color=%s',
         #matched, #photoIds, tostring(flag), tostring(color))
-    local applied = applyBatched('ABELr : flag/label', matched, errors, function(photo)
+    local applied = applyBatched('ABELr: flag/label', matched, errors, function(photo)
         if pick ~= nil then photo:setRawMetadata('pickStatus', pick) end
         if color ~= nil then photo:setRawMetadata('colorNameForLabel', color) end
     end)
     return { applied = applied, total = #photoIds, errors = errors }
 end
 
--- addNames / removeNames : listes de noms de mots-clés (strings).
+-- addNames / removeNames: lists of keyword names (strings).
 function Metadata.setKeywords(photoIds, addNames, removeNames)
     local catalog = LrApplication.activeCatalog()
     local matched, missing = PhotoLookup.resolve(photoIds)
@@ -92,12 +92,12 @@ function Metadata.setKeywords(photoIds, addNames, removeNames)
     addNames = addNames or {}
     removeNames = removeNames or {}
 
-    -- Phase 1 : créer / retrouver les mots-clés à ajouter, dans une transaction
-    -- SÉPARÉE — un objet créé dans withWriteAccessDo n'est accessible qu'APRÈS la
-    -- fin du callback (réf SDK §4). returnExisting=true → réutilise l'existant.
+    -- Phase 1: create / find the keywords to add, in a SEPARATE transaction —
+    -- an object created inside withWriteAccessDo is only accessible AFTER the
+    -- callback ends (SDK ref §4). returnExisting=true -> reuses an existing one.
     local addKw = {}
     if #addNames > 0 then
-        catalog:withWriteAccessDo('ABELr : mots-clés', function()
+        catalog:withWriteAccessDo('ABELr: keywords', function()
             for _, name in ipairs(addNames) do
                 local ok, kw = LrTasks.pcall(function()
                     return catalog:createKeyword(name, {}, true, nil, true)
@@ -113,11 +113,11 @@ function Metadata.setKeywords(photoIds, addNames, removeNames)
     local removeSet = {}
     for _, n in ipairs(removeNames) do removeSet[n] = true end
 
-    Utils.logf('Metadata.setKeywords : %d/%d matchés, +%d/-%d mots-clés',
+    Utils.logf('Metadata.setKeywords: %d/%d matched, +%d/-%d keywords',
         #matched, #photoIds, #addNames, #removeNames)
 
-    -- Phase 2 : appliquer add/remove par lots.
-    local applied = applyBatched('ABELr : mots-clés', matched, errors, function(photo)
+    -- Phase 2: apply add/remove in batches.
+    local applied = applyBatched('ABELr: keywords', matched, errors, function(photo)
         for _, kw in ipairs(addKw) do photo:addKeyword(kw) end
         if next(removeSet) then
             for _, kw in ipairs(photo:getRawMetadata('keywords') or {}) do

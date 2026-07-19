@@ -1,18 +1,18 @@
 --[[
-    PhotoLookup.lua — résout une liste d'uuids → photos LrPhoto.
+    PhotoLookup.lua — resolves a list of uuids → LrPhoto photos.
 
-    Même logique que Adjustments.apply / Thumbnails.fetchProbe : on indexe la
-    sélection courante (getTargetPhotos) puis on replie sur findPhotoByUuid (la
-    sélection a pu changer entre la lecture côté App et l'action). Factorisé ici
-    pour les handlers Phase 2 (Metadata / Collections / Presets).
+    Same logic as Adjustments.apply / Thumbnails.fetchProbe: index the
+    current selection (getTargetPhotos) then fall back to findPhotoByUuid (the
+    selection may have changed between the App-side read and the action). Factored out here
+    for the Phase 2 handlers (Metadata / Collections / Presets).
 ]]
 
 local LrApplication = import 'LrApplication'
 
 local PhotoLookup = {}
 
--- Retourne (matched, missing).
---   matched = { { id = uuid, photo = LrPhoto }, ... }  (ordre d'entrée préservé)
+-- Returns (matched, missing).
+--   matched = { { id = uuid, photo = LrPhoto }, ... }  (input order preserved)
 --   missing = { uuid, ... }
 function PhotoLookup.resolve(photoIds)
     local catalog = LrApplication.activeCatalog()

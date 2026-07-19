@@ -1,6 +1,6 @@
 --[[
-    Info.lua — Manifeste du plugin ABELr
-    Chargé par Lightroom Classic pour identifier et enregistrer le plugin.
+    Info.lua — ABELr plugin manifest
+    Loaded by Lightroom Classic to identify and register the plugin.
 ]]
 
 return {
@@ -12,17 +12,17 @@ return {
 
     LrPluginInfoUrl      = '',
 
-    -- Section custom dans le Gestionnaire de modules externes
+    -- Custom section in the Plug-in Manager
     LrPluginInfoProvider = 'PluginInfoProvider.lua',
 
-    -- Bibliothèque > Modules externes supplémentaires (module Bibliothèque actif)
+    -- Library > Plug-in Extras (active Library module)
     LrLibraryMenuItems   = {
         {
-            title = 'Démarrer / connecter l\'application',
+            title = 'Start / connect the application',
             file  = 'MenuConnect.lua',
         },
         {
-            title = 'Relancer l\'application',
+            title = 'Relaunch the application',
             file  = 'MenuRelaunch.lua',
         },
         {
@@ -31,14 +31,14 @@ return {
         }
     },
 
-    -- Fichier > Modules externes supplémentaires
+    -- File > Plug-in Extras
     LrExportMenuItems    = {
         {
-            title = 'Démarrer / connecter l\'application',
+            title = 'Start / connect the application',
             file  = 'MenuConnect.lua',
         },
         {
-            title = 'Relancer l\'application',
+            title = 'Relaunch the application',
             file  = 'MenuRelaunch.lua',
         },
         {
@@ -47,14 +47,14 @@ return {
         }
     },
 
-    -- Aide > Modules externes supplémentaires
+    -- Help > Plug-in Extras
     LrHelpMenuItems      = {
         {
-            title = 'Démarrer / connecter l\'application',
+            title = 'Start / connect the application',
             file  = 'MenuConnect.lua',
         },
         {
-            title = 'Relancer l\'application',
+            title = 'Relaunch the application',
             file  = 'MenuRelaunch.lua',
         },
         {

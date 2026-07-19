@@ -1,15 +1,15 @@
 --[[
-    Collections.lua — collections & ensembles de collections (jobs Phase 2).
+    Collections.lua — collections & collection sets (Phase 2 jobs).
 
-    list   : arbre {name,id,kind,photo_count?,children[]} (lecture, dans une task).
+    list   : tree {name,id,kind,photo_count?,children[]} (read, inside a task).
     create : catalog:createCollection(name, parentSet, canReturnPrior) (writeAccess).
     addPhotos : collection:addPhotos(photos) (writeAccess).
 
-    APIs SDK (réf. lr15_sdk_api_reference.md §4) :
-      catalog:getChildCollections() / :getChildCollectionSets()          [confirmé]
-      catalog:createCollection(name, parentSet, canReturnPrior)          [confirmé]
-    ⚠️ Méthodes d'INSTANCE non listées dans la réf (LrCollection/LrCollectionSet) —
-       canoniques Adobe, À CONFIRMER au 1er run en Lr :
+    SDK APIs (ref. lr15_sdk_api_reference.md §4):
+      catalog:getChildCollections() / :getChildCollectionSets()          [confirmed]
+      catalog:createCollection(name, parentSet, canReturnPrior)          [confirmed]
+    ⚠️ INSTANCE methods not listed in the reference (LrCollection/LrCollectionSet) —
+       canonical Adobe methods, TO CONFIRM on first live Lr run:
          obj:getName() · obj.localIdentifier · collection:getPhotos()
          collection:addPhotos(photos) · set:getChildCollections()/getChildCollectionSets()
 ]]
@@ -22,7 +22,7 @@ local Utils         = require 'Utils'
 
 local Collections = {}
 
--- Nœud d'arbre récursif. kind = 'collection' | 'set'.
+-- Recursive tree node. kind = 'collection' | 'set'.
 local function buildNode(obj, kind)
     local node = {
         name = obj:getName(),
@@ -44,7 +44,7 @@ local function buildNode(obj, kind)
     return node
 end
 
--- Arbre complet des collections/ensembles à la racine du catalogue.
+-- Full tree of collections/sets at the catalog root.
 function Collections.list()
     local catalog = LrApplication.activeCatalog()
     local out = Json.array({})
@@ -57,7 +57,7 @@ function Collections.list()
     return out
 end
 
--- Cherche une collection par id (localIdentifier en string) ou nom, en profondeur.
+-- Finds a collection by id (localIdentifier as string) or name, recursively.
 local function findCollection(catalog, ref)
     local found = nil
     local function walkColls(colls)
@@ -81,7 +81,7 @@ local function findCollection(catalog, ref)
     return nil
 end
 
--- Cherche un ENSEMBLE (set) par id ou nom (pour le parent de create).
+-- Finds a SET by id or name (for create's parent).
 local function findCollectionSet(catalog, ref)
     local found = nil
     local function walk(sets)
@@ -98,42 +98,42 @@ local function findCollectionSet(catalog, ref)
     return nil
 end
 
--- Crée (ou retrouve) une collection. Retourne {name, id, created}.
+-- Creates (or retrieves) a collection. Returns {name, id, created}.
 function Collections.create(name, parent)
     local catalog = LrApplication.activeCatalog()
     local parentSet = nil
     if parent and parent ~= '' then
         parentSet = findCollectionSet(catalog, parent)
         if not parentSet then
-            Utils.logf('Collections.create : parent introuvable « %s » → racine', tostring(parent))
+            Utils.logf('Collections.create: parent not found "%s" → root', tostring(parent))
         end
     end
     local created = nil
     local ok, err = LrTasks.pcall(function()
-        catalog:withWriteAccessDo('ABELr : créer collection', function()
+        catalog:withWriteAccessDo('ABELr: create collection', function()
             created = catalog:createCollection(name, parentSet, true)  -- canReturnPrior
         end)
     end)
     if not ok or not created then
         return { name = name, id = Json.null, created = false, error = tostring(err) }
     end
-    -- Objet accessible après la fin du callback (réf SDK §4).
-    Utils.logf('Collections.create : « %s » ok', tostring(name))
+    -- Object accessible after the callback returns (SDK ref §4).
+    Utils.logf('Collections.create: "%s" ok', tostring(name))
     return { name = created:getName(), id = tostring(created.localIdentifier), created = true }
 end
 
--- Ajoute des photos à la collection `ref` (id ou nom). Retourne {applied,total,errors}.
+-- Adds photos to the collection `ref` (id or name). Returns {applied,total,errors}.
 function Collections.addPhotos(ref, photoIds)
     local catalog = LrApplication.activeCatalog()
     local coll = findCollection(catalog, ref)
     if not coll then
         return { applied = 0, total = #photoIds,
-                 errors = { 'collection introuvable : ' .. tostring(ref) } }
+                 errors = { 'collection not found: ' .. tostring(ref) } }
     end
     local matched, missing = PhotoLookup.resolve(photoIds)
     local errors = {}
     for _, id in ipairs(missing) do
-        errors[#errors + 1] = 'uuid introuvable : ' .. tostring(id)
+        errors[#errors + 1] = 'uuid not found: ' .. tostring(id)
     end
     local photos = {}
     for _, m in ipairs(matched) do photos[#photos + 1] = m.photo end
@@ -141,7 +141,7 @@ function Collections.addPhotos(ref, photoIds)
     local applied = 0
     if #photos > 0 then
         local ok, err = LrTasks.pcall(function()
-            catalog:withWriteAccessDo('ABELr : ajout collection', function()
+            catalog:withWriteAccessDo('ABELr: add to collection', function()
                 coll:addPhotos(photos)
             end)
         end)
@@ -151,7 +151,7 @@ function Collections.addPhotos(ref, photoIds)
             errors[#errors + 1] = 'addPhotos: ' .. tostring(err)
         end
     end
-    Utils.logf('Collections.addPhotos : %d/%d ajoutées à « %s »',
+    Utils.logf('Collections.addPhotos: %d/%d added to "%s"',
         applied, #photoIds, tostring(ref))
     return { applied = applied, total = #photoIds, errors = errors }
 end

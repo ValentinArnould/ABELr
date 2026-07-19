@@ -1,15 +1,15 @@
 --[[
-    PollingLoop.lua — pont plugin ↔ App.
+    PollingLoop.lua — plugin ↔ App bridge.
 
-    Boucle async : GET /jobs/pending toutes les 300ms, exécute le job via SDK,
-    POST le résultat sur /jobs/{id}/result. Tourne dans postAsyncTaskWithContext
-    (requis par LrHttp.post). Reconnecte automatiquement si l'App redémarre.
+    Async loop: GET /jobs/pending every 300ms, executes the job via the SDK,
+    POST the result to /jobs/{id}/result. Runs inside postAsyncTaskWithContext
+    (required by LrHttp.post). Automatically reconnects if the App restarts.
 
-    Garde anti-doublon via flag global : un seul pont actif par session Lr.
+    Anti-duplicate guard via a global flag: only one active bridge per Lr session.
 
-    Hot-reload : `dispatch` est stocké dans _G.ABELR_DISPATCH et mis à jour
-    à chaque rechargement du module. La boucle en cours (`pollOnce`) l'appelle via
-    le global — elle récupère automatiquement le nouveau code sans redémarrage.
+    Hot-reload: `dispatch` is stored in _G.ABELR_DISPATCH and updated on every
+    module reload. The running loop (`pollOnce`) calls it via the global — it
+    automatically picks up the new code without a restart.
 ]]
 
 local LrApplication     = import 'LrApplication'
@@ -29,23 +29,23 @@ local Utils      = require 'Utils'
 local PollingLoop = {}
 
 local POLL_INTERVAL = 0.3
--- Sans tour de boucle depuis ce délai, le pont est considéré mort (contexte tué
--- sans cleanup, erreur fatale…) et peut être relancé.
+-- If no loop iteration has happened within this delay, the bridge is considered
+-- dead (context killed without cleanup, fatal error…) and can be restarted.
 local HEARTBEAT_TIMEOUT = 5
 
--- Le pont est « vivant » si une boucle a pollé récemment (heartbeat frais).
--- On ne se fie PAS à un flag booléen partagé : une boucle qui meurt ne doit
--- jamais pouvoir éteindre une boucle plus récente. Le heartbeat seul est la
--- source de vérité — il devient périmé tout seul si plus aucune boucle ne tourne.
+-- The bridge is "alive" if a loop has polled recently (fresh heartbeat).
+-- We do NOT rely on a shared boolean flag: a dying loop must never be able
+-- to shut down a more recent loop. The heartbeat alone is the source of
+-- truth — it goes stale on its own once no loop is running anymore.
 local function bridgeAlive()
     local hb = _G.ABELR_BRIDGE_HEARTBEAT or 0
     return (os.time() - hb) < HEARTBEAT_TIMEOUT
 end
 
--- Construit la table résultat standard d'un job batch (set_rating, set_keywords,
--- add_to_collection, apply_develop_preset…) à partir d'un rapport
--- { applied, total, errors }. Même logique errors_summary que apply_adjustments
--- (revue Fable 5 L-04) : un traitement PARTIEL ne perd pas les causes.
+-- Builds the standard result table for a batch job (set_rating, set_keywords,
+-- add_to_collection, apply_develop_preset…) from a report
+-- { applied, total, errors }. Same errors_summary logic as apply_adjustments
+-- (Fable 5 review L-04): a PARTIAL run doesn't lose the failure causes.
 local function batchResult(jobId, report)
     local total   = report.total or 0
     local applied = report.applied or 0
@@ -57,13 +57,13 @@ local function batchResult(jobId, report)
         for i = 1, math.min(5, #errors) do parts[#parts + 1] = errors[i] end
         errorsSummary = table.concat(parts, ' | ')
         if #errors > 5 then
-            errorsSummary = errorsSummary .. string.format(' | +%d autres', #errors - 5)
+            errorsSummary = errorsSummary .. string.format(' | +%d more', #errors - 5)
         end
     end
     local errMsg = nil
     if status == 'error' then
-        errMsg = string.format('0/%d appliqué(s). %s',
-            total, errors[1] or 'aucune photo ne correspond')
+        errMsg = string.format('0/%d applied. %s',
+            total, errors[1] or 'no matching photo')
     end
     return {
         job_id  = jobId,
@@ -76,13 +76,13 @@ local function batchResult(jobId, report)
     }
 end
 
--- Exécute un job, retourne la table résultat à renvoyer à l'App.
+-- Executes a job, returns the result table to send back to the App.
 local function dispatch(job)
     local jobId = job.job_id
     local jobType = job.type
 
     if jobType == 'test' then
-        -- Popup de test : affichée hors boucle pour ne pas bloquer le polling.
+        -- Test popup: displayed outside the loop so it doesn't block polling.
         LrTasks.startAsyncTask(function() Utils.test() end)
         return {
             job_id = jobId,
@@ -105,11 +105,11 @@ local function dispatch(job)
         local payload  = job.payload or {}
         local width    = payload.width  or 512
         local height   = payload.height or 512
-        -- Utilise la sélection courante (la même liste que get_selected_photos).
+        -- Uses the current selection (the same list as get_selected_photos).
         local catalog  = LrApplication.activeCatalog()
         local photos   = catalog:getTargetPhotos()
         local thumbs   = Thumbnails.fetch(photos, width, height)
-        -- Filtre optionnel : si payload.photo_ids fourni, ne retourner que ceux-là.
+        -- Optional filter: if payload.photo_ids is provided, only return those.
         local filter   = {}
         if payload.photo_ids and #payload.photo_ids > 0 then
             for _, id in ipairs(payload.photo_ids) do filter[id] = true end
@@ -131,8 +131,8 @@ local function dispatch(job)
             photos     = Json.array({}),
         }
     elseif jobType == 'render_probe' then
-        -- Rendu sondé : applique des réglages temporaires, rend la miniature, restaure.
-        -- Sert au calage de la réponse ∂rendu/∂curseur et au rendu neutre d'ancrage.
+        -- Probe render: applies temporary settings, renders the thumbnail, restores.
+        -- Used to calibrate the ∂render/∂slider response and the neutral anchor render.
         local payload     = job.payload or {}
         local adjustments = payload.adjustments or {}
         local width       = payload.width  or 512
@@ -161,22 +161,22 @@ local function dispatch(job)
         local adjustments = payload.adjustments or {}
         local report = Adjustments.apply(adjustments)
         local status = (report.applied > 0 or report.total == 0) and 'ok' or 'error'
-        -- Résumé d'erreurs TOUJOURS joint quand il y en a (revue Fable 5 L-04) :
-        -- un apply PARTIEL (status='ok' avec des échecs) ne perd plus les causes.
+        -- Error summary ALWAYS attached when there are any (Fable 5 review L-04):
+        -- a PARTIAL apply (status='ok' with failures) no longer loses the causes.
         local errorsSummary = nil
         if #report.errors > 0 then
             local parts = {}
             for i = 1, math.min(5, #report.errors) do parts[#parts + 1] = report.errors[i] end
             errorsSummary = table.concat(parts, ' | ')
             if #report.errors > 5 then
-                errorsSummary = errorsSummary .. string.format(' | +%d autres', #report.errors - 5)
+                errorsSummary = errorsSummary .. string.format(' | +%d more', #report.errors - 5)
             end
         end
         local errMsg = nil
         if status == 'error' then
-            errMsg = string.format('0/%d appliqués (%d matchés). %s',
+            errMsg = string.format('0/%d applied (%d matched). %s',
                 report.total, report.matched,
-                report.errors[1] or 'aucune photo ne correspond')
+                report.errors[1] or 'no matching photo')
         end
         return {
             job_id  = jobId,
@@ -190,7 +190,7 @@ local function dispatch(job)
         }
 
     -- ------------------------------------------------------------------ --
-    -- Phase 2 : notes / flags / mots-clés / collections / presets develop
+    -- Phase 2: ratings / flags / keywords / collections / develop presets
     -- ------------------------------------------------------------------ --
     elseif jobType == 'set_rating' then
         local p = job.payload or {}
@@ -228,7 +228,7 @@ local function dispatch(job)
     return {
         job_id = jobId,
         status = 'error',
-        error  = 'type de job inconnu : ' .. tostring(jobType),
+        error  = 'unknown job type: ' .. tostring(jobType),
         photos = Json.array({}),
     }
 end
@@ -236,29 +236,29 @@ end
 local function pollOnce()
     local job, status, rawBody = HttpClient.get('/jobs/pending', 5)
     if status == nil then
-        return false   -- App non démarrée : on réessaiera
+        return false   -- App not started: will retry
     end
     if status == 204 then
-        return true    -- connecté, pas de job
+        return true    -- connected, no job
     end
     if job == nil then
-        -- 200 avec body indécodable ≠ « pas de job » : le job vient d'être popé
-        -- côté App (IN_PROGRESS) et serait perdu jusqu'au TTL 900 s. On ne peut
-        -- pas le récupérer ici, mais on LOGGUE (revue Fable 5 L-06).
+        -- 200 with an undecodable body ≠ "no job": the job was just popped
+        -- on the App side (IN_PROGRESS) and would be lost until the 900s TTL. We
+        -- can't recover it here, but we LOG it (Fable 5 review L-06).
         if status == 200 then
-            Utils.logf('pollOnce : HTTP 200 mais body indécodable (%d octets) — job perdu ? body=%s',
+            Utils.logf('pollOnce: HTTP 200 but undecodable body (%d bytes) — job lost? body=%s',
                 rawBody and #rawBody or 0, string.sub(tostring(rawBody), 1, 200))
         end
         return true
     end
 
-    Utils.logf('Job reçu : type=%s id=%s', tostring(job.type), tostring(job.job_id))
+    Utils.logf('Job received: type=%s id=%s', tostring(job.type), tostring(job.job_id))
 
-    -- Appel via global : récupère le dispatch le plus récent après rechargement plugin.
+    -- Call via global: gets the most recent dispatch after a plugin reload.
     local currentDispatch = _G.ABELR_DISPATCH or dispatch
     local ok, result = LrTasks.pcall(currentDispatch, job)
     if not ok then
-        Utils.logf('Erreur dispatch : %s', tostring(result))
+        Utils.logf('Dispatch error: %s', tostring(result))
         result = {
             job_id = job.job_id,
             status = 'error',
@@ -266,12 +266,12 @@ local function pollOnce()
             photos = Json.array({}),
         }
     else
-        Utils.logf('Dispatch OK : %d photo(s)', type(result.photos) == 'table' and #result.photos or -1)
+        Utils.logf('Dispatch OK: %d photo(s)', type(result.photos) == 'table' and #result.photos or -1)
     end
 
     local encOk, payload = LrTasks.pcall(Json.encode, result)
     if not encOk then
-        Utils.logf('Erreur Json.encode : %s', tostring(payload))
+        Utils.logf('Json.encode error: %s', tostring(payload))
         payload = Json.encode({
             job_id = job.job_id,
             status = 'error',
@@ -280,19 +280,19 @@ local function pollOnce()
         })
     end
 
-    -- POST du résultat avec retries (revue Fable 5 L-07) : le job a déjà été
-    -- EXÉCUTÉ (apply compris) — perdre le POST fait timeouter le worker App alors
-    -- que le travail est fait. status nil = perte réseau → 2 retries avec backoff.
+    -- POST the result with retries (Fable 5 review L-07): the job has already been
+    -- EXECUTED (including apply) — losing the POST times out the App worker even
+    -- though the work is done. status nil = network loss → 2 retries with backoff.
     local postStatus
     for attempt = 1, 3 do
         local _, st = HttpClient.postJsonRaw('/jobs/' .. job.job_id .. '/result', payload, 10)
         postStatus = st
         if postStatus ~= nil then break end
-        Utils.logf('POST result : échec réseau (tentative %d/3), retry…', attempt)
+        Utils.logf('POST result: network failure (attempt %d/3), retrying…', attempt)
         LrTasks.sleep(0.5 * attempt)
     end
     if postStatus == nil then
-        Utils.logf('POST result : ABANDON après 3 tentatives — résultat du job %s perdu (travail déjà exécuté)',
+        Utils.logf('POST result: GIVING UP after 3 attempts — result for job %s lost (work already executed)',
             tostring(job.job_id))
     else
         Utils.logf('POST result → HTTP %s', tostring(postStatus))
@@ -300,17 +300,17 @@ local function pollOnce()
     return true
 end
 
--- Démarre le pont. TOUJOURS démarre une boucle neuve, identifiée par un jeton de
--- génération unique (_G.ABELR_BRIDGE_GEN). Démarrer incrémente le jeton :
--- toute boucle antérieure (génération plus ancienne) se retire d'elle-même au tour
--- suivant. On a donc au plus UNE boucle vivante, sans flag booléen partagé qu'une
--- boucle mourante pourrait remettre à false pour tuer la boucle active.
+-- Starts the bridge. ALWAYS starts a fresh loop, identified by a unique
+-- generation token (_G.ABELR_BRIDGE_GEN). Starting increments the token:
+-- any earlier loop (older generation) withdraws on its own on the next
+-- iteration. So there is at most ONE live loop, with no shared boolean flag
+-- that a dying loop could reset to false to kill the active loop.
 --
--- Conséquence : recliquer « connecter » répare toujours le pont (la nouvelle
--- boucle supersède un éventuel zombie au lieu de refuser de démarrer).
+-- Consequence: re-clicking "connect" always repairs the bridge (the new
+-- loop supersedes any zombie instead of refusing to start).
 function PollingLoop.start()
-    -- Retire toute boucle d'une version antérieure du module : elle surveillait
-    -- le flag booléen ABELR_BRIDGE_RUNNING (et non la génération).
+    -- Retires any loop from an earlier version of the module: it was watching
+    -- the ABELR_BRIDGE_RUNNING boolean flag (not the generation).
     _G.ABELR_BRIDGE_RUNNING = false
 
     local gen = (_G.ABELR_BRIDGE_GEN or 0) + 1
@@ -318,30 +318,30 @@ function PollingLoop.start()
     _G.ABELR_BRIDGE_HEARTBEAT = os.time()
 
     LrFunctionContext.postAsyncTaskWithContext('ABELrBridge', function(context)
-        -- Le cleanup ne touche AUCUN état partagé : une boucle qui meurt ne peut
-        -- pas éteindre une boucle plus récente. Log seul (diagnostic).
+        -- The cleanup does NOT touch any shared state: a dying loop cannot
+        -- shut down a more recent loop. Logging only (diagnostic).
         context:addCleanupHandler(function()
-            Utils.logf('Pont (gen %d) : contexte nettoyé.', gen)
+            Utils.logf('Bridge (gen %d): context cleaned up.', gen)
         end)
-        Utils.logf('Pont démarré (gen %d) → %s', gen, HttpClient.BASE_URL)
+        Utils.logf('Bridge started (gen %d) → %s', gen, HttpClient.BASE_URL)
 
-        -- Tourne tant que cette boucle reste la génération courante.
+        -- Runs as long as this loop remains the current generation.
         while _G.ABELR_BRIDGE_GEN == gen do
-            _G.ABELR_BRIDGE_HEARTBEAT = os.time()   -- battement de cœur
+            _G.ABELR_BRIDGE_HEARTBEAT = os.time()   -- heartbeat
             local ok, err = LrTasks.pcall(pollOnce)
             if not ok then
-                Utils.logf('Erreur boucle : %s', tostring(err))
+                Utils.logf('Loop error: %s', tostring(err))
             end
             LrTasks.sleep(POLL_INTERVAL)
         end
-        Utils.logf('Pont (gen %d) retiré au profit de la gen %s.',
+        Utils.logf('Bridge (gen %d) withdrawn in favor of gen %s.',
             gen, tostring(_G.ABELR_BRIDGE_GEN))
     end)
     return true
 end
 
--- Arrête le pont : incrémente la génération sans démarrer de boucle → la boucle
--- courante se retire et aucune ne la remplace (le heartbeat devient périmé).
+-- Stops the bridge: increments the generation without starting a loop → the
+-- current loop withdraws and none replaces it (the heartbeat goes stale).
 function PollingLoop.stop()
     _G.ABELR_BRIDGE_RUNNING = false
     _G.ABELR_BRIDGE_GEN = (_G.ABELR_BRIDGE_GEN or 0) + 1
@@ -352,10 +352,10 @@ function PollingLoop.isRunning()
 end
 
 -- ─── Hot-reload ─────────────────────────────────────────────────────────────
--- Publie le dispatch courant dans un global : la boucle vivante l'appelle via _G
--- (cf. pollOnce), donc recharger le module met à jour le traitement des jobs sans
--- redémarrer la boucle. Le cycle de vie de la boucle est géré par la génération
--- (PollingLoop.start) — plus de bloc de migration fragile ici.
+-- Publishes the current dispatch into a global: the live loop calls it via _G
+-- (see pollOnce), so reloading the module updates job handling without
+-- restarting the loop. The loop's lifecycle is managed by the generation
+-- (PollingLoop.start) — no more fragile migration block here.
 _G.ABELR_DISPATCH = dispatch
 -- ────────────────────────────────────────────────────────────────────────────
 

@@ -1,8 +1,8 @@
 --[[
-    PhotoData.lua — extraction des données photo via SDK (path, EXIF, develop).
+    PhotoData.lua — extracts photo data via the SDK (path, EXIF, develop).
 
-    Construit les tables sérialisables JSON attendues par l'App (clés snake_case ;
-    develop settings en PascalCase SDK).
+    Builds the JSON-serializable tables expected by the App (snake_case keys;
+    develop settings in SDK PascalCase).
 ]]
 
 local LrApplication = import 'LrApplication'
@@ -10,24 +10,24 @@ local Json          = require 'Json'
 
 local PhotoData = {}
 
--- Sous-ensemble de develop settings utile à l'analyse batch.
--- Noms SDK = PV2012 (Exposure2012, etc.) : ce sont les valeurs réellement réglées
--- par l'utilisateur. WhiteBalance ("Custom" = WB posée à la main) sert de marqueur
--- historique côté App (les seeds sont marqués en DB via cache.is_seed).
+-- Subset of develop settings useful for batch analysis.
+-- SDK names = PV2012 (Exposure2012, etc.): these are the values actually set
+-- by the user. WhiteBalance ("Custom" = WB set by hand) serves as a
+-- historical marker on the App side (seeds are marked in the DB via cache.is_seed).
 --
--- CameraProfile + ProcessVersion : clé du modèle de réponse calibré côté App
--- (la réponse ∂rendu/∂curseur dépend du profil DCP). Les 24 curseurs HSL servent à
--- connaître l'état couleur courant (core.hsl). Tons (Contrast/Highlights/…) déjà là.
+-- CameraProfile + ProcessVersion: key to the response model calibrated on the App side
+-- (the ∂render/∂slider response depends on the DCP profile). The 24 HSL sliders are
+-- used to know the current color state (core.hsl). Tones (Contrast/Highlights/…) already covered.
 local DEVELOP_KEYS = {
     'WhiteBalance', 'Temperature', 'Tint',
     'Exposure2012', 'Contrast2012', 'Highlights2012', 'Shadows2012',
     'Whites2012', 'Blacks2012', 'Clarity2012', 'Dehaze',
     'Vibrance', 'Saturation',
     'CameraProfile', 'ProcessVersion',
-    -- Recadrage : entre dans la clé de style du rendu neutre côté App (un crop
-    -- change le rendu des miniatures → l'ancre doit être recalculée).
+    -- Crop: part of the neutral-render style key on the App side (a crop
+    -- changes thumbnail rendering → the anchor must be recalculated).
     'CropLeft', 'CropRight', 'CropTop', 'CropBottom', 'CropAngle',
-    -- HSL — 8 bandes × {Hue, Saturation, Luminance} (noms SDK).
+    -- HSL — 8 bands × {Hue, Saturation, Luminance} (SDK names).
     'HueAdjustmentRed', 'HueAdjustmentOrange', 'HueAdjustmentYellow',
     'HueAdjustmentGreen', 'HueAdjustmentAqua', 'HueAdjustmentBlue',
     'HueAdjustmentPurple', 'HueAdjustmentMagenta',
@@ -37,13 +37,13 @@ local DEVELOP_KEYS = {
     'LuminanceAdjustmentRed', 'LuminanceAdjustmentOrange', 'LuminanceAdjustmentYellow',
     'LuminanceAdjustmentGreen', 'LuminanceAdjustmentAqua', 'LuminanceAdjustmentBlue',
     'LuminanceAdjustmentPurple', 'LuminanceAdjustmentMagenta',
-    -- Étalonnage caméra : transplanté k-NN depuis les seeds (core.autocorrect axe
-    -- "calib") — non neutralisé par le probe, entre dans hash_style côté App.
+    -- Camera calibration: transplanted via k-NN from the seeds (core.autocorrect axis
+    -- "calib") — not neutralized by the probe, part of hash_style on the App side.
     'EnableCalibration', 'ShadowTint',
     'RedHue', 'RedSaturation', 'GreenHue', 'GreenSaturation', 'BlueHue', 'BlueSaturation',
-    -- Style non neutralisé par le probe : entre dans hash_style côté App
-    -- (revue Fable 5 DB-01). Noms hybrides Color Grading : ombres/HL Hue+Sat =
-    -- SplitToning*, le reste ColorGrade* (cf. lr15_sdk_api_reference §Color Grading).
+    -- Style not neutralized by the probe: part of hash_style on the App side
+    -- (Fable 5 review DB-01). Hybrid Color Grading names: shadows/HL Hue+Sat =
+    -- SplitToning*, the rest ColorGrade* (see lr15_sdk_api_reference §Color Grading).
     'Texture',
     'SplitToningShadowHue', 'SplitToningShadowSaturation',
     'SplitToningHighlightHue', 'SplitToningHighlightSaturation',
@@ -54,7 +54,7 @@ local DEVELOP_KEYS = {
     'ColorGradeBlending',
     'ParametricShadows', 'ParametricDarks', 'ParametricLights', 'ParametricHighlights',
     'ParametricShadowSplit', 'ParametricMidtoneSplit', 'ParametricHighlightSplit',
-    -- Courbe par points : tables de nombres (sérialisées telles quelles en JSON).
+    -- Point curve: number tables (serialized as-is in JSON).
     'ToneCurveName2012', 'ToneCurvePV2012',
     'ToneCurvePV2012Red', 'ToneCurvePV2012Green', 'ToneCurvePV2012Blue',
 }
@@ -79,7 +79,7 @@ local function extractDevelop(photo)
     return out
 end
 
--- Table sérialisable JSON pour une photo (clés snake_case, develop PascalCase SDK).
+-- JSON-serializable table for one photo (snake_case keys, SDK PascalCase develop).
 local function photoToTable(photo, catalogPath)
     return {
         photo_id        = photo:getRawMetadata('uuid'),
@@ -98,14 +98,14 @@ local function photosToArray(photos, catalogPath)
     return result
 end
 
--- Retourne un tableau JSON (Json.array) des photos sélectionnées (cible active).
+-- Returns a JSON array (Json.array) of the selected photos (active target).
 function PhotoData.getSelectedPhotos()
     local catalog     = LrApplication.activeCatalog()
-    local catalogPath = catalog:getPath()  -- chemin du .lrcat → localise les .lrdata
+    local catalogPath = catalog:getPath()  -- path of the .lrcat → locates the .lrdata
     return photosToArray(catalog:getTargetPhotos(), catalogPath)
 end
 
--- Retourne un tableau JSON de TOUTES les photos du catalogue actif (index App).
+-- Returns a JSON array of ALL photos in the active catalog (App index).
 function PhotoData.getAllPhotos()
     local catalog     = LrApplication.activeCatalog()
     local catalogPath = catalog:getPath()

@@ -1,8 +1,8 @@
 --[[
-    Actions.lua — actions haut niveau déclenchées par menu / boutons UI.
+    Actions.lua — high-level actions triggered by menu / UI buttons.
 
-    Chaque action tourne dans postAsyncTaskWithContext (requis : HTTP GET + POST,
-    sleep). Affiche un retour utilisateur via LrDialogs.
+    Each action runs inside postAsyncTaskWithContext (required: HTTP GET + POST,
+    sleep). Displays user feedback via LrDialogs.
 ]]
 
 local LrFunctionContext = import 'LrFunctionContext'
@@ -18,39 +18,39 @@ local function runAsync(name, fn)
     LrFunctionContext.postAsyncTaskWithContext(name, fn)
 end
 
--- Démarre l'App (si besoin), puis le pont. Connexion complète.
+-- Starts the App (if needed), then the bridge. Full connection.
 function Actions.connect()
     runAsync('ABELrConnect', function()
         local ok, msg = AppLauncher.start()
-        -- Démarre le pont quoi qu'il arrive : la boucle de polling se (re)connecte
-        -- d'elle-même dès que l'App répond, même si le healthcheck a expiré.
+        -- Starts the bridge no matter what: the polling loop (re)connects
+        -- on its own as soon as the App responds, even if the healthcheck timed out.
         PollingLoop.start()
-        msg = msg .. '\nPont actif (polling 300ms).'
+        msg = msg .. '\nBridge active (polling 300ms).'
         LrDialogs.message('ABELr', msg, ok and 'info' or 'warning')
     end)
 end
 
--- Relance l'App (arrêt propre + redémarrage), réactive le pont.
+-- Relaunches the App (clean stop + restart), reactivates the bridge.
 function Actions.relaunch()
     runAsync('ABELrRelaunch', function()
         local ok, msg = AppLauncher.relaunch()
-        -- Idem : le pont démarre toujours et se reconnecte seul.
+        -- Same here: the bridge always starts and reconnects on its own.
         PollingLoop.start()
-        msg = msg .. '\nPont actif (polling 300ms).'
+        msg = msg .. '\nBridge active (polling 300ms).'
         LrDialogs.message('ABELr', msg, ok and 'info' or 'warning')
     end)
 end
 
--- Vérifie l'état App + pont sans rien lancer.
+-- Checks App + bridge status without launching anything.
 function Actions.checkStatus()
     runAsync('ABELrStatus', function()
         local alive  = HttpClient.isAlive()
         local bridge = PollingLoop.isRunning()
         local msg = string.format(
-            'Application : %s\nPont : %s',
-            alive and 'connectée' or 'non démarrée',
-            bridge and 'actif' or 'arrêté')
-        LrDialogs.message('ABELr — statut', msg, 'info')
+            'Application: %s\nBridge: %s',
+            alive and 'connected' or 'not started',
+            bridge and 'active' or 'stopped')
+        LrDialogs.message('ABELr — status', msg, 'info')
     end)
 end
 

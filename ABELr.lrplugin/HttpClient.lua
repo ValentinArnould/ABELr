@@ -1,8 +1,8 @@
 --[[
-    HttpClient.lua — wrappers LrHttp (GET/POST JSON) vers l'App Python.
+    HttpClient.lua — LrHttp wrappers (GET/POST JSON) to the Python App.
 
-    LrHttp ne fonctionne que dans une tâche async. GET : toute startAsyncTask.
-    POST : doit tourner dans LrFunctionContext.postAsyncTaskWithContext (cf. PollingLoop).
+    LrHttp only works inside an async task. GET: any startAsyncTask.
+    POST: must run inside LrFunctionContext.postAsyncTaskWithContext (see PollingLoop).
 ]]
 
 local LrHttp = import 'LrHttp'
@@ -15,13 +15,13 @@ HttpClient.BASE_URL = 'http://127.0.0.1:5000'
 
 local JSON_HEADER = { { field = 'Content-Type', value = 'application/json' } }
 
--- GET → retourne (decodedTable | nil, status | nil, rawBody | nil).
--- status nil = pas de connexion (App éteinte).
+-- GET → returns (decodedTable | nil, status | nil, rawBody | nil).
+-- status nil = no connection (App is off).
 function HttpClient.get(path, timeout)
     local url = HttpClient.BASE_URL .. path
     local body, headers = LrHttp.get(url, {}, timeout or 5)
     if not headers then
-        return nil, nil, nil   -- erreur réseau / App non démarrée
+        return nil, nil, nil   -- network error / App not started
     end
     local status = headers.status
     if not body or body == '' then
@@ -31,13 +31,13 @@ function HttpClient.get(path, timeout)
     return decoded, status, body
 end
 
--- POST JSON → retourne (decodedTable | nil, status | nil).
--- À appeler depuis un contexte postAsyncTaskWithContext.
+-- POST JSON → returns (decodedTable | nil, status | nil).
+-- Must be called from a postAsyncTaskWithContext context.
 function HttpClient.postJson(path, tableBody, timeout)
     return HttpClient.postJsonRaw(path, Json.encode(tableBody), timeout)
 end
 
--- Variante : payload déjà sérialisé (string JSON).
+-- Variant: payload already serialized (JSON string).
 function HttpClient.postJsonRaw(path, payload, timeout)
     local url = HttpClient.BASE_URL .. path
     local body, headers = LrHttp.post(url, payload, JSON_HEADER, 'POST', timeout or 10)
@@ -48,7 +48,7 @@ function HttpClient.postJsonRaw(path, payload, timeout)
     return decoded, headers.status
 end
 
--- Healthcheck rapide : true si l'App répond 200 sur /health.
+-- Quick healthcheck: true if the App responds 200 on /health.
 function HttpClient.isAlive()
     local _, status = HttpClient.get('/health', 2)
     return status == 200

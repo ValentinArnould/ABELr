@@ -1,10 +1,10 @@
 --[[
-    ShowMessage.lua — Fonction de test : affiche une popup "Hello World".
-    Déclenché depuis Bibliothèque > Modules externes > Hello World.
+    ShowMessage.lua — Test function: shows a "Hello World" popup.
+    Triggered from Library > Plug-in Extras > Hello World.
 ]]
 
 local Utils = require 'Utils'
 Utils.test()
 
--- Tout appel SDK pouvant bloquer doit tourner dans une tâche asynchrone.
+-- Any SDK call that could block must run inside an async task.
 -- LrTasks.startAsyncTask(showMessage)

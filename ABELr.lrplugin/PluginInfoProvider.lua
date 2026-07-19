@@ -1,10 +1,10 @@
 --[[
     PluginInfoProvider.lua
-    Section custom affichée dans Fichier > Gestionnaire des modules externes,
-    quand "ABELr" est sélectionné dans la liste de gauche.
+    Custom section shown in File > Plug-in Manager,
+    when "ABELr" is selected in the left-hand list.
 
-    Boutons : démarrer/connecter, relancer l'App Python, vérifier l'état.
-    Référencé par la clé LrPluginInfoProvider de Info.lua.
+    Buttons: start/connect, relaunch the Python App, check status.
+    Referenced by the LrPluginInfoProvider key in Info.lua.
 ]]
 
 local LrView  = import 'LrView'
@@ -22,22 +22,22 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
 
             f:row {
                 f:static_text {
-                    title = 'Retouche batch intelligente pilotée par application externe.',
+                    title = 'Intelligent batch retouching driven by an external application.',
                     fill_horizontal = 1,
                 },
             },
 
             f:row {
                 f:push_button {
-                    title  = 'Démarrer / connecter',
+                    title  = 'Start / connect',
                     action = function() Actions.connect() end,
                 },
                 f:push_button {
-                    title  = 'Relancer l\'application',
+                    title  = 'Relaunch application',
                     action = function() Actions.relaunch() end,
                 },
                 f:push_button {
-                    title  = 'Vérifier l\'état',
+                    title  = 'Check status',
                     action = function() Actions.checkStatus() end,
                 },
                 f:push_button {
@@ -48,7 +48,7 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
 
             f:row {
                 f:static_text {
-                    title      = 'Serveur attendu : http://127.0.0.1:5000',
+                    title      = 'Expected server: http://127.0.0.1:5000',
                     text_color = LrColor(0.5, 0.5, 0.5),
                 },
             },

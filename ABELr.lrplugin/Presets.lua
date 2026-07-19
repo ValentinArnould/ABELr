@@ -1,15 +1,15 @@
 --[[
-    Presets.lua — presets develop (jobs Phase 2).
+    Presets.lua — develop presets (Phase 2 jobs).
 
-    list  : énumère les presets de tous les dossiers (lecture, dans une task).
-    apply : applique un preset (par uuid ou nom) aux photos, par lots (writeAccess).
+    list  : enumerates presets from all folders (read, inside a task).
+    apply : applies a preset (by uuid or name) to photos, in batches (writeAccess).
 
-    APIs SDK (réf. lr15_sdk_api_reference.md §3/§5) :
-      LrApplication.developPresetFolders()                               [confirmé]
-      LrApplication.developPresetByUuid(uuid)                            [confirmé]
-      photo:applyDevelopPreset(preset, _PLUGIN, presetAmount, updateAI)  [confirmé]
-    ⚠️ Méthodes d'instance non listées dans la réf — canoniques Adobe, À CONFIRMER
-       au 1er run en Lr :
+    SDK APIs (ref. lr15_sdk_api_reference.md §3/§5):
+      LrApplication.developPresetFolders()                               [confirmed]
+      LrApplication.developPresetByUuid(uuid)                            [confirmed]
+      photo:applyDevelopPreset(preset, _PLUGIN, presetAmount, updateAI)  [confirmed]
+    ⚠️ Instance methods not listed in the reference — canonical Adobe, TO CONFIRM
+       on first run in Lr:
          folder:getName() · folder:getDevelopPresets()
          preset:getName() · preset:getUuid()
 ]]
@@ -24,7 +24,7 @@ local Presets = {}
 
 local CHUNK = 50
 
--- Liste { {name, uuid, folder}, ... } de tous les presets develop.
+-- List of { {name, uuid, folder}, ... } for all develop presets.
 function Presets.list()
     local out = Json.array({})
     for _, folder in ipairs(LrApplication.developPresetFolders()) do
@@ -40,7 +40,7 @@ function Presets.list()
     return out
 end
 
--- Résout un preset par uuid (rapide) puis par nom (repli).
+-- Resolves a preset by uuid (fast) then by name (fallback).
 local function resolvePreset(ref)
     local ok, preset = LrTasks.pcall(function()
         return LrApplication.developPresetByUuid(ref)
@@ -54,23 +54,23 @@ local function resolvePreset(ref)
     return nil
 end
 
--- Applique `presetRef` (uuid ou nom) aux photos. Retourne {applied,total,errors}.
+-- Applies `presetRef` (uuid or name) to the photos. Returns {applied,total,errors}.
 function Presets.apply(photoIds, presetRef)
     local preset = resolvePreset(presetRef)
     if not preset then
         return { applied = 0, total = #photoIds,
-                 errors = { 'preset introuvable : ' .. tostring(presetRef) } }
+                 errors = { 'preset not found: ' .. tostring(presetRef) } }
     end
     local matched, missing = PhotoLookup.resolve(photoIds)
     local errors = {}
     for _, id in ipairs(missing) do
-        errors[#errors + 1] = 'uuid introuvable : ' .. tostring(id)
+        errors[#errors + 1] = 'uuid not found: ' .. tostring(id)
     end
     local catalog = LrApplication.activeCatalog()
     local applied = 0
     for base = 1, #matched, CHUNK do
         local hi = math.min(base + CHUNK - 1, #matched)
-        catalog:withWriteAccessDo('ABELr : preset develop', function()
+        catalog:withWriteAccessDo('ABELr: develop preset', function()
             for i = base, hi do
                 local m = matched[i]
                 local ok, err = LrTasks.pcall(function()
@@ -86,7 +86,7 @@ function Presets.apply(photoIds, presetRef)
         _G.ABELR_BRIDGE_HEARTBEAT = os.time()
         LrTasks.yield()
     end
-    Utils.logf('Presets.apply : %d/%d appliqués (preset=%s)',
+    Utils.logf('Presets.apply: %d/%d applied (preset=%s)',
         applied, #photoIds, tostring(presetRef))
     return { applied = applied, total = #photoIds, errors = errors }
 end

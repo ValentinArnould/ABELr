@@ -1,14 +1,14 @@
 --[[
-    MenuConnect.lua — Bibliothèque > Modules externes > Démarrer l'application.
-    Lance l'App Python (si besoin) puis active le pont de polling.
+    MenuConnect.lua — Library > Plug-in Extras > Start the application.
+    Launches the Python App (if needed) then activates the polling bridge.
 
-    Vide le cache des modules du plugin avant de les charger : garantit que le
-    rechargement du plugin (Plugin Manager > Recharger) applique le nouveau code
-    immédiatement lors du prochain clic sur ce menu (sans avoir à relancer Lr).
+    Clears the plugin module cache before loading them: guarantees that
+    reloading the plugin (Plugin Manager > Reload) applies the new code
+    immediately on the next click of this menu (without having to restart Lr).
 ]]
 
--- Vide les modules du plugin pour forcer rechargement depuis le disque.
--- Les modules SDK Lr (import '...') ne sont pas dans package.loaded, pas touchés.
+-- Clears the plugin modules to force a reload from disk.
+-- The Lr SDK modules (import '...') are not in package.loaded, not affected.
 if package and package.loaded then
     for _, m in ipairs({ 'Actions', 'PollingLoop', 'PhotoData', 'Adjustments',
                          'Thumbnails', 'HttpClient', 'AppLauncher', 'Utils', 'Json' }) do

@@ -1,25 +1,25 @@
 --[[
-    Json.lua — encodeur / décodeur JSON compact pour Lua 5.1 (SDK Lr).
+    Json.lua — compact JSON encoder/decoder for Lua 5.1 (Lr SDK).
 
-    Lua n'a pas de lib JSON native. Module minimal couvrant les besoins du projet :
-    objets, tableaux, strings (échappement complet), nombres, bool, null.
+    Lua has no native JSON lib. Minimal module covering the project's needs:
+    objects, arrays, strings (full escaping), numbers, bool, null.
 
-    Tableaux vs objets : Lua ne distingue pas une table vide tableau d'une table vide
-    objet. Utiliser Json.array(t) pour forcer la sérialisation en tableau JSON, même vide.
+    Arrays vs objects: Lua doesn't distinguish an empty array table from an empty
+    object table. Use Json.array(t) to force serialization as a JSON array, even when empty.
         local arr = Json.array({})            -- → "[]"
         local arr = Json.array({ a, b, c })   -- → "[...]"
 
-    Valeur null : utiliser Json.null (sentinelle) pour produire `null`.
+    Null value: use Json.null (sentinel) to produce `null`.
 ]]
 
 local LrTasks = import 'LrTasks'
 
 local Json = {}
 
--- Sentinelle null (distincte de nil pour ne pas disparaître des tables).
+-- Null sentinel (distinct from nil so it doesn't disappear from tables).
 Json.null = setmetatable({}, { __tostring = function() return 'null' end })
 
-local ARRAY_MT = {}  -- métatable marqueur "ce table est un tableau JSON"
+local ARRAY_MT = {}  -- marker metatable "this table is a JSON array"
 
 function Json.array(t)
     return setmetatable(t or {}, ARRAY_MT)
@@ -27,7 +27,7 @@ end
 
 local function isArray(t)
     if getmetatable(t) == ARRAY_MT then return true end
-    -- Heuristique : séquence non vide avec clés 1..n.
+    -- Heuristic: non-empty sequence with keys 1..n.
     local n = 0
     for k in pairs(t) do
         if type(k) ~= 'number' then return false end
@@ -37,7 +37,7 @@ local function isArray(t)
 end
 
 -- ------------------------------------------------------------------ --
--- Encodage
+-- Encoding
 -- ------------------------------------------------------------------ --
 local ESCAPES = {
     ['"'] = '\\"', ['\\'] = '\\\\', ['\b'] = '\\b', ['\f'] = '\\f',
@@ -55,7 +55,7 @@ end
 
 local function encodeNumber(n)
     if n ~= n or n == math.huge or n == -math.huge then
-        return 'null'  -- NaN/Inf non valides en JSON
+        return 'null'  -- NaN/Inf are not valid JSON
     end
     if math.floor(n) == n and math.abs(n) < 1e15 then
         return string.format('%d', n)
@@ -104,7 +104,7 @@ encodeValue = function(v, parts)
     elseif tv == 'table' then
         encodeTable(v, parts)
     else
-        error('Json.encode : type non supporté : ' .. tv)
+        error('Json.encode: unsupported type: ' .. tv)
     end
 end
 
@@ -115,7 +115,7 @@ function Json.encode(value)
 end
 
 -- ------------------------------------------------------------------ --
--- Décodage (descente récursive)
+-- Decoding (recursive descent)
 -- ------------------------------------------------------------------ --
 local decodeValue  -- forward
 
@@ -142,10 +142,10 @@ local function decodeString(s, i)
             if nxt == 'u' then
                 local hex = s:sub(i + 2, i + 5)
                 local code = tonumber(hex, 16)
-                if not code then error('Json: \\u invalide à ' .. i) end
+                if not code then error('Json: invalid \\u at ' .. i) end
                 i = i + 6
-                -- Paire surrogate (revue Fable 5 L-08) : \uD800-DBFF suivie de
-                -- \uDC00-DFFF → code point astral, encodé UTF-8 sur 4 octets.
+                -- Surrogate pair (Fable 5 review L-08): \uD800-DBFF followed by
+                -- \uDC00-DFFF → astral code point, encoded as 4-byte UTF-8.
                 if code >= 0xD800 and code <= 0xDBFF and s:sub(i, i + 1) == '\\u' then
                     local lo = tonumber(s:sub(i + 2, i + 5), 16)
                     if lo and lo >= 0xDC00 and lo <= 0xDFFF then
@@ -153,7 +153,7 @@ local function decodeString(s, i)
                         i = i + 6
                     end
                 end
-                -- UTF-8 encodage minimal
+                -- Minimal UTF-8 encoding
                 if code < 0x80 then
                     buf[#buf + 1] = string.char(code)
                 elseif code < 0x800 then
@@ -181,7 +181,7 @@ local function decodeString(s, i)
             i = i + 1
         end
     end
-    error('Json: string non terminée')
+    error('Json: unterminated string')
 end
 
 local function decodeNumber(s, i)
@@ -201,7 +201,7 @@ local function decodeArray(s, i)
         i = skipWhitespace(s, i)
         local c = s:sub(i, i)
         if c == ']' then return arr, i + 1 end
-        if c ~= ',' then error('Json: attendu , ou ] à ' .. i) end
+        if c ~= ',' then error('Json: expected , or ] at ' .. i) end
         i = skipWhitespace(s, i + 1)
     end
 end
@@ -211,18 +211,18 @@ local function decodeObject(s, i)
     i = skipWhitespace(s, i + 1)
     if s:sub(i, i) == '}' then return obj, i + 1 end
     while true do
-        if s:sub(i, i) ~= '"' then error('Json: clé attendue à ' .. i) end
+        if s:sub(i, i) ~= '"' then error('Json: expected key at ' .. i) end
         local key
         key, i = decodeString(s, i)
         i = skipWhitespace(s, i)
-        if s:sub(i, i) ~= ':' then error('Json: : attendu à ' .. i) end
+        if s:sub(i, i) ~= ':' then error('Json: expected : at ' .. i) end
         local val
         val, i = decodeValue(s, skipWhitespace(s, i + 1))
         obj[key] = val
         i = skipWhitespace(s, i)
         local c = s:sub(i, i)
         if c == '}' then return obj, i + 1 end
-        if c ~= ',' then error('Json: attendu , ou } à ' .. i) end
+        if c ~= ',' then error('Json: expected , or } at ' .. i) end
         i = skipWhitespace(s, i + 1)
     end
 end
@@ -238,13 +238,13 @@ decodeValue = function(s, i)
     elseif s:sub(i, i + 4) == 'false' then return false, i + 5
     elseif s:sub(i, i + 3) == 'null' then return Json.null, i + 4
     end
-    error('Json: caractère inattendu à ' .. i .. ' : ' .. tostring(c))
+    error('Json: unexpected character at ' .. i .. ': ' .. tostring(c))
 end
 
--- Retourne value, err. err non nil en cas d'échec.
+-- Returns value, err. err is non-nil on failure.
 function Json.decode(str)
     if type(str) ~= 'string' or str == '' then
-        return nil, 'Json.decode: entrée vide'
+        return nil, 'Json.decode: empty input'
     end
     local ok, value = LrTasks.pcall(function()
         local v = decodeValue(str, 1)
