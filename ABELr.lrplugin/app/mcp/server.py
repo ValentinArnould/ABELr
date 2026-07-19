@@ -1,13 +1,13 @@
-"""Instance FastMCP + outils MCP Lightroom (Phase 1 : les 6 jobs existants).
+"""FastMCP instance + Lightroom MCP tools (Phase 1: the 6 existing jobs).
 
-Chaque outil = `require_bridge()` (préflight) puis `run_job(...)` (submit +
-wait_result offloadés). Les docstrings des outils sont ce que Claude voit :
-elles décrivent l'usage et les conventions (clés develop PascalCase, etc.).
+Each tool = `require_bridge()` (preflight) then `run_job(...)` (submit +
+offloaded wait_result). The tools' docstrings are what Claude sees: they
+describe usage and conventions (PascalCase develop keys, etc.).
 
-Monté sur FastAPI dans `app/server/api.py` :
-    http_app = mcp.streamable_http_app()   # crée le session manager (lazy)
-    app.mount("/mcp", http_app)            # → http://127.0.0.1:5000/mcp
-avec forward du lifespan (`async with mcp.session_manager.run()`).
+Mounted on FastAPI in `app/server/api.py`:
+    http_app = mcp.streamable_http_app()   # creates the session manager (lazy)
+    app.mount("/mcp", http_app)            # -> http://127.0.0.1:5000/mcp
+with the lifespan forwarded (`async with mcp.session_manager.run()`).
 """
 
 from __future__ import annotations
@@ -21,17 +21,17 @@ from ..server.job_queue import job_queue
 from ..server.models import JobType, PhotoResult, ThumbnailResult
 from .tools import require_bridge, run_job
 
-# stateless_http : pas de store de session à fuiter/planter (un seul client local).
-# json_response : POST renvoie de l'application/json (pas un flux SSE) → transport simple.
-# streamable_http_path='/' : monté à '/mcp', l'URL effective est exactement /mcp
-# (sinon /mcp/mcp + redirections 307).
+# stateless_http: no session store to leak/crash (a single local client).
+# json_response: POST returns application/json (not an SSE stream) -> simple transport.
+# streamable_http_path='/': mounted at '/mcp', the effective URL is exactly /mcp
+# (otherwise /mcp/mcp + 307 redirects).
 mcp = FastMCP(
     "Lightroom Classic (ABELr)",
     instructions=(
-        "Pilote Adobe Lightroom Classic via le plugin ABELr. Prérequis : "
-        "Lightroom ouvert + plugin connecté + App lancée. Récupère d'abord les "
-        "photo_id via get_selected_photos, puis agis dessus (apply_adjustments…). "
-        "Les clés de réglages develop sont des noms SDK Lr en PascalCase."
+        "Drives Adobe Lightroom Classic via the ABELr plugin. Prerequisites: "
+        "Lightroom open + plugin connected + App running. First fetch the "
+        "photo_id via get_selected_photos, then act on them (apply_adjustments...). "
+        "Develop setting keys are PascalCase Lr SDK names."
     ),
     stateless_http=True,
     json_response=True,
@@ -40,7 +40,7 @@ mcp = FastMCP(
 
 
 # --------------------------------------------------------------------------- #
-# Helpers de sérialisation (JobResult → dict compact pour la sortie MCP)
+# Serialization helpers (JobResult -> compact dict for MCP output)
 # --------------------------------------------------------------------------- #
 def _photo_to_dict(p: PhotoResult, include_develop: bool) -> dict[str, Any]:
     d: dict[str, Any] = {
@@ -67,14 +67,14 @@ def _thumb_to_dict(t: ThumbnailResult) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Outils — introspection
+# Tools — introspection
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def bridge_status() -> dict:
-    """État du pont plugin Lightroom (sans déclencher de job).
+    """State of the Lightroom plugin bridge (without triggering a job).
 
-    Retourne {connected, last_poll_s_ago, pending_jobs}. `connected=false` ⇒
-    Lightroom/plugin fermés ou App non lancée : les autres outils échoueront.
+    Returns {connected, last_poll_s_ago, pending_jobs}. `connected=false` =>
+    Lightroom/plugin closed or App not running: the other tools will fail.
     """
     return {
         "connected": job_queue.bridge_connected(),
@@ -85,22 +85,22 @@ async def bridge_status() -> dict:
 
 @mcp.tool()
 async def ping() -> dict:
-    """Ping le plugin (popup « Hello World » dans Lightroom). Vérifie le round-trip."""
+    """Ping the plugin (shows a "Hello World" popup in Lightroom). Verifies the round-trip."""
     require_bridge()
     await run_job(JobType.TEST, None, timeout=15.0)
-    return {"ok": True, "message": "Le plugin Lightroom a répondu."}
+    return {"ok": True, "message": "The Lightroom plugin responded."}
 
 
 # --------------------------------------------------------------------------- #
-# Outils — lecture
+# Tools — reading
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def get_selected_photos(include_develop: bool = False, timeout: float = 30.0) -> dict:
-    """Photos actuellement sélectionnées dans Lightroom (id, chemin, EXIF).
+    """Photos currently selected in Lightroom (id, path, EXIF).
 
-    include_develop=True ajoute les ~90 réglages develop courants par photo
-    (PascalCase SDK) — volumineux : à laisser sur False pour de grandes sélections
-    (limite de sortie MCP). Les photo_id servent aux autres outils (apply_adjustments…).
+    include_develop=True adds the ~90 current develop settings per photo
+    (PascalCase SDK) — large payload: leave it False for big selections
+    (MCP output limit). The photo_id values feed the other tools (apply_adjustments...).
     """
     require_bridge()
     result = await run_job(JobType.GET_SELECTED_PHOTOS, None, timeout)
@@ -110,10 +110,10 @@ async def get_selected_photos(include_develop: bool = False, timeout: float = 30
 
 @mcp.tool()
 async def get_catalog_photos(include_develop: bool = False, timeout: float = 120.0) -> dict:
-    """TOUTES les photos du catalogue actif (id, chemin, EXIF).
+    """ALL photos in the active catalog (id, path, EXIF).
 
-    Potentiellement énorme : évite include_develop=True ici. Préfère
-    get_selected_photos quand tu ne veux qu'une partie du catalogue.
+    Potentially huge: avoid include_develop=True here. Prefer
+    get_selected_photos when you only want part of the catalog.
     """
     require_bridge()
     result = await run_job(JobType.GET_CATALOG_PHOTOS, None, timeout)
@@ -128,10 +128,10 @@ async def get_thumbnails(
     height: int = 512,
     timeout: float = 120.0,
 ) -> dict:
-    """Rend des miniatures JPEG de la sélection (ou de `photo_ids` précis).
+    """Renders JPEG thumbnails of the selection (or of specific `photo_ids`).
 
-    Retourne des **chemins de fichiers** locaux (jamais des données base64). Sans
-    photo_ids, rend la sélection courante de Lightroom.
+    Returns local **file paths** (never base64 data). Without
+    photo_ids, renders Lightroom's current selection.
     """
     require_bridge()
     payload: dict[str, Any] = {"width": width, "height": height}
@@ -148,18 +148,18 @@ async def render_probe(
     settle: float = 0.6,
     timeout: Optional[float] = None,
 ) -> dict:
-    """Aperçu d'essai : applique des réglages TEMPORAIRES, rend une miniature, RESTAURE.
+    """Trial preview: applies TEMPORARY settings, renders a thumbnail, RESTORES.
 
-    Ne modifie pas durablement les photos (restaure l'état d'origine). `adjustments`
-    = [{"photo_id": "...", "develop": {<clé PascalCase>: valeur, ...}}, ...].
-    Utile pour prévisualiser un réglage avant apply_adjustments. Relit aussi
-    Temperature/Tint après l'apply (valeur numérique de l'As Shot si
-    WhiteBalance='As Shot'). `restore_error` non vide = la photo est restée en état
-    modifié (à signaler).
+    Does not durably modify the photos (restores the original state). `adjustments`
+    = [{"photo_id": "...", "develop": {<PascalCase key>: value, ...}}, ...].
+    Useful for previewing a setting before apply_adjustments. Also re-reads
+    Temperature/Tint after the apply (the As Shot numeric value if
+    WhiteBalance='As Shot'). Non-empty `restore_error` = the photo stayed in a
+    modified state (worth flagging).
     """
     require_bridge()
     if not adjustments:
-        raise ToolError("Aucun ajustement fourni.")
+        raise ToolError("No adjustment provided.")
     if timeout is None:
         timeout = max(30.0, 5.0 * len(adjustments))
     payload = {"adjustments": adjustments, "settle": settle}
@@ -169,32 +169,32 @@ async def render_probe(
 
 
 # --------------------------------------------------------------------------- #
-# Outils — écriture
+# Tools — writing
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def apply_adjustments(
     adjustments: list[dict[str, Any]],
     timeout: Optional[float] = None,
 ) -> dict:
-    """Applique DURABLEMENT des réglages develop à des photos précises.
+    """DURABLY applies develop settings to specific photos.
 
-    `adjustments` = [{"photo_id": "<id>", "develop": {<clé>: valeur, ...}}, ...].
-    Récupère les photo_id via get_selected_photos.
+    `adjustments` = [{"photo_id": "<id>", "develop": {<key>: value, ...}}, ...].
+    Fetch the photo_id values via get_selected_photos.
 
-    Conventions clés develop (SDK Lr, PhotoProcess PV2012) :
-    - Noms en PascalCase avec suffixe 2012 pour le tonal : Exposure2012,
+    Develop key conventions (Lr SDK, PhotoProcess PV2012):
+    - PascalCase names with the 2012 suffix for tonal: Exposure2012,
       Contrast2012, Highlights2012, Shadows2012, Whites2012, Blacks2012.
-    - Balance des blancs : poser WhiteBalance='Custom' pour que Temperature et Tint
-      prennent effet (ex. {"WhiteBalance": "Custom", "Temperature": 5650, "Tint": -5}).
-    - HSL/couleur/courbes : noms SDK exacts (ex. SaturationAdjustmentRed,
-      LuminanceAdjustmentBlue…).
+    - White balance: set WhiteBalance='Custom' for Temperature and Tint to
+      take effect (e.g. {"WhiteBalance": "Custom", "Temperature": 5650, "Tint": -5}).
+    - HSL/color/curves: exact SDK names (e.g. SaturationAdjustmentRed,
+      LuminanceAdjustmentBlue...).
 
-    Retourne {applied, matched, total} ; `warnings` si un apply partiel a échoué
-    sur certaines photos.
+    Returns {applied, matched, total}; `warnings` if a partial apply failed
+    on some photos.
     """
     require_bridge()
     if not adjustments:
-        raise ToolError("Aucun ajustement fourni.")
+        raise ToolError("No adjustment provided.")
     if timeout is None:
         timeout = max(60.0, 2.0 * len(adjustments))
     payload = {"adjustments": adjustments}
@@ -204,16 +204,16 @@ async def apply_adjustments(
         "matched": result.matched,
         "total": result.total,
     }
-    if result.errors_summary:  # apply partiel — ne pas avaler (revue Fable 5 L-04)
+    if result.errors_summary:  # partial apply — don't swallow it (Fable 5 review L-04)
         out["warnings"] = result.errors_summary
     return out
 
 
 # --------------------------------------------------------------------------- #
-# Helpers Phase 2
+# Phase 2 helpers
 # --------------------------------------------------------------------------- #
 def _applied_out(result: Any) -> dict[str, Any]:
-    """Sortie standard des jobs batch Phase 2 : {applied, total, [warnings]}."""
+    """Standard output for Phase 2 batch jobs: {applied, total, [warnings]}."""
     out: dict[str, Any] = {"applied": result.applied, "total": result.total}
     if result.errors_summary:
         out["warnings"] = result.errors_summary
@@ -221,19 +221,19 @@ def _applied_out(result: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2 — notes / flags / labels
+# Phase 2 — rating / flags / labels
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def set_rating(photo_ids: list[str], rating: int, timeout: float = 60.0) -> dict:
-    """Note (étoiles) 0 à 5 pour les photos données (même note pour toutes).
+    """Star rating 0 to 5 for the given photos (same rating for all).
 
-    rating=0 efface les étoiles. Récupère les photo_id via get_selected_photos.
+    rating=0 clears the stars. Fetch the photo_id values via get_selected_photos.
     """
     require_bridge()
     if not photo_ids:
-        raise ToolError("Aucun photo_id fourni.")
+        raise ToolError("No photo_id provided.")
     if not (0 <= rating <= 5):
-        raise ToolError("rating doit être entre 0 et 5.")
+        raise ToolError("rating must be between 0 and 5.")
     result = await run_job(
         JobType.SET_RATING, {"photo_ids": photo_ids, "rating": rating}, timeout
     )
@@ -247,23 +247,23 @@ async def set_flag_color(
     color: Optional[str] = None,
     timeout: float = 60.0,
 ) -> dict:
-    """Drapeau (pick/reject) et/ou label couleur pour les photos données.
+    """Flag (pick/reject) and/or color label for the given photos.
 
-    flag : "pick" | "reject" | "none" (ou None pour ne pas toucher).
-    color : "red" | "yellow" | "green" | "blue" | "purple" | "none" (ou None).
-    Au moins l'un des deux doit être fourni.
+    flag: "pick" | "reject" | "none" (or None to leave untouched).
+    color: "red" | "yellow" | "green" | "blue" | "purple" | "none" (or None).
+    At least one of the two must be provided.
     """
     require_bridge()
     if not photo_ids:
-        raise ToolError("Aucun photo_id fourni.")
+        raise ToolError("No photo_id provided.")
     if flag is None and color is None:
-        raise ToolError("Fournis au moins flag ou color.")
+        raise ToolError("Provide at least flag or color.")
     flags = {"pick", "reject", "none"}
     colors = {"red", "yellow", "green", "blue", "purple", "none"}
     if flag is not None and flag not in flags:
-        raise ToolError(f"flag invalide : {flag}. Attendu : {sorted(flags)}.")
+        raise ToolError(f"Invalid flag: {flag}. Expected: {sorted(flags)}.")
     if color is not None and color not in colors:
-        raise ToolError(f"color invalide : {color}. Attendu : {sorted(colors)}.")
+        raise ToolError(f"Invalid color: {color}. Expected: {sorted(colors)}.")
     payload: dict[str, Any] = {"photo_ids": photo_ids}
     if flag is not None:
         payload["flag"] = flag
@@ -280,16 +280,16 @@ async def set_keywords(
     remove: Optional[list[str]] = None,
     timeout: float = 60.0,
 ) -> dict:
-    """Ajoute et/ou retire des mots-clés (par nom) sur les photos données.
+    """Adds and/or removes keywords (by name) on the given photos.
 
-    `add` : noms de mots-clés à ajouter (créés s'ils n'existent pas, au niveau
-    racine). `remove` : noms à retirer. Au moins l'un des deux non vide.
+    `add`: keyword names to add (created if they don't exist, at the
+    root level). `remove`: names to remove. At least one of the two non-empty.
     """
     require_bridge()
     if not photo_ids:
-        raise ToolError("Aucun photo_id fourni.")
+        raise ToolError("No photo_id provided.")
     if not add and not remove:
-        raise ToolError("Fournis au moins un mot-clé dans add ou remove.")
+        raise ToolError("Provide at least one keyword in add or remove.")
     payload = {"photo_ids": photo_ids, "add": add or [], "remove": remove or []}
     result = await run_job(JobType.SET_KEYWORDS, payload, timeout)
     return _applied_out(result)
@@ -300,10 +300,10 @@ async def set_keywords(
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def list_collections(timeout: float = 30.0) -> dict:
-    """Arbre des collections et ensembles de collections du catalogue.
+    """Tree of collections and collection sets in the catalog.
 
-    Retourne {collections: [ {name, id, kind: "collection"|"set", photo_count?,
-    children: [...] } ]}. Utilise les id (ou noms) avec add_to_collection.
+    Returns {collections: [ {name, id, kind: "collection"|"set", photo_count?,
+    children: [...] } ]}. Use the id (or names) with add_to_collection.
     """
     require_bridge()
     result = await run_job(JobType.LIST_COLLECTIONS, None, timeout)
@@ -314,14 +314,14 @@ async def list_collections(timeout: float = 30.0) -> dict:
 async def create_collection(
     name: str, parent: Optional[str] = None, timeout: float = 30.0
 ) -> dict:
-    """Crée une collection (retourne l'existante si déjà présente).
+    """Creates a collection (returns the existing one if already present).
 
-    `parent` : nom ou id d'un ensemble de collections parent (None = racine).
-    Retourne {name, id, created}.
+    `parent`: name or id of a parent collection set (None = root).
+    Returns {name, id, created}.
     """
     require_bridge()
     if not name:
-        raise ToolError("Nom de collection vide.")
+        raise ToolError("Empty collection name.")
     payload: dict[str, Any] = {"name": name}
     if parent is not None:
         payload["parent"] = parent
@@ -333,16 +333,16 @@ async def create_collection(
 async def add_to_collection(
     collection: str, photo_ids: list[str], timeout: float = 60.0
 ) -> dict:
-    """Ajoute des photos à une collection (identifiée par id ou nom).
+    """Adds photos to a collection (identified by id or name).
 
-    Récupère l'id/nom via list_collections, les photo_id via get_selected_photos.
-    Retourne {applied, total, [warnings]}.
+    Fetch the id/name via list_collections, the photo_id values via get_selected_photos.
+    Returns {applied, total, [warnings]}.
     """
     require_bridge()
     if not collection:
-        raise ToolError("Collection non spécifiée.")
+        raise ToolError("Collection not specified.")
     if not photo_ids:
-        raise ToolError("Aucun photo_id fourni.")
+        raise ToolError("No photo_id provided.")
     result = await run_job(
         JobType.ADD_TO_COLLECTION,
         {"collection": collection, "photo_ids": photo_ids},
@@ -352,13 +352,13 @@ async def add_to_collection(
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2 — presets develop
+# Phase 2 — develop presets
 # --------------------------------------------------------------------------- #
 @mcp.tool()
 async def list_develop_presets(timeout: float = 30.0) -> dict:
-    """Presets develop disponibles dans Lightroom.
+    """Develop presets available in Lightroom.
 
-    Retourne {presets: [ {name, uuid, folder} ]}. Applique avec apply_develop_preset.
+    Returns {presets: [ {name, uuid, folder} ]}. Apply with apply_develop_preset.
     """
     require_bridge()
     result = await run_job(JobType.LIST_DEVELOP_PRESETS, None, timeout)
@@ -369,16 +369,16 @@ async def list_develop_presets(timeout: float = 30.0) -> dict:
 async def apply_develop_preset(
     photo_ids: list[str], preset: str, timeout: Optional[float] = None
 ) -> dict:
-    """Applique un preset develop (par uuid ou nom) aux photos données.
+    """Applies a develop preset (by uuid or name) to the given photos.
 
-    Récupère uuid/nom via list_develop_presets. Préfère l'uuid (les noms peuvent
-    ne pas être uniques). Retourne {applied, total, [warnings]}.
+    Fetch the uuid/name via list_develop_presets. Prefer the uuid (names may
+    not be unique). Returns {applied, total, [warnings]}.
     """
     require_bridge()
     if not photo_ids:
-        raise ToolError("Aucun photo_id fourni.")
+        raise ToolError("No photo_id provided.")
     if not preset:
-        raise ToolError("Preset non spécifié.")
+        raise ToolError("Preset not specified.")
     if timeout is None:
         timeout = max(60.0, 2.0 * len(photo_ids))
     result = await run_job(

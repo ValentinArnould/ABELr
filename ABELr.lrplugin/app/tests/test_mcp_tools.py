@@ -1,7 +1,7 @@
-"""Tests du helper MCP `run_job` / `require_bridge` (sans serveur ni GPU).
+"""Tests for the MCP helper `run_job` / `require_bridge` (no server, no GPU).
 
-On monkeypatch la `job_queue` importée dans `app.mcp.tools` pour simuler les
-quatre issues : succès, timeout, erreur plugin, file saturée.
+Monkeypatches the `job_queue` imported in `app.mcp.tools` to simulate the
+four outcomes: success, timeout, plugin error, saturated queue.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class _FakeQueue:
 
     def submit(self, job_type, payload=None):
         if self._submit_raises:
-            raise RuntimeError("File de jobs saturée (100 en attente) — pont inactif ?")
+            raise RuntimeError("Job queue saturated (100 pending) — bridge inactive?")
         self.submitted.append((job_type, payload))
         return "job-123"
 
@@ -54,7 +54,7 @@ def test_run_job_timeout(monkeypatch):
 
 
 def test_run_job_plugin_error(monkeypatch):
-    res = JobResult(job_id="job-123", status="error", error="boom côté Lr")
+    res = JobResult(job_id="job-123", status="error", error="boom on the Lr side")
     _patch(monkeypatch, _FakeQueue(wait_result=res))
     with pytest.raises(ToolError, match="boom"):
         asyncio.run(mcp_tools.run_job(JobType.TEST, None))
@@ -68,10 +68,10 @@ def test_run_job_queue_saturated(monkeypatch):
 
 def test_require_bridge_disconnected(monkeypatch):
     _patch(monkeypatch, _FakeQueue(connected=False))
-    with pytest.raises(ToolError, match="Pont Lightroom non connect"):
+    with pytest.raises(ToolError, match="Lightroom bridge not connect"):
         mcp_tools.require_bridge()
 
 
 def test_require_bridge_connected(monkeypatch):
     _patch(monkeypatch, _FakeQueue(connected=True))
-    mcp_tools.require_bridge()  # ne lève pas
+    mcp_tools.require_bridge()  # does not raise

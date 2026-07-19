@@ -1,8 +1,8 @@
-"""Point d'entrée — démarre le serveur FastAPI (thread) + le GUI PySide6 (thread principal).
+"""Entry point — starts the FastAPI server (thread) + the PySide6 GUI (main thread).
 
-Lancement :
-    python -m app.main          (depuis ABELr/)
-    ou  cd app && python main.py
+Launch:
+    python -m app.main          (from ABELr/)
+    or  cd app && python main.py
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import uvicorn
 
 
 class _PollFilter(logging.Filter):
-    """Supprime les logs de polling /jobs/pending (204) — trop verbeux."""
+    """Suppresses /jobs/pending polling logs (204) — too verbose."""
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         return not ("GET /jobs/pending" in msg and "204" in msg)
@@ -25,12 +25,12 @@ PORT = 5000
 
 
 def _run_server() -> None:
-    """Serveur uvicorn — bloquant, donc lancé dans un thread daemon.
+    """Uvicorn server — blocking, so launched in a daemon thread.
 
-    Toute exception au démarrage (port déjà occupé par un process Python orphelin,
-    etc.) est rendue visible : sinon le thread meurt en silence et le pont paraît
-    « cassé » côté plugin alors que la vraie cause est que le serveur n'a jamais
-    écouté.
+    Any exception at startup (port already held by an orphaned Python
+    process, etc.) is surfaced: otherwise the thread dies silently and the
+    bridge looks "broken" on the plugin side when the real cause is that the
+    server never listened.
     """
     from app.server.api import app
 
@@ -41,10 +41,10 @@ def _run_server() -> None:
         import traceback
 
         print(
-            f"\n[ABELr] ERREUR : le serveur HTTP n'a pas pu démarrer sur "
-            f"{HOST}:{PORT}.\n  Cause : {exc!r}\n  Un process python.exe orphelin "
-            f"occupe-t-il déjà le port {PORT} ? (Gestionnaire des tâches → terminer "
-            f"python.exe, puis relancer)\n",
+            f"\n[ABELr] ERROR: the HTTP server could not start on "
+            f"{HOST}:{PORT}.\n  Cause: {exc!r}\n  Is an orphaned python.exe "
+            f"process already holding port {PORT}? (Task Manager -> end "
+            f"python.exe, then relaunch)\n",
             file=sys.stderr,
             flush=True,
         )
@@ -52,11 +52,11 @@ def _run_server() -> None:
 
 
 def main() -> int:
-    # Serveur HTTP dans un thread daemon (s'arrête avec le GUI).
+    # HTTP server in a daemon thread (stops with the GUI).
     server_thread = threading.Thread(target=_run_server, daemon=True, name="fastapi")
     server_thread.start()
 
-    # GUI sur le thread principal (requis par Qt).
+    # GUI on the main thread (required by Qt).
     from PySide6.QtWidgets import QApplication
 
     from app.gui.main_window import MainWindow
@@ -68,7 +68,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Permet `python app/main.py` en ajoutant la racine projet au path.
+    # Enables `python app/main.py` by adding the project root to the path.
     if __package__ in (None, ""):
         from pathlib import Path
 
