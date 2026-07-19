@@ -1,13 +1,13 @@
-# bootstrap.ps1 — construit le venv du plugin + installe les dependances Python.
+# bootstrap.ps1 -- builds the plugin's venv + installs Python dependencies.
 #
-# Lance automatiquement par launch.ps1 au tout premier demarrage (venv absent sous
-# app/.venv). Peut aussi etre relance a la main (idempotent) pour reparer une install
-# cassee. $PSScriptRoot = ABELr.lrplugin/ (le plugin embarque tout : app/,
-# launch.ps1, bootstrap.ps1 -- copier ce seul dossier suffit sur une autre machine).
+# Launched automatically by launch.ps1 on the very first startup (venv missing under
+# app/.venv). Can also be re-run by hand (idempotent) to repair a broken install.
+# $PSScriptRoot = ABELr.lrplugin/ (the plugin embeds everything: app/,
+# launch.ps1, bootstrap.ps1 -- copying just this folder is enough on another machine).
 #
-# Detection GPU : torch/torchvision sont installes CUDA (cu124) si un GPU NVIDIA est
-# detecte (nvidia-smi present), sinon en build CPU (PyPI). Politique "GPU prioritaire,
-# fallback CPU" -- cf. app/core/gpu.py.
+# GPU detection: torch/torchvision are installed as CUDA (cu124) if an NVIDIA GPU is
+# detected (nvidia-smi present), otherwise as a CPU build (PyPI). "GPU first,
+# CPU fallback" policy -- see app/core/gpu.py.
 
 $ErrorActionPreference = 'Stop'
 $root    = $PSScriptRoot
@@ -16,11 +16,11 @@ $venvDir = Join-Path $appDir '.venv'
 $venvPy  = Join-Path $venvDir 'Scripts\python.exe'
 $reqFile = Join-Path $appDir 'requirements.txt'
 
-Write-Host '[ABELr] Bootstrap -- verification de Python...'
+Write-Host '[ABELr] Bootstrap -- checking Python...'
 
 $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
 if (-not $pythonCmd) {
-    Write-Error "Python introuvable dans le PATH. Installez Python 3.11+ (https://www.python.org/downloads/), cochez `"Add python.exe to PATH`", puis relancez."
+    Write-Error "Python not found in PATH. Install Python 3.11+ (https://www.python.org/downloads/), check `"Add python.exe to PATH`", then relaunch."
     exit 1
 }
 
@@ -33,57 +33,57 @@ if ($verOutput -match 'Python (\d+)\.(\d+)') {
     $maj = [int]$Matches[1]
     $min = [int]$Matches[2]
     if ($maj -lt 3 -or ($maj -eq 3 -and $min -lt 11)) {
-        Write-Error "Python $maj.$min detecte -- 3.11+ requis pour ABELr."
+        Write-Error "Python $maj.$min detected -- 3.11+ required for ABELr."
         exit 1
     }
     Write-Host "[ABELr] Python $maj.$min OK."
 } else {
-    Write-Warning "Version Python non reconnue (`"$verOutput`") -- poursuite quand meme."
+    Write-Warning "Unrecognized Python version (`"$verOutput`") -- continuing anyway."
 }
 
 if (-not (Test-Path $venvPy)) {
-    Write-Host "[ABELr] Creation du venv : $venvDir"
+    Write-Host "[ABELr] Creating venv: $venvDir"
     python -m venv $venvDir
     if (-not (Test-Path $venvPy)) {
-        Write-Error "Echec de creation du venv (python.exe absent apres `"python -m venv`")."
+        Write-Error "Failed to create the venv (python.exe missing after `"python -m venv`")."
         exit 1
     }
 } else {
-    Write-Host '[ABELr] venv deja present -- reutilise.'
+    Write-Host '[ABELr] venv already present -- reusing.'
 }
 
-Write-Host '[ABELr] Mise a jour de pip...'
+Write-Host '[ABELr] Updating pip...'
 & $venvPy -m pip install --upgrade pip
 
-# Detection GPU NVIDIA (nvidia-smi present = driver installe et fonctionnel).
+# NVIDIA GPU detection (nvidia-smi present = driver installed and working).
 $hasNvidia = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
 
 if ($hasNvidia) {
-    Write-Host '[ABELr] GPU NVIDIA detecte -- installation torch CUDA (cu124)...'
+    Write-Host '[ABELr] NVIDIA GPU detected -- installing torch CUDA (cu124)...'
     & $venvPy -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 } else {
-    Write-Host '[ABELr] Aucun GPU NVIDIA detecte -- installation torch CPU (fallback).'
+    Write-Host '[ABELr] No NVIDIA GPU detected -- installing torch CPU (fallback).'
     & $venvPy -m pip install torch==2.6.0 torchvision==0.21.0
 }
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Echec de l'installation de torch/torchvision (code $LASTEXITCODE)."
+    Write-Error "Failed to install torch/torchvision (code $LASTEXITCODE)."
     exit 1
 }
 
-Write-Host '[ABELr] Installation des autres dependances (requirements.txt)...'
+Write-Host '[ABELr] Installing other dependencies (requirements.txt)...'
 & $venvPy -m pip install -r $reqFile
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Echec de l'installation de requirements.txt (code $LASTEXITCODE)."
+    Write-Error "Failed to install requirements.txt (code $LASTEXITCODE)."
     exit 1
 }
 
-# exiftool : binaire externe non-pip (profil createur Sony CreativeStyle). Cherche
-# d'abord un bundle local (bin/exiftool.exe), sinon le PATH systeme ; absence geree
-# comme non bloquante par app/core/exif_profile.py (juste un profil manquant).
+# exiftool: external non-pip binary (Sony CreativeStyle creator profile). Looks
+# first for a local bundle (bin/exiftool.exe), then the system PATH; its absence is
+# handled as non-blocking by app/core/exif_profile.py (just a missing profile).
 $exiftoolBundled = Join-Path $root 'bin\exiftool.exe'
 $exiftoolInPath  = Get-Command exiftool -ErrorAction SilentlyContinue
 if (-not $exiftoolInPath -and -not (Test-Path $exiftoolBundled)) {
-    Write-Warning "exiftool introuvable (PATH ni bin\exiftool.exe) -- le profil createur Sony sera absent (non bloquant). Installer depuis https://exiftool.org si besoin."
+    Write-Warning "exiftool not found (neither PATH nor bin\exiftool.exe) -- the Sony creator profile will be unavailable (non-blocking). Install from https://exiftool.org if needed."
 }
 
-Write-Host '[ABELr] Bootstrap termine.'
+Write-Host '[ABELr] Bootstrap complete.'
