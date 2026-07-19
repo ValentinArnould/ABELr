@@ -1,23 +1,23 @@
-"""Métriques en **espace rendu** (output-referred) — fondation de la refonte.
+"""Metrics in **render space** (output-referred) — foundation of the refactor.
 
-Le RAW scène-linéaire (`raw.py` / `analysis.py`) mesure la physique de la scène.
-Mais l'exposition perçue et l'équilibre couleur que le photographe juge vivent dans
-le **rendu** : après profil DCP + courbe de tons + curseurs, encodé sRGB display.
-Ce module mesure donc sur le **JPEG rendu** (aperçu Lr ou `requestJpegThumbnail`),
-décodé en RGB uint8 sRGB.
+Scene-linear RAW (`raw.py` / `analysis.py`) measures the physics of the scene.
+But the perceived exposure and color balance that the photographer judges live in
+the **render**: after DCP profile + tone curve + sliders, encoded sRGB display.
+This module therefore measures on the **rendered JPEG** (Lr preview or `requestJpegThumbnail`),
+decoded as sRGB uint8 RGB.
 
-Trois familles de mesures, toutes consommées par exposure / wb (raffinement) / hsl :
+Three families of measurements, all consumed by exposure / wb (refinement) / hsl:
 
-1. `tone_stats`  — clarté perçue **CIE L*** robuste (médiane tons-moyens, écrêtage exclu)
-                   → cible et écart d'exposition.
-2. `neutral_stats` — biais a*/b* résiduel sur les **pixels quasi-neutres** seulement
-                   → raffinement WB (jamais de gray-world global, cf. impasse n=1142).
-3. `band_stats`  — chroma / clarté / teinte par **bande de teinte HSL** (8 canaux Lr)
-                   → planification HSL (sursaturation, luminance, recentrage hue).
+1. `tone_stats`  — robust perceived **CIE L*** brightness (mid-tone median, clipping excluded)
+                   → exposure target and deviation.
+2. `neutral_stats` — residual a*/b* bias on **near-neutral pixels** only
+                   → WB refinement (never a global gray-world, cf. n=1142 dead end).
+3. `band_stats`  — chroma / lightness / hue per **HSL hue band** (8 Lr channels)
+                   → HSL planning (oversaturation, luminance, hue recentering).
 
-Colorimétrie : sRGB (IEC 61966-2-1) → XYZ(D65) → CIELAB(D65). Constantes standard,
-non inventées. Les **centres de bande** HSL et la réponse des curseurs sont *nominaux*
-ici (mesure) ; leur calage précis se fait dans `response.py` + scripts de validation.
+Colorimetry: sRGB (IEC 61966-2-1) → XYZ(D65) → CIELAB(D65). Standard constants,
+not invented. The **band centers** for HSL and the slider response are *nominal*
+here (measurement); their precise calibration happens in `response.py` + validation scripts.
 """
 
 from __future__ import annotations
@@ -27,9 +27,9 @@ from dataclasses import dataclass
 import numpy as np
 
 # --------------------------------------------------------------------------- #
-# Colorimétrie sRGB → CIELAB (D65). Matrices/constantes standard.
+# sRGB → CIELAB (D65) colorimetry. Standard matrices/constants.
 # --------------------------------------------------------------------------- #
-# sRGB linéaire (primaires Rec.709, blanc D65) → XYZ. IEC 61966-2-1.
+# Linear sRGB (Rec.709 primaries, D65 white) → XYZ. IEC 61966-2-1.
 _SRGB_LIN_TO_XYZ_D65 = np.array(
     [
         [0.4124564, 0.3575761, 0.1804375],
@@ -39,10 +39,10 @@ _SRGB_LIN_TO_XYZ_D65 = np.array(
     np.float32,
 )
 
-# Blanc de référence D65 (CIE 1931, 2°).
+# D65 reference white (CIE 1931, 2°).
 _D65_WHITE = np.array([0.95047, 1.0, 1.08883], np.float32)
 
-# Seuil/pente de la fonction f() de CIELAB (δ = 6/29).
+# Threshold/slope of the CIELAB f() function (δ = 6/29).
 _LAB_DELTA = 6.0 / 29.0
 _LAB_DELTA3 = _LAB_DELTA**3
 _LAB_SLOPE = 1.0 / (3.0 * _LAB_DELTA**2)  # = 7.787...
@@ -50,7 +50,7 @@ _LAB_OFFSET = 4.0 / 29.0
 
 
 def srgb_u8_to_linear(u8: np.ndarray) -> np.ndarray:
-    """sRGB uint8 → float32 linéaire [0, 1] (EOTF inverse sRGB)."""
+    """sRGB uint8 → linear float32 [0, 1] (inverse sRGB EOTF)."""
     x = u8.astype(np.float32) / 255.0
     a = 0.055
     return np.where(x <= 0.04045, x / 12.92, ((x + a) / (1.0 + a)) ** 2.4)
@@ -61,7 +61,7 @@ def _lab_f(t: np.ndarray) -> np.ndarray:
 
 
 def srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
-    """RGB uint8 sRGB (HxWx3, ordre RGB) → CIELAB (HxWx3 : L* 0-100, a*, b*)."""
+    """sRGB uint8 RGB (HxWx3, RGB order) → CIELAB (HxWx3: L* 0-100, a*, b*)."""
     lin = srgb_u8_to_linear(rgb_u8)
     xyz = lin @ _SRGB_LIN_TO_XYZ_D65.T
     f = _lab_f(xyz / _D65_WHITE)
@@ -74,25 +74,25 @@ def srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
-# 1. Exposition — clarté perçue L* robuste
+# 1. Exposure — robust perceived L* brightness
 # --------------------------------------------------------------------------- #
-# Pixel « écrêté hautes lumières » : un canal sRGB quasi saturé (ciel/spéculaire).
+# "Highlight-clipped" pixel: an sRGB channel nearly saturated (sky/specular).
 _HIGHLIGHT_U8 = 250
-# Plancher d'ombre en L* : en dessous, le pixel ne porte pas d'info tonale utile.
+# Shadow floor in L*: below this, the pixel carries no useful tonal info.
 _SHADOW_L = 5.0
 
 
 @dataclass
 class ToneStats:
-    """Clarté perçue d'un rendu (CIE L*, 0-100).
+    """Perceived brightness of a render (CIE L*, 0-100).
 
-    median_l    : médiane L* des pixels **tonaux** (hors écrêtage HL / ombres mortes).
-                  Métrique d'exposition principale (cible = médiane des seeds).
-    mean_l      : moyenne L* tonale (clé photographique, complément).
-    p05_l/p95_l : 5e/95e centiles L* tonaux (étalement tonal).
-    clipped_hi  : fraction de pixels à canal sRGB ≥ 250 (brûlés).
-    clipped_lo  : fraction de pixels à L* ≤ 5 (bouchés).
-    tonal_frac  : fraction de pixels retenus comme tonaux.
+    median_l    : L* median of **tonal** pixels (excluding HL clipping / dead shadows).
+                  Main exposure metric (target = seed median).
+    mean_l      : tonal L* mean (photographic key, complement).
+    p05_l/p95_l : 5th/95th tonal L* percentiles (tonal spread).
+    clipped_hi  : fraction of pixels with an sRGB channel ≥ 250 (blown).
+    clipped_lo  : fraction of pixels with L* ≤ 5 (crushed).
+    tonal_frac  : fraction of pixels retained as tonal.
     """
 
     median_l: float
@@ -107,13 +107,13 @@ class ToneStats:
 def tone_stats(
     rgb_u8: np.ndarray, lab: np.ndarray | None = None, mask: np.ndarray | None = None
 ) -> ToneStats:
-    """Clarté perçue robuste d'un RGB uint8 sRGB rendu.
+    """Robust perceived brightness of a rendered sRGB uint8 RGB.
 
-    Exclut les hautes lumières écrêtées (ciel, spéculaire) et les ombres mortes, qui
-    ne reflètent pas le niveau d'exposition voulu, puis statistiques sur le reste.
-    `lab` peut être fourni pour éviter une reconversion (sinon calculé). `mask`
-    (HxW bool, ex. zone nette `sharpness.sharp_mask`) restreint en plus les
-    pixels retenus si fourni.
+    Excludes clipped highlights (sky, specular) and dead shadows, which don't
+    reflect the intended exposure level, then computes statistics on the rest.
+    `lab` can be supplied to avoid a reconversion (otherwise computed). `mask`
+    (HxW bool, e.g. sharp zone `sharpness.sharp_mask`) further restricts the
+    retained pixels if provided.
     """
     if lab is None:
         lab = srgb_u8_to_lab(rgb_u8)
@@ -126,7 +126,7 @@ def tone_stats(
         tonal &= mask
 
     vals = lstar[tonal]
-    if vals.size == 0:  # rendu entièrement écrêté : repli sur tout
+    if vals.size == 0:  # entirely clipped render: fall back to everything
         vals = lstar.reshape(-1)
     return ToneStats(
         median_l=float(np.median(vals)),
@@ -140,23 +140,23 @@ def tone_stats(
 
 
 # --------------------------------------------------------------------------- #
-# 2. WB — biais résiduel sur pixels quasi-neutres
+# 2. WB — residual bias on near-neutral pixels
 # --------------------------------------------------------------------------- #
-# Chroma max (C* = hypot(a*, b*)) pour qu'un pixel compte comme « neutre ».
+# Max chroma (C* = hypot(a*, b*)) for a pixel to count as "neutral".
 _NEUTRAL_CHROMA = 10.0
-# Fenêtre de clarté des neutres exploitables (évite noir bruité / blanc écrêté).
+# Lightness window for usable neutrals (avoids noisy black / clipped white).
 _NEUTRAL_L_MIN, _NEUTRAL_L_MAX = 20.0, 92.0
 
 
 @dataclass
 class NeutralStats:
-    """Cast résiduel mesuré sur les pixels quasi-neutres d'un rendu.
+    """Residual color cast measured on the near-neutral pixels of a render.
 
-    a_bias / b_bias : médiane a*/b* des neutres (cible = 0 → pas de cast).
-                      a*>0 = magenta, a*<0 = vert ; b*>0 = jaune, b*<0 = bleu.
-    chroma          : médiane C* des neutres (résidu de cast en magnitude).
-    neutral_frac    : fraction de pixels jugés neutres (fiabilité du raffinement WB).
-    n_neutral       : nombre de pixels neutres.
+    a_bias / b_bias : a*/b* median of the neutrals (target = 0 → no cast).
+                      a*>0 = magenta, a*<0 = green; b*>0 = yellow, b*<0 = blue.
+    chroma          : C* median of the neutrals (cast residual magnitude).
+    neutral_frac    : fraction of pixels judged neutral (WB refinement reliability).
+    n_neutral       : number of neutral pixels.
     """
 
     a_bias: float
@@ -173,12 +173,12 @@ def neutral_stats(
     l_max: float = _NEUTRAL_L_MAX,
     mask: np.ndarray | None = None,
 ) -> NeutralStats:
-    """Mesure le cast résiduel **sur les neutres seulement**.
+    """Measures the residual cast **on neutrals only**.
 
-    Ne fait **jamais** de gray-world global (contaminé par le contenu — impasse
-    prouvée n=1142). Le caller décide via `neutral_frac` si le raffinement WB est
-    fiable ; sinon il garde la prédiction seed. `mask` (HxW bool, ex. zone nette)
-    restreint en plus les pixels retenus si fourni.
+    **Never** does a global gray-world (contaminated by content — proven n=1142
+    dead end). The caller decides via `neutral_frac` whether the WB refinement is
+    reliable; otherwise it keeps the seed prediction. `mask` (HxW bool, e.g. sharp
+    zone) further restricts the retained pixels if provided.
     """
     lstar = lab[..., 0]
     chroma = np.hypot(lab[..., 1], lab[..., 2])
@@ -200,19 +200,19 @@ def neutral_stats(
 
 
 # --------------------------------------------------------------------------- #
-# 3. HSL — statistiques par bande de teinte (8 canaux Lr)
+# 3. HSL — statistics per hue band (8 Lr channels)
 # --------------------------------------------------------------------------- #
-# Ordre Lr des 8 bandes HSL.
+# Lr order of the 8 HSL bands.
 BAND_NAMES = ("Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta")
-# Centres de teinte NOMINAUX (degrés HSV) — approximatifs. Les frontières exactes et
-# la réponse des curseurs sont calées dans response.py / scripts de validation.
+# NOMINAL hue centers (HSV degrees) — approximate. The exact boundaries and
+# slider response are calibrated in response.py / validation scripts.
 _BAND_CENTERS = np.array([0.0, 35.0, 60.0, 135.0, 180.0, 225.0, 275.0, 315.0], np.float32)
-# Population minimale d'une bande pour que ses stats soient exploitables.
+# Minimum population for a band's stats to be usable.
 _BAND_MIN_FRAC = 0.01
 
 
 def rgb_u8_to_hsv_hue_sat(rgb_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Teinte (degrés 0-360) et saturation HSV (0-1) d'un RGB uint8. Numpy pur."""
+    """Hue (0-360 degrees) and HSV saturation (0-1) of a uint8 RGB. Pure numpy."""
     rgb = rgb_u8.astype(np.float32) / 255.0
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     cmax = rgb.max(axis=-1)
@@ -222,7 +222,7 @@ def rgb_u8_to_hsv_hue_sat(rgb_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     hue = np.zeros_like(cmax)
     safe = delta > 1e-6
-    # Secteur dominé par R / G / B.
+    # Sector dominated by R / G / B.
     idx_r = safe & (cmax == r)
     idx_g = safe & (cmax == g) & ~idx_r
     idx_b = safe & (cmax == b) & ~idx_r & ~idx_g
@@ -233,7 +233,7 @@ def rgb_u8_to_hsv_hue_sat(rgb_u8: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _nearest_band(hue_deg: np.ndarray) -> np.ndarray:
-    """Index 0-7 de la bande la plus proche par distance circulaire de teinte."""
+    """Index 0-7 of the nearest band by circular hue distance."""
     diff = np.abs(hue_deg[..., None] - _BAND_CENTERS[None, :])
     circ = np.minimum(diff, 360.0 - diff)
     return circ.argmin(axis=-1)
@@ -241,15 +241,15 @@ def _nearest_band(hue_deg: np.ndarray) -> np.ndarray:
 
 @dataclass
 class BandStats:
-    """Statistiques d'une bande de teinte HSL sur un rendu.
+    """Statistics of an HSL hue band on a render.
 
-    name        : nom Lr de la bande (clé du curseur).
-    frac        : fraction de pixels (population — fiabilité).
-    median_hue  : teinte médiane HSV (degrés) — dérive vs centre nominal.
-    median_chroma : chroma médiane CIELAB C* (mesure perceptuelle de saturation).
-    median_sat  : saturation HSV médiane (0-1) — proxy rapide.
-    sat_clip_frac : fraction de pixels quasi-saturés (S ≥ 0.97) — sursaturation.
-    median_l    : clarté médiane L* de la bande.
+    name        : Lr name of the band (slider key).
+    frac        : fraction of pixels (population — reliability).
+    median_hue  : HSV median hue (degrees) — drift vs. nominal center.
+    median_chroma : CIELAB C* median chroma (perceptual saturation measure).
+    median_sat  : HSV median saturation (0-1) — quick proxy.
+    sat_clip_frac : fraction of near-saturated pixels (S ≥ 0.97) — oversaturation.
+    median_l    : band's median L* lightness.
     """
 
     name: str
@@ -267,10 +267,10 @@ def band_stats(
     min_chroma: float = _NEUTRAL_CHROMA,
     mask: np.ndarray | None = None,
 ) -> list[BandStats]:
-    """Stats par bande HSL. Les pixels quasi-neutres (C* < `min_chroma`) sont exclus
-    (la teinte d'un gris n'a pas de sens). `mask` (HxW bool, ex. zone nette)
-    restreint en plus les pixels retenus si fourni. Renvoie 8 `BandStats` (bandes
-    vides → frac=0).
+    """Stats per HSL band. Near-neutral pixels (C* < `min_chroma`) are excluded
+    (a gray's hue is meaningless). `mask` (HxW bool, e.g. sharp zone) further
+    restricts the retained pixels if provided. Returns 8 `BandStats` (empty
+    bands → frac=0).
     """
     if lab is None:
         lab = srgb_u8_to_lab(rgb_u8)
@@ -306,5 +306,5 @@ def band_stats(
 
 
 def band_is_reliable(band: BandStats, min_frac: float = _BAND_MIN_FRAC) -> bool:
-    """Bande exploitable pour une correction HSL (population suffisante)."""
+    """Band usable for an HSL correction (sufficient population)."""
     return band.frac >= min_frac

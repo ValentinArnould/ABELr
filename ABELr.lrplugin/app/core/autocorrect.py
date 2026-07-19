@@ -1,31 +1,33 @@
-"""Orchestration de la correction automatique par photo (exposition + WB + HSL).
+"""Orchestrates per-photo automatic correction (exposure + WB + HSL).
 
-Pur et testable (comme `exposure`/`hsl`/`seed_match`) : reçoit les mesures déjà
-collectées par le worker GUI (+ le pool de seeds déjà construit depuis le cache)
-et renvoie un `PhotoAdjustment` par photo + un diagnostic. Le worker Qt
-(`gui.autocorrect_worker`) se charge des I/O (jobs, décodage, cache, parallélisme).
+Pure and testable (like `exposure`/`hsl`/`seed_match`): receives the measurements
+already collected by the GUI worker (+ the seed pool already built from the cache)
+and returns one `PhotoAdjustment` per photo + a diagnostic. The Qt worker
+(`gui.autocorrect_worker`) handles the I/O (jobs, decoding, cache, parallelism).
 
-Modes de référence (décision utilisateur) :
-- **seeds** : un pool de seeds exploitables existe (marqués explicitement, cf.
-  `cache.is_seed`) → pour chaque photo cible, on cherche les seeds dont l'analyse
-  RAW (zone nette) est la plus proche (`core.seed_match`), et on utilise leur
-  aperçu rendu déjà retouché comme référence de style. Mesure de l'état courant =
-  rendu frais (`m.analysis`). Les seeds eux-mêmes ne sont JAMAIS réécrits.
-- **embedded** (forcé OU aucun seed exploitable) : **ancré sur le rendu neutre**.
-  Cible T = JPEG boîtier (immuable, mesure **brute**) ; ancre N = NeutralPreview
-  (rendu Lr du même RAW : style courant, WB As Shot, Expo 0, HSL 0 — cf.
-  `gui.neutral_preview_worker`). La correction vise directement T (L* tone, cast
-  a*/b*, bandes HSL) : le delta T−N, converti en réglages Lr, rapproche le rendu du
-  RAW du look du JPEG boîtier — **sans soustraction de biais de profil** (décision
-  utilisateur : on transplante le look boîtier tel quel, biais revu plus tard).
-  L'ancre N reste indispensable (Lr applique des deltas relatifs au rendu du RAW ;
-  on ne peut pas écrire le L* absolu du JPEG). Les valeurs émises sont **absolues**
-  (ancre à zéro) → idempotentes, aucune dépendance au rendu courant. Sous les zones
-  mortes, **aucune clé n'est écrite** (préserve les réglages/presets).
+Reference modes (user decision):
+- **seeds**: a pool of usable seeds exists (explicitly marked, cf.
+  `cache.is_seed`) → for each target photo, we look for the seeds whose RAW
+  analysis (sharp zone) is closest (`core.seed_match`), and use their already-
+  edited rendered preview as the style reference. Current-state measurement =
+  fresh render (`m.analysis`). The seeds themselves are NEVER rewritten.
+- **embedded** (forced OR no usable seed): **anchored on the neutral render**.
+  Target T = in-camera JPEG (immutable, **raw** measurement); anchor N =
+  NeutralPreview (Lr render of the same RAW: current style, WB As Shot, Expo 0,
+  HSL 0 — cf. `gui.neutral_preview_worker`). The correction targets T directly
+  (L* tone, a*/b* cast, HSL bands): the T−N delta, converted into Lr settings,
+  brings the RAW's render closer to the in-camera JPEG's look — **without
+  subtracting a profile bias** (user decision: the in-camera look is
+  transplanted as-is, bias revisited later). Anchor N remains indispensable
+  (Lr applies deltas relative to the RAW's render; we cannot write the JPEG's
+  absolute L*). The emitted values are **absolute** (anchor at zero) →
+  idempotent, no dependency on the current render. Under dead zones, **no key
+  is written** (preserves manual settings/presets).
 
-Mesures embedded : **global** par défaut (T et N = deux rendus de la même scène,
-pas de désalignement de masque) ; bascule **zone nette** si crop fort (l'aperçu Lr
-est croppé, pas le JPEG boîtier — le masque net s'ancre sur le sujet commun).
+Embedded measurements: **global** by default (T and N are two renders of the
+same scene, no mask misalignment); switches to **sharp zone** on strong crop
+(the Lr preview is cropped, the in-camera JPEG is not — the sharp mask anchors
+on the common subject).
 """
 
 from __future__ import annotations
@@ -46,63 +48,63 @@ from ..server.models import PhotoAdjustment
 DEFAULT_AXES = frozenset({"expo", "wb", "hsl", "calib"})
 
 # --------------------------------------------------------------------------- #
-# Seuils du mode embedded (ancré neutre, déviation par photo)
+# Embedded-mode thresholds (neutral-anchored, per-photo deviation)
 # --------------------------------------------------------------------------- #
-# Zone morte exposition : sous ce |ΔEV| on n'écrit PAS Exposure2012 (photo
-# conforme au profil — ne pas écraser un réglage manuel avec ~0).
+# Exposure dead zone: below this |ΔEV| we do NOT write Exposure2012 (photo
+# already matches the profile — don't overwrite a manual setting with ~0).
 _EXPO_DEADBAND_EV = 0.10
-# Zone morte WB : distance de cast a*b* (ΔE approx) sous laquelle on ne touche pas.
+# WB dead zone: a*b* cast distance (approx ΔE) below which we leave it alone.
 _WB_CAST_DEADBAND = 3.0
-# Fraction minimale de pixels quasi-neutres pour qu'un cast soit fiable.
+# Minimum fraction of near-neutral pixels for a cast to be trusted.
 _MIN_NEUTRAL_FRAC = 0.02
-# Confiance pleine du ProfileBias partagé (biais nul, cf. _plan_embedded : la
-# décision « biais ignoré » a supprimé le pool de calibration — revue Fable 5 DB-06).
+# Full confidence of the shared ProfileBias (zero bias, cf. _plan_embedded: the
+# "bias ignored" decision removed the calibration pool — Fable 5 review DB-06).
 _BIAS_FULL_N = 8
-# Aire de crop (fraction du cadre) sous laquelle on mesure en zone nette plutôt
-# qu'en global (cadres trop différents entre JPEG boîtier et rendu croppé).
+# Crop area (fraction of the frame) below which we measure in the sharp zone
+# rather than global (frames too different between in-camera JPEG and cropped render).
 _CROP_AREA_MIN = 0.8
-# Divergence ΔL* global ↔ zone nette au-delà de laquelle on note « sujet/fond
-# divergents » (contre-jour, sujet éclairé autrement que le fond).
+# Global ↔ sharp-zone ΔL* divergence beyond which we flag "subject/background
+# diverge" (backlight, subject lit differently from the background).
 _DIVERGENCE_L = 4.0
 
 
 @dataclass
 class PhotoMeasure:
-    """Mesures d'une photo, collectées par le worker.
+    """Measurements for one photo, collected by the worker.
 
-    Mode seeds : `analysis` (rendu courant frais, zone nette) requis.
-    Mode embedded : `embedded_*` (T = JPEG boîtier) et `neutral_*` (N = rendu
-    neutre) requis, chacun en global + zone nette ; `analysis` inutile.
+    Seeds mode: `analysis` (fresh current render, sharp zone) required.
+    Embedded mode: `embedded_*` (T = in-camera JPEG) and `neutral_*` (N =
+    neutral render) required, each in global + sharp zone; `analysis` unused.
     """
 
     photo_id: str
     path: str
     current_develop: dict
     exif_camera: str | None
-    analysis: RenderAnalysis | None = None   # rendu courant (zone nette) — mode seeds
-    is_seed: bool = False                    # marquage explicite (cache.is_seed)
-    raw_tone: ToneStats | None = None        # RAW source, zone nette — clé du matching k-NN
-    raw_bands: list[BandStats] | None = None  # RAW source, zone nette — garde HSL raw_oversat
-    embedded_sharp: RenderAnalysis | None = None   # T : JPEG boîtier (zone nette)
-    embedded_global: RenderAnalysis | None = None  # T : JPEG boîtier (global)
-    neutral_sharp: RenderAnalysis | None = None    # N : rendu neutre (zone nette)
-    neutral_global: RenderAnalysis | None = None   # N : rendu neutre (global)
-    neutral_asshot_temp: float | None = None       # Temperature numérique de l'As Shot
+    analysis: RenderAnalysis | None = None   # current render (sharp zone) — seeds mode
+    is_seed: bool = False                    # explicit marking (cache.is_seed)
+    raw_tone: ToneStats | None = None        # source RAW, sharp zone — k-NN matching key
+    raw_bands: list[BandStats] | None = None  # source RAW, sharp zone — raw_oversat HSL guard
+    embedded_sharp: RenderAnalysis | None = None   # T: in-camera JPEG (sharp zone)
+    embedded_global: RenderAnalysis | None = None  # T: in-camera JPEG (global)
+    neutral_sharp: RenderAnalysis | None = None    # N: neutral render (sharp zone)
+    neutral_global: RenderAnalysis | None = None   # N: neutral render (global)
+    neutral_asshot_temp: float | None = None       # As Shot's numeric Temperature
     neutral_asshot_tint: float | None = None
-    hash_style: str | None = None            # clé de groupe du biais (avec profile_capture)
+    hash_style: str | None = None            # bias grouping key (with profile_capture)
     asshot_rg: float | None = None
     asshot_bg: float | None = None
-    profile_capture: str | None = None       # profil créatif boîtier (filtre k-NN + biais)
-    ev100: float | None = None               # contexte scène (diagnostic)
+    profile_capture: str | None = None       # in-camera creative profile (k-NN filter + bias)
+    ev100: float | None = None               # scene context (diagnostic)
 
 
 @dataclass
 class ProfileBias:
-    """Biais systématique T−N d'un couple (profil créatif boîtier, style Lr).
+    """Systematic T−N bias for a (in-camera creative profile, Lr style) pair.
 
-    Médianes robustes des deltas par photo sur le pool de calibration :
-    `l` (ΔL* médian), `cast_a`/`cast_b` (Δcast a*/b* sur neutres),
-    `bands[name] = (dchroma, dl, dhue)`. `n` = taille du pool (photos avec tone).
+    Robust medians of the per-photo deltas over the calibration pool:
+    `l` (median ΔL*), `cast_a`/`cast_b` (Δcast a*/b* on neutrals),
+    `bands[name] = (dchroma, dl, dhue)`. `n` = pool size (photos with tone).
     """
 
     n: int
@@ -129,15 +131,15 @@ def _f(dev: dict, key: str, default: float = 0.0) -> float:
 
 
 def _hue_diff(a: float, b: float) -> float:
-    """Différence circulaire signée a−b dans [−180, 180) (l'antipode donne −180)."""
+    """Signed circular difference a−b in [−180, 180) (the antipode gives −180)."""
     return (a - b + 180.0) % 360.0 - 180.0
 
 
 # --------------------------------------------------------------------------- #
-# Mode embedded — sélection de variante, biais de profil, cibles
+# Embedded mode — variant selection, profile bias, targets
 # --------------------------------------------------------------------------- #
 def _crop_area(dev: dict) -> float:
-    """Aire du crop Lr (fraction du cadre). 1.0 si pas de clés crop."""
+    """Lr crop area (fraction of the frame). 1.0 if no crop keys."""
     left = _f(dev, "CropLeft", 0.0)
     right = _f(dev, "CropRight", 1.0)
     top = _f(dev, "CropTop", 0.0)
@@ -146,15 +148,15 @@ def _crop_area(dev: dict) -> float:
 
 
 def _variant_for(m: PhotoMeasure) -> str:
-    """Variante de mesure embedded : global par défaut, zone nette si crop fort."""
+    """Embedded measurement variant: global by default, sharp zone on strong crop."""
     return "sharp" if _crop_area(m.current_develop) < _CROP_AREA_MIN else "global"
 
 
 def _pair_for(
     m: PhotoMeasure, variant: str
 ) -> tuple[RenderAnalysis | None, RenderAnalysis | None, str]:
-    """(T, N, variante effective) de la photo — repli sur l'autre variante si la
-    demandée est incomplète (la variante retournée pilote aussi le choix du biais)."""
+    """(T, N, effective variant) for the photo — falls back to the other variant
+    if the requested one is incomplete (the returned variant also drives the bias choice)."""
     other_variant = "global" if variant == "sharp" else "sharp"
     if variant == "sharp":
         first = (m.embedded_sharp, m.neutral_sharp)
@@ -170,9 +172,9 @@ def _pair_for(
 
 
 def _raw_oversat_by_name(raw_bands: list[BandStats] | None) -> dict[str, bool | None]:
-    """Nom de bande → `raw_oversat` (garde HSL), depuis les bandes RAW zone nette
-    de la photo cible (`PhotoMeasure.raw_bands` — RAW de la photo qu'on corrige,
-    pas des seeds : c'est sa propre capture qui doit confirmer la sursaturation)."""
+    """Band name → `raw_oversat` (HSL guard), from the target photo's sharp-zone
+    RAW bands (`PhotoMeasure.raw_bands` — the RAW of the photo being corrected,
+    not the seeds': it's its own capture that must confirm the oversaturation)."""
     return {b.name: _hsl.raw_confirms_oversat(b) for b in (raw_bands or [])}
 
 
@@ -183,13 +185,13 @@ def _embedded_band_targets(
     ignore_bias: bool = False,
     raw_bands: list[BandStats] | None = None,
 ) -> dict[str, BandTarget]:
-    """Cibles HSL embedded = bandes du JPEG boîtier.
+    """Embedded HSL targets = in-camera JPEG bands.
 
-    `ignore_bias=True` (chemin live) : cible = bande **brute** du JPEG boîtier
-    (`target = T.band`), toute bande fiable comptée — on transplante le look boîtier
-    tel quel. `ignore_bias=False` (historique) : `target = T.band − B.band`, on ne
-    vise que la déviation par rapport à la norme du couple profil × style, et les
-    bandes sans norme de biais sont sautées.
+    `ignore_bias=True` (live path): target = the in-camera JPEG's **raw** band
+    (`target = T.band`), every reliable band counted — the in-camera look is
+    transplanted as-is. `ignore_bias=False` (historical): `target = T.band − B.band`,
+    we only target the deviation from the profile × style pair's norm, and
+    bands without a bias norm are skipped.
     """
     raw_by_name = _raw_oversat_by_name(raw_bands)
     out: dict[str, BandTarget] = {}
@@ -208,7 +210,7 @@ def _embedded_band_targets(
             continue
         b_bias = bias.bands.get(b.name)
         if b_bias is None:
-            continue  # pas de norme pour cette bande → pas de cible (prudence)
+            continue  # no norm for this band → no target (caution)
         dchroma, dl, dhue = b_bias
         out[b.name] = BandTarget(
             name=b.name,
@@ -223,10 +225,10 @@ def _embedded_band_targets(
 def _band_targets_from_seed_match(
     t: SeedTarget | None, raw_bands: list[BandStats] | None = None
 ) -> dict[str, BandTarget]:
-    """Cibles HSL = bandes agrégées des seeds les plus proches (déjà pondérées).
+    """HSL targets = aggregated bands from the closest seeds (already weighted).
 
-    `raw_bands` : RAW zone nette de la photo **cible** (celle qu'on corrige, pas les
-    seeds) — sert uniquement de garde `raw_oversat` (cf. `_raw_oversat_by_name`)."""
+    `raw_bands`: sharp-zone RAW of the **target** photo (the one being corrected,
+    not the seeds) — used only as the `raw_oversat` guard (cf. `_raw_oversat_by_name`)."""
     out: dict[str, BandTarget] = {}
     if t is None or not t.bands:
         return out
@@ -243,9 +245,9 @@ def _band_targets_from_seed_match(
 
 
 def _calib_develop_dict(t: SeedTarget) -> dict:
-    """Réglages Étalonnage à écrire depuis une cible k-NN — transplant direct
-    (comme Temperature/Tint), clés absentes chez la cible omises (pas de 0 imposé
-    sur un axe non seedé). `EnableCalibration` posé dès qu'un champ est écrit."""
+    """Calibration settings to write from a k-NN target — direct transplant
+    (like Temperature/Tint), keys absent on the target are omitted (no forced 0
+    on an axis with no seed). `EnableCalibration` is set as soon as any field is written."""
     keys = {
         "shadow_tint": "ShadowTint",
         "red_hue": "RedHue", "red_saturation": "RedSaturation",
@@ -271,7 +273,7 @@ def plan(
     camera: str | None = None,
     seed_pool: list[SeedVector] | None = None,
 ) -> tuple[list[PhotoAdjustment], PlanDiagnostics]:
-    """Planifie la correction par photo. Voir le docstring du module pour les modes."""
+    """Plans the per-photo correction. See the module docstring for the modes."""
     seed_pool = seed_pool or []
     targets = [m for m in measures if not m.is_seed]
     mode_embedded = forced_embedded or not seed_pool
@@ -283,16 +285,16 @@ def plan(
         n_targets=len(targets),
     )
     if mode_embedded:
-        reason = "case cochée" if forced_embedded else "aucun seed exploitable"
-        diag.notes.insert(0, f"mode JPEG embarqué ancré neutre ({reason})")
+        reason = "checkbox checked" if forced_embedded else "no usable seed"
+        diag.notes.insert(0, f"neutral-anchored embedded-JPEG mode ({reason})")
         return _plan_embedded(targets, axes, model, dev_by_id, diag, seed_pool)
 
-    diag.notes.insert(0, f"mode seeds — pool de {len(seed_pool)} seed(s)")
+    diag.notes.insert(0, f"seeds mode — pool of {len(seed_pool)} seed(s)")
     return _plan_seeds(targets, axes, model, seed_pool, dev_by_id, diag)
 
 
 # --------------------------------------------------------------------------- #
-# Mode embedded — ancré neutre, déviation par photo, valeurs absolues
+# Embedded mode — neutral-anchored, per-photo deviation, absolute values
 # --------------------------------------------------------------------------- #
 def _plan_embedded(
     targets: list[PhotoMeasure],
@@ -302,11 +304,11 @@ def _plan_embedded(
     diag: PlanDiagnostics,
     seed_pool: list[SeedVector] | None = None,
 ) -> tuple[list[PhotoAdjustment], PlanDiagnostics]:
-    # Cible = mesure JPEG boîtier brute → biais de profil nul (partagé, lecture
-    # seule) : `bias.l`/`.cast_*`/`.bands` valent 0 dans les boucles ci-dessous.
+    # Target = raw in-camera JPEG measurement → zero profile bias (shared,
+    # read-only): `bias.l`/`.cast_*`/`.bands` are 0 in the loops below.
     bias = ProfileBias(n=_BIAS_FULL_N)
 
-    # Résolution par photo : variante + paire (T, N).
+    # Per-photo resolution: variant + (T, N) pair.
     resolved: list[tuple[PhotoMeasure, str, RenderAnalysis, RenderAnalysis, ProfileBias]] = []
     n_no_anchor = 0
     n_divergent = 0
@@ -315,7 +317,7 @@ def _plan_embedded(
         if t is None or n is None or t.tone is None or n.tone is None:
             n_no_anchor += 1
             continue
-        # Divergence global ↔ zone nette (diagnostic sujet/fond).
+        # Global ↔ sharp-zone divergence (subject/background diagnostic).
         if (
             m.embedded_global is not None and m.neutral_global is not None
             and m.embedded_sharp is not None and m.neutral_sharp is not None
@@ -328,22 +330,22 @@ def _plan_embedded(
                 n_divergent += 1
         if variant == "sharp":
             diag.notes.append(
-                f"{m.photo_id[:8]}: crop fort (aire {_crop_area(m.current_develop):.2f}) → mesure zone nette"
+                f"{m.photo_id[:8]}: strong crop (area {_crop_area(m.current_develop):.2f}) → measuring sharp zone"
             )
         resolved.append((m, variant, t, n, bias))
 
-    diag.notes.append("biais profil ignoré — cible = mesures JPEG boîtier brutes")
+    diag.notes.append("profile bias ignored — target = raw in-camera JPEG measurements")
     if n_no_anchor:
         diag.notes.append(
-            f"{n_no_anchor} photo(s) sans ancre neutre ou cible boîtier → ignorée(s)"
+            f"{n_no_anchor} photo(s) with no neutral anchor or in-camera target → skipped"
         )
     if n_divergent:
         diag.notes.append(
-            f"{n_divergent} photo(s) : ΔL* global ↔ zone nette divergents (> {_DIVERGENCE_L:g} L*) "
-            f"— sujet/fond éclairés différemment, correction à vérifier"
+            f"{n_divergent} photo(s): global ↔ sharp-zone ΔL* diverge (> {_DIVERGENCE_L:g} L*) "
+            f"— subject/background lit differently, correction worth checking"
         )
 
-    # ---- Exposition : valeur absolue ancrée à Exposure2012 = 0 -------------
+    # ---- Exposure: absolute value anchored at Exposure2012 = 0 ------------
     if "expo" in axes:
         samples = []
         for m, _variant, t, n, bias in resolved:
@@ -352,7 +354,7 @@ def _plan_embedded(
                 _exp.ExposureSample(
                     m.photo_id,
                     current_l=n.tone.median_l,
-                    current_exposure=0.0,        # ancre : le delta EST la valeur absolue
+                    current_exposure=0.0,        # anchor: the delta IS the absolute value
                     desired_l=desired_l,
                     clipped_hi=n.tone.clipped_hi,
                     clipped_lo=n.tone.clipped_lo,
@@ -363,16 +365,16 @@ def _plan_embedded(
         for adj in _exp.plan_from_render(samples, model.exposure if model else None):
             new_ev = adj.develop.get("Exposure2012", 0.0)
             if abs(new_ev) < _EXPO_DEADBAND_EV:
-                n_conform += 1        # conforme au profil → aucune écriture
+                n_conform += 1        # matches the profile → nothing written
                 continue
             dev_by_id[adj.photo_id]["Exposure2012"] = new_ev
             n_written += 1
         diag.notes.append(
-            f"expo: {n_written} déviante(s) corrigée(s), {n_conform} conforme(s) au profil "
-            f"(aucune écriture), sur {len(resolved)} résolue(s)"
+            f"expo: {n_written} deviant photo(s) corrected, {n_conform} matching the profile "
+            f"(nothing written), out of {len(resolved)} resolved"
         )
 
-    # ---- Balance des blancs : déviation de cast, base As Shot numérique ----
+    # ---- White balance: cast deviation, numeric As Shot base ---------------
     if "wb" in axes:
         wbresp = model.wb if model else None
         n_written = 0
@@ -385,10 +387,10 @@ def _plan_embedded(
                 or tn.neutral_frac < _MIN_NEUTRAL_FRAC
                 or nn.neutral_frac < _MIN_NEUTRAL_FRAC
             ):
-                n_conform += 1  # cast non mesurable → ne rien toucher
+                n_conform += 1  # cast not measurable → leave it alone
                 continue
-            # Excès de cast du rendu Lr (As Shot) vs boîtier, corrigé du biais :
-            # e = (N − T) + B ; sous la zone morte → photo conforme, rien à écrire.
+            # Excess cast of the Lr render (As Shot) vs in-camera, bias-corrected:
+            # e = (N − T) + B; below the dead zone → photo matches, nothing to write.
             e_a = (nn.a_bias - tn.a_bias) + bias.cast_a
             e_b = (nn.b_bias - tn.b_bias) + bias.cast_b
             if (e_a * e_a + e_b * e_b) ** 0.5 < _WB_CAST_DEADBAND:
@@ -402,21 +404,21 @@ def _plan_embedded(
                 continue
             dtemp, dtint = wbresp.solve(e_a, e_b)
             temp = max(2000.0, min(12000.0, m.neutral_asshot_temp + max(-600.0, min(600.0, dtemp))))
-            # Tint borné aux limites Lr ±150 (revue Fable 5 A-06), comme Temperature.
+            # Tint clamped to Lr's ±150 limits (Fable 5 review A-06), like Temperature.
             tint = max(-150.0, min(150.0, (m.neutral_asshot_tint or 0.0) + max(-10.0, min(10.0, dtint))))
             dev_by_id[m.photo_id].update(
                 WhiteBalance="Custom", Temperature=round(temp), Tint=round(tint)
             )
             n_written += 1
-        note = f"wb: {n_written} corrigée(s), {n_conform} conforme(s) (aucune écriture)"
+        note = f"wb: {n_written} corrected, {n_conform} matching (nothing written)"
         if n_uncalibrated:
             note += (
-                f", {n_uncalibrated} déviante(s) NON corrigée(s) — réponse WB non "
-                f"calibrée (sondage render_probe à faire)"
+                f", {n_uncalibrated} deviant photo(s) NOT corrected — WB response not "
+                f"calibrated (a render_probe sounding is needed)"
             )
         diag.notes.append(note)
 
-    # ---- HSL : cibles = T − biais, valeurs absolues (ancre HSL = 0) --------
+    # ---- HSL: targets = T − bias, absolute values (HSL anchor = 0) --------
     if "hsl" in axes:
         n_written = 0
         for m, _variant, t, n, bias in resolved:
@@ -424,8 +426,8 @@ def _plan_embedded(
             deltas, _corrs = _hsl.plan_hsl(n.bands or [], tgs, model)
             wrote = False
             for key, d in deltas.items():
-                # Ancre HSL = 0 ⇒ la valeur absolue est le delta lui-même. Les
-                # zones mortes de plan_band ont déjà omis les bandes conformes.
+                # HSL anchor = 0 ⇒ the absolute value is the delta itself. The
+                # dead zones in plan_band have already omitted matching bands.
                 if d == 0:
                     continue
                 dev_by_id[m.photo_id][key] = int(max(-100, min(100, round(d))))
@@ -433,14 +435,14 @@ def _plan_embedded(
             if wrote:
                 n_written += 1
         diag.notes.append(
-            f"hsl: {n_written}/{len(resolved)} photo(s) déviante(s) ajustée(s) "
-            f"(clés conformes omises)"
+            f"hsl: {n_written}/{len(resolved)} deviant photo(s) adjusted "
+            f"(matching keys omitted)"
         )
 
-    # ---- Étalonnage : transplant k-NN (pas de cible mesurable côté JPEG) ----
+    # ---- Calibration: k-NN transplant (no measurable JPEG-side target) ----
     if "calib" in axes:
         if not seed_pool:
-            diag.notes.append("calib: aucun seed exploitable — axe ignoré")
+            diag.notes.append("calib: no usable seed — axis skipped")
         else:
             n_written = 0
             for m in targets:
@@ -456,7 +458,7 @@ def _plan_embedded(
                 dev_by_id[m.photo_id].update(_calib_develop_dict(t))
                 n_written += 1
             diag.notes.append(
-                f"calib: {n_written}/{len(targets)} photo(s) transplantée(s) (k-NN seeds)"
+                f"calib: {n_written}/{len(targets)} photo(s) transplanted (k-NN seeds)"
             )
 
     adjustments = [
@@ -466,7 +468,7 @@ def _plan_embedded(
 
 
 # --------------------------------------------------------------------------- #
-# Mode seeds — chemin k-NN historique (inchangé)
+# Seeds mode — historical k-NN path (unchanged)
 # --------------------------------------------------------------------------- #
 def _plan_seeds(
     targets: list[PhotoMeasure],
@@ -476,12 +478,12 @@ def _plan_seeds(
     dev_by_id: dict[str, dict],
     diag: PlanDiagnostics,
 ) -> tuple[list[PhotoAdjustment], PlanDiagnostics]:
-    # Le mode seeds mesure l'état courant sur le rendu frais : exiger `analysis`.
+    # Seeds mode measures the current state on the fresh render: `analysis` is required.
     usable = [m for m in targets if m.analysis is not None and m.analysis.tone is not None]
     if len(usable) < len(targets):
-        diag.notes.append(f"{len(targets) - len(usable)} photo(s) sans rendu courant → ignorée(s)")
+        diag.notes.append(f"{len(targets) - len(usable)} photo(s) with no current render → skipped")
 
-    # Cible k-NN par photo, calculée une fois et réutilisée par les 3 axes.
+    # Per-photo k-NN target, computed once and reused by the 3 axes.
     match_cache: dict[str, SeedTarget | None] = {}
 
     def _match(m: PhotoMeasure) -> SeedTarget | None:
@@ -497,7 +499,7 @@ def _plan_seeds(
             match_cache[m.photo_id] = seed_match.match_target(query, seed_pool)
         return match_cache[m.photo_id]
 
-    # ---- Exposition --------------------------------------------------------
+    # ---- Exposure -----------------------------------------------------------
     if "expo" in axes:
         samples = []
         n_resolved = 0
@@ -515,9 +517,9 @@ def _plan_seeds(
             )
         for adj in _exp.plan_from_render(samples, model.exposure if model else None):
             dev_by_id[adj.photo_id].update(adj.develop)
-        diag.notes.append(f"expo: {n_resolved}/{len(usable)} cible(s) résolue(s)")
+        diag.notes.append(f"expo: {n_resolved}/{len(usable)} target(s) resolved")
 
-    # ---- Balance des blancs -----------------------------------------------
+    # ---- White balance -------------------------------------------------------
     if "wb" in axes:
         n_wb = 0
         wbresp = model.wb if model else None
@@ -527,19 +529,19 @@ def _plan_seeds(
                 continue
             temp = t.temperature
             tint = t.tint if t.tint is not None else 0.0
-            # Garde `neutral is not None` (revue Fable 5 A-04) : une RenderAnalysis
-            # servie du cache peut ne pas porter de NeutralStats — sans la garde,
-            # une seule photo faisait échouer tout le run (AttributeError).
+            # `neutral is not None` guard (Fable 5 review A-04): a RenderAnalysis
+            # served from the cache may carry no NeutralStats — without the guard,
+            # a single photo would fail the whole run (AttributeError).
             if wbresp is not None and m.analysis.neutral is not None:
                 temp, tint, _ = _wb.refine_temp_tint(temp, tint, m.analysis.neutral, wbresp)
-            tint = max(-150.0, min(150.0, tint))  # borne Lr ±150 (A-06)
+            tint = max(-150.0, min(150.0, tint))  # Lr ±150 clamp (A-06)
             dev_by_id[m.photo_id].update(
                 WhiteBalance="Custom", Temperature=round(temp), Tint=round(tint)
             )
             n_wb += 1
-        diag.notes.append(f"wb: {n_wb}/{len(usable)} photo(s) matchée(s) (k-NN seeds)")
+        diag.notes.append(f"wb: {n_wb}/{len(usable)} photo(s) matched (k-NN seeds)")
 
-    # ---- HSL ---------------------------------------------------------------
+    # ---- HSL -------------------------------------------------------------------
     if "hsl" in axes:
         n_hsl = 0
         for m in usable:
@@ -550,9 +552,9 @@ def _plan_seeds(
                 dev_by_id[m.photo_id][key] = int(max(-100, min(100, round(cur + d))))
             if deltas:
                 n_hsl += 1
-        diag.notes.append(f"hsl: {n_hsl}/{len(usable)} photo(s) ajustée(s)")
+        diag.notes.append(f"hsl: {n_hsl}/{len(usable)} photo(s) adjusted")
 
-    # ---- Étalonnage : transplant direct depuis la cible k-NN (comme Temp/Tint) --
+    # ---- Calibration: direct transplant from the k-NN target (like Temp/Tint) --
     if "calib" in axes:
         n_calib = 0
         for m in usable:
@@ -561,7 +563,7 @@ def _plan_seeds(
                 continue
             dev_by_id[m.photo_id].update(_calib_develop_dict(t))
             n_calib += 1
-        diag.notes.append(f"calib: {n_calib}/{len(usable)} photo(s) transplantée(s) (k-NN seeds)")
+        diag.notes.append(f"calib: {n_calib}/{len(usable)} photo(s) transplanted (k-NN seeds)")
 
     adjustments = [
         PhotoAdjustment(photo_id=pid, develop=dev) for pid, dev in dev_by_id.items() if dev

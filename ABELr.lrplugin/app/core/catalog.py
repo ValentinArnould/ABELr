@@ -1,31 +1,31 @@
-"""Localisation des données Lightroom sur disque + lecture seule du catalogue.
+"""Locating Lightroom data on disk + read-only catalog access.
 
-Un catalogue `Foo.lrcat` est accompagné, dans le même dossier, de deux bundles
-`.lrdata` exploitables sans réexport (vérifié sur Lr Classic 13) :
+A `Foo.lrcat` catalog is accompanied, in the same folder, by two `.lrdata`
+bundles usable without re-export (verified on Lr Classic 13):
 
     Foo.lrcat
-    Foo Previews.lrdata/        JPEG du rendu LR (réglages appliqués)
-      ├─ {u0}/{u0123}/{uuid}-{digest}_{2048|1024|512|320}   JPEG pur (offset 0)
-      ├─ {u0}/{u0123}/{uuid}-{digest}.lrfprev               conteneur AgHg (niveau bas)
-      └─ previews.db                                        index SQLite (Pyramid…)
-    Foo Smart Previews.lrdata/   DNG lossy JPEG XL, RGB 16-bit linéaire ~2.5MP
+    Foo Previews.lrdata/        JPEG of the LR render (settings applied)
+      ├─ {u0}/{u0123}/{uuid}-{digest}_{2048|1024|512|320}   plain JPEG (offset 0)
+      ├─ {u0}/{u0123}/{uuid}-{digest}.lrfprev               AgHg container (low level)
+      └─ previews.db                                        SQLite index (Pyramid…)
+    Foo Smart Previews.lrdata/   lossy JPEG XL DNG, linear 16-bit RGB ~2.5MP
       └─ {u0}/{u0123}/{uuid}.dng
 
-⚠️ L'`uuid` des FICHIERS de preview n'est PAS `Adobe_images.id_global`. C'est un
-identifiant propre au cache de previews, stocké dans `previews.db` :
+Warning: the preview FILES' `uuid` is NOT `Adobe_images.id_global`. It's an
+identifier specific to the preview cache, stored in `previews.db`:
 
-    .lrcat       Adobe_images.id_global  → id_local      (ce que le plugin envoie
+    .lrcat       Adobe_images.id_global  → id_local      (what the plugin sends
                                                            via getRawMetadata('uuid'))
     previews.db  ImageCacheEntry.imageId (= id_local) → uuid + digest
 
-Le `uuid`/`digest` ainsi obtenus nomment les fichiers d'aperçu rendu, et le même
-`uuid` nomme le DNG Smart Preview. Le sous-dossier est `{uuid[0]}/{uuid[:4]}`
-(ex. `00BAACF9-…` → `0/00BA/`). La résolution complète vit dans `previews.py`
+The `uuid`/`digest` obtained this way name the rendered preview files, and the
+same `uuid` names the Smart Preview DNG. The subfolder is `{uuid[0]}/{uuid[:4]}`
+(e.g. `00BAACF9-…` → `0/00BA/`). The full resolution lives in `previews.py`
 (`PreviewIndex`).
 
-Le `.lrcat` et `previews.db` sont du SQLite standard : on les ouvre en lecture
-seule immuable (`mode=ro&immutable=1`) pour ne poser aucun verrou même quand
-Lightroom est ouvert.
+`.lrcat` and `previews.db` are standard SQLite: we open them read-only and
+immutable (`mode=ro&immutable=1`) so no lock is taken even while Lightroom is
+open.
 """
 
 from __future__ import annotations
@@ -36,17 +36,17 @@ from pathlib import Path
 
 
 def preview_subdir(uuid: str) -> str:
-    """Sous-chemin `{uuid[0]}/{uuid[:4]}` utilisé par les deux bundles .lrdata."""
+    """Subpath `{uuid[0]}/{uuid[:4]}` used by both .lrdata bundles."""
     return f"{uuid[0]}/{uuid[:4]}"
 
 
 @dataclass(frozen=True)
 class CatalogPaths:
-    """Chemins dérivés d'un `.lrcat` (les bundles peuvent ne pas exister)."""
+    """Paths derived from a `.lrcat` (the bundles may not exist)."""
 
     lrcat: Path
-    previews: Path        # « Foo Previews.lrdata »
-    smart_previews: Path  # « Foo Smart Previews.lrdata »
+    previews: Path        # "Foo Previews.lrdata"
+    smart_previews: Path  # "Foo Smart Previews.lrdata"
 
     @property
     def previews_db(self) -> Path:
@@ -62,13 +62,13 @@ class CatalogPaths:
 
 
 def resolve_catalog(lrcat_path: str | Path) -> CatalogPaths:
-    """Construit les chemins .lrdata à partir du chemin du `.lrcat`.
+    """Builds the .lrdata paths from the `.lrcat` path.
 
-    Les bundles suivent la convention `{nom du catalogue} Previews.lrdata` et
-    `{nom du catalogue} Smart Previews.lrdata` dans le dossier du catalogue.
+    The bundles follow the convention `{catalog name} Previews.lrdata` and
+    `{catalog name} Smart Previews.lrdata` in the catalog's folder.
     """
     lrcat = Path(lrcat_path)
-    stem = lrcat.stem  # nom sans extension
+    stem = lrcat.stem  # name without extension
     folder = lrcat.parent
     return CatalogPaths(
         lrcat=lrcat,
@@ -78,18 +78,18 @@ def resolve_catalog(lrcat_path: str | Path) -> CatalogPaths:
 
 
 def open_readonly(db_path: str | Path) -> sqlite3.Connection:
-    """Ouvre un SQLite (.lrcat ou previews.db) en lecture seule, sans verrou.
+    """Opens a SQLite file (.lrcat or previews.db) read-only, without locking.
 
-    `immutable=1` promet à SQLite que le fichier ne change pas pendant la lecture :
-    aucun lock posé, cohabite avec Lightroom ouvert. À n'utiliser que pour des
-    lectures ponctuelles (snapshot).
+    `immutable=1` promises SQLite that the file won't change during the read:
+    no lock taken, coexists with Lightroom open. Only use for one-off reads
+    (snapshot).
     """
     uri = Path(db_path).as_uri() + "?mode=ro&immutable=1"
     return sqlite3.connect(uri, uri=True)
 
 
 def resolve_image_id(conn: sqlite3.Connection, id_global: str) -> int | None:
-    """`Adobe_images.id_local` pour un `id_global` (uuid renvoyé par le plugin)."""
+    """`Adobe_images.id_local` for an `id_global` (uuid returned by the plugin)."""
     row = conn.execute(
         "SELECT id_local FROM Adobe_images WHERE id_global = ?", (id_global,)
     ).fetchone()
@@ -97,10 +97,10 @@ def resolve_image_id(conn: sqlite3.Connection, id_global: str) -> int | None:
 
 
 def resolve_raw_path(conn: sqlite3.Connection, id_global: str) -> str | None:
-    """Chemin absolu du RAW d'origine pour un `id_global`, via le .lrcat.
+    """Absolute path of the original RAW for an `id_global`, via the .lrcat.
 
-    Utile si le plugin n'a pas déjà fourni le chemin. Jointure
-    RootFolder → Folder → File depuis l'image identifiée par son id_global.
+    Useful if the plugin hasn't already provided the path. Joins
+    RootFolder → Folder → File from the image identified by its id_global.
     """
     row = conn.execute(
         """

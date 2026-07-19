@@ -1,20 +1,21 @@
-"""Équilibrage d'exposition — espace rendu, cible résolue par le caller (embedded ou k-NN seeds).
+"""Exposure balancing — render space, target resolved by the caller (embedded or k-NN seeds).
 
-L'exposition perçue vit dans le **rendu** (profil DCP + courbe + curseurs), pas en
-scène-linéaire. On mesure la clarté CIE **L*** du rendu courant
-(`render_metrics.tone_stats`, zone nette) et on la compare à une **clarté cible**
-déjà résolue par le caller (`core.autocorrect`) :
+Perceived exposure lives in the **render** (DCP profile + curve + sliders), not in
+scene-linear space. We measure the current render's **CIE L\\*** lightness
+(`render_metrics.tone_stats`, sharp zone) and compare it to a **target lightness**
+already resolved by the caller (`core.autocorrect`):
 
-- Mode **embedded** : cible = L* du JPEG boîtier de la photo elle-même (zone nette).
-- Mode **seeds** : cible = L* de l'aperçu rendu (déjà retouché) du/des seed(s) les
-  plus proches en analyse RAW (`core.seed_match.match_target`).
+- **embedded** mode: target = L* of the photo's own in-camera JPEG (sharp zone).
+- **seeds** mode: target = L* of the rendered (already edited) preview of the
+  closest seed(s) by RAW analysis (`core.seed_match.match_target`).
 
-L'écart est traduit en ΔExposure2012 via la **réponse calibrée** `∂L*/∂EV`
-(`core.response`), bornée par un pas max et un garde-fou **headroom** (clipping
-RAW, ne pousse pas vers un écrêtage déjà présent). Le nouvel `Exposure2012`
-cumule ce delta sur la valeur develop **courante** — fournie par le caller, qui
-doit l'avoir mesurée fraîche (le rendu `current_l` doit refléter cette valeur
-courante, sinon le delta recalculé n'a pas de sens).
+The gap is translated into ΔExposure2012 via the **calibrated response** `∂L*/∂EV`
+(`core.response`), bounded by a max step and a **headroom** safeguard (RAW
+clipping, doesn't push further into clipping that's already present). The new
+`Exposure2012` accumulates this delta on top of the **current** develop value —
+supplied by the caller, which must have measured it fresh (the `current_l`
+render must reflect this current value, otherwise the recalculated delta is
+meaningless).
 """
 
 from __future__ import annotations
@@ -26,33 +27,33 @@ import numpy as np
 from .response import ExposureResponse
 from ..server.models import PhotoAdjustment
 
-# Seuils de clipping RAW (fractions) au-delà desquels on bride la correction.
+# RAW clipping thresholds (fractions) beyond which the correction is throttled.
 _HI_LIMIT = 0.02
 _LO_LIMIT = 0.02
-# Pas d'exposition maximal par photo (sécurité contre une mesure aberrante).
+# Maximum exposure step per photo (safety net against an outlier measurement).
 _MAX_STEP_EV = 2.0
 
 
 @dataclass
 class ExposureSample:
-    """Mesure d'une photo cible + sa clarté désirée (déjà résolue par le caller).
+    """Measurement of a target photo + its desired lightness (already resolved by the caller).
 
-    `current_l`    : médiane L* du **rendu courant** (zone nette), doit refléter
-                      `current_exposure` (mesure fraîche — responsabilité du caller).
-    `desired_l`     : clarté L* visée (JPEG boîtier ou seeds matchés). `None` = pas
-                      de cible exploitable → photo laissée inchangée.
+    `current_l`    : median L* of the **current render** (sharp zone), must reflect
+                      `current_exposure` (fresh measurement — caller's responsibility).
+    `desired_l`     : targeted L* lightness (in-camera JPEG or matched seeds). `None` =
+                      no usable target → photo left unchanged.
     """
 
     photo_id: str
     current_l: float
     current_exposure: float
     desired_l: float | None
-    clipped_hi: float = 0.0   # fraction hautes lumières écrêtées (RAW) — headroom
-    clipped_lo: float = 0.0   # fraction ombres bouchées (RAW) — headroom
+    clipped_hi: float = 0.0   # fraction of clipped highlights (RAW) — headroom
+    clipped_lo: float = 0.0   # fraction of blocked shadows (RAW) — headroom
 
 
 def _headroom_factor(clip: float, limit: float) -> float:
-    """Facteur [0, 1] : 1 sous le seuil, décroît jusqu'à 0 à 2× le seuil."""
+    """Factor [0, 1]: 1 below the threshold, decays to 0 at 2× the threshold."""
     if clip <= limit:
         return 1.0
     return max(0.0, 1.0 - (clip - limit) / limit)
@@ -65,11 +66,11 @@ def plan_from_render(
     hi_limit: float = _HI_LIMIT,
     lo_limit: float = _LO_LIMIT,
 ) -> list[PhotoAdjustment]:
-    """Planifie Exposure2012 pour amener chaque photo à sa clarté `desired_l`.
+    """Plans Exposure2012 to bring each photo to its `desired_l` lightness.
 
-    ΔEV = `resp.solve_dev(current_l → desired_l)`, borné à ±`max_step_ev`, puis
-    atténué par le headroom RAW. Le nouvel Exposure2012 cumule le delta sur
-    `current_exposure`. Photos sans `desired_l` : ignorées (rien à appliquer).
+    ΔEV = `resp.solve_dev(current_l → desired_l)`, bounded to ±`max_step_ev`, then
+    attenuated by the RAW headroom. The new Exposure2012 accumulates the delta on
+    top of `current_exposure`. Photos with no `desired_l`: skipped (nothing to apply).
     """
     resp = resp or ExposureResponse()
     out: list[PhotoAdjustment] = []

@@ -1,19 +1,20 @@
-"""Décodage RAW **sur GPU** — bayer → ProPhoto linéaire → stats (torch CUDA).
+"""RAW decoding **on GPU** — bayer → linear ProPhoto → stats (torch CUDA).
 
-Remplace `raw.load_linear` + `analysis` (chemin LibRaw CPU) par un pipeline GPU :
+Replaces `raw.load_linear` + `analysis` (the CPU LibRaw path) with a GPU pipeline:
 
-1. **CPU (mince, irréductible)** : `rawpy` décompresse/déballe le conteneur ARW en
-   plan bayer 16-bit et expose les métadonnées (motif CFA, WB as-shot, niveaux noir/blanc,
-   matrice couleur). Aucun codec GPU n'existe pour l'ARW Sony → cette étape reste CPU,
-   mais ne fait **pas** de demosaic.
-2. **GPU (tout le calcul pixel)** : soustraction du niveau de noir + normalisation, WB par
-   site CFA, **demosaic** (convolution normalisée = bilinéaire), matrice caméra→ProPhoto
-   (réplique la composition dcraw `cam_xyz_coeff`), → RGB float32 linéaire ProPhoto.
-   Stats d'exposition (Y) et gray-world calculées sur le tenseur GPU.
+1. **CPU (thin, irreducible)**: `rawpy` decompresses/unpacks the ARW container
+   into a 16-bit bayer plane and exposes the metadata (CFA pattern, as-shot WB,
+   black/white levels, color matrix). No GPU codec exists for Sony ARW → this
+   step stays on CPU, but does **not** demosaic.
+2. **GPU (all pixel compute)**: black-level subtraction + normalization,
+   per-CFA-site WB, **demosaic** (normalized convolution = bilinear), camera→
+   ProPhoto matrix (replicates the dcraw `cam_xyz_coeff` composition), → linear
+   ProPhoto float32 RGB. Exposure stats (Y) and gray-world computed on the GPU
+   tensor.
 
-Parité avec LibRaw (mêmes primaires ProPhoto, même `use_camera_wb`) : à confirmer par
-`tools/validate_gpu_vs_libraw`. La matrice couleur et l'adaptation chromatique sont les
-points sensibles — isolés ici pour être ajustables.
+Parity with LibRaw (same ProPhoto primaries, same `use_camera_wb`): to be
+confirmed via `tools/validate_gpu_vs_libraw`. The color matrix and chromatic
+adaptation are the sensitive points — isolated here to be adjustable.
 """
 
 from __future__ import annotations
@@ -33,15 +34,15 @@ from .analysis import (
 from .render_metrics import BandStats, ToneStats
 from .render_metrics_gpu import _q
 
-# ProPhoto(D50) linéaire → sRGB(D65) linéaire — même matrice que color.PROPHOTO_TO_SRGB,
-# utilisée ici pour donner au RAW une représentation sRGB u8 comparable (Lab/bandes) à
-# InCameraJPEG/PreviewJPEG, sans jamais servir à l'analyse d'exposition/WB (ProPhoto seul).
+# Linear ProPhoto(D50) → linear sRGB(D65) — same matrix as color.PROPHOTO_TO_SRGB,
+# used here to give the RAW a u8 sRGB representation comparable (Lab/bands) to
+# InCameraJPEG/PreviewJPEG, never used for exposure/WB analysis (ProPhoto only).
 _PP_TO_SRGB = torch.from_numpy(color.PROPHOTO_TO_SRGB)
 
-# ProPhoto(D50) → XYZ(D65) : primaires de sortie, adaptées D65 comme la table dcraw.
+# ProPhoto(D50) → XYZ(D65): output primaries, D65-adapted like the dcraw table.
 _PP_TO_XYZ_D65 = (color._BRADFORD_D50_D65 @ color._PP_TO_XYZ_D50).astype(np.float32)
 
-# Noyau de demosaic bilinéaire (convolution normalisée par le compte de voisins).
+# Bilinear demosaic kernel (convolution normalized by neighbor count).
 _BILINEAR_K = torch.tensor(
     [[[[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]]]], dtype=torch.float32
 )
@@ -49,35 +50,35 @@ _BILINEAR_K = torch.tensor(
 
 @dataclass
 class RawBayer:
-    """Sortie de l'unpack CPU — **picklable**, vit en RAM hôte (pour le scheduler)."""
+    """Output of the CPU unpack — **picklable**, lives in host RAM (for the scheduler)."""
 
-    bayer: np.ndarray       # uint16 HxW (zone visible)
-    pattern: np.ndarray     # 2x2 int : index couleur par site CFA
-    color_desc: str         # ex. "RGBG"
+    bayer: np.ndarray       # uint16 HxW (visible area)
+    pattern: np.ndarray     # 2x2 int: color index per CFA site
+    color_desc: str         # e.g. "RGBG"
     wb: tuple               # camera_whitebalance [R, G1, B, G2]
     black: tuple            # black_level_per_channel (4)
-    white: float            # white_level (scalaire)
-    cam_xyz: np.ndarray     # 3x3 : XYZ(D65) → caméra (rgb_xyz_matrix[:3,:3])
+    white: float            # white_level (scalar)
+    cam_xyz: np.ndarray     # 3x3: XYZ(D65) → camera (rgb_xyz_matrix[:3,:3])
 
 
 @dataclass
 class RawGpuResult:
-    exposure: ExposureStats               # exposition GLOBAL (frame entier, Y ProPhoto)
-    grayworld_rg: float                   # gray-world GLOBAL
+    exposure: ExposureStats               # GLOBAL exposure (whole frame, ProPhoto Y)
+    grayworld_rg: float                   # GLOBAL gray-world
     grayworld_bg: float
     asshot_rg: float
     asshot_bg: float
-    tone: ToneStats | None = None         # zone nette, sRGB dérivé du RAW
-    bands: list[BandStats] | None = None  # zone nette, sRGB dérivé du RAW
-    exposure_sharp: ExposureStats | None = None  # exposition ZONE NETTE (masque Laplacien)
-    grayworld_rg_sharp: float | None = None       # gray-world ZONE NETTE
+    tone: ToneStats | None = None         # sharp zone, sRGB derived from the RAW
+    bands: list[BandStats] | None = None  # sharp zone, sRGB derived from the RAW
+    exposure_sharp: ExposureStats | None = None  # SHARP ZONE exposure (Laplacian mask)
+    grayworld_rg_sharp: float | None = None       # SHARP ZONE gray-world
     grayworld_bg_sharp: float | None = None
-    mask_sharp_frac: float | None = None          # fraction de pixels retenus (diagnostic)
+    mask_sharp_frac: float | None = None          # fraction of pixels retained (diagnostic)
 
 
 def _prophoto_linear_to_srgb_u8_gpu(pp_hw3: torch.Tensor) -> torch.Tensor:
-    """ProPhoto linéaire (H,W,3) CUDA → sRGB uint8 (H,W,3) CUDA. Affichage/comparaison
-    histogramme uniquement (jamais pour l'exposition/WB, qui restent en ProPhoto)."""
+    """Linear ProPhoto (H,W,3) CUDA → sRGB uint8 (H,W,3) CUDA. Display/histogram
+    comparison only (never for exposure/WB, which stay in ProPhoto)."""
     M = _PP_TO_SRGB.to(pp_hw3.device)
     srgb_lin = (pp_hw3 @ M.T).clamp(0.0, 1.0)
     a = 0.055
@@ -88,13 +89,13 @@ def _prophoto_linear_to_srgb_u8_gpu(pp_hw3: torch.Tensor) -> torch.Tensor:
 
 
 # --------------------------------------------------------------------------- #
-# CPU : unpack mince (pas de demosaic)
+# CPU: thin unpack (no demosaic)
 # --------------------------------------------------------------------------- #
 def bayer_from_open(r) -> RawBayer:
-    """RawBayer depuis un handle rawpy DÉJÀ ouvert.
+    """RawBayer from an ALREADY-open rawpy handle.
 
-    Extrait pour l'unpack unifié du scheduler (revue Fable 5 P-02) : la même
-    ouverture rawpy sert au bayer ET au JPEG boîtier (`embedded_jpeg.extract_from_open`).
+    Extracted for the scheduler's unified unpack (Fable 5 review P-02): the same
+    rawpy open serves both the bayer AND the camera JPEG (`embedded_jpeg.extract_from_open`).
     """
     bayer = r.raw_image_visible.copy()           # uint16 HxW
     pattern = np.asarray(r.raw_pattern).copy()   # 2x2
@@ -107,9 +108,9 @@ def bayer_from_open(r) -> RawBayer:
 
 
 def unpack_raw(path: str) -> RawBayer | None:
-    """Déballe le RAW via rawpy (CPU) : bayer + métadonnées. None si illisible.
+    """Unpacks the RAW via rawpy (CPU): bayer + metadata. None if unreadable.
 
-    Fonction de niveau module → picklable pour un pool de process (cf. `gpu_schedule`).
+    Module-level function → picklable for a process pool (see `gpu_schedule`).
     """
     import rawpy
 
@@ -121,28 +122,28 @@ def unpack_raw(path: str) -> RawBayer | None:
 
 
 # --------------------------------------------------------------------------- #
-# Matrice caméra → ProPhoto (réplique dcraw cam_xyz_coeff)
+# Camera → ProPhoto matrix (replicates dcraw cam_xyz_coeff)
 # --------------------------------------------------------------------------- #
 def _cam_to_prophoto(cam_xyz: np.ndarray) -> np.ndarray:
-    """3x3 : caméra-RGB → ProPhoto linéaire.
+    """3x3: camera-RGB → linear ProPhoto.
 
-    dcraw : cam_rgb = cam_xyz · (ProPhoto→XYZ_D65), normalisé en lignes (somme=1, =
-    point blanc caméra), puis inversé → caméra→ProPhoto. Reproduit la conversion couleur
-    de LibRaw `output_color=ProPhoto`.
+    dcraw: cam_rgb = cam_xyz · (ProPhoto→XYZ_D65), row-normalized (sum=1, =
+    camera white point), then inverted → camera→ProPhoto. Reproduces LibRaw's
+    `output_color=ProPhoto` color conversion.
     """
-    cam_rgb = cam_xyz @ _PP_TO_XYZ_D65          # 3x3 : ProPhoto → caméra
+    cam_rgb = cam_xyz @ _PP_TO_XYZ_D65          # 3x3: ProPhoto → camera
     row_sums = cam_rgb.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1.0
-    cam_rgb_n = cam_rgb / row_sums              # normalisation point blanc
-    return np.linalg.inv(cam_rgb_n).astype(np.float32)  # caméra → ProPhoto
+    cam_rgb_n = cam_rgb / row_sums              # white-point normalization
+    return np.linalg.inv(cam_rgb_n).astype(np.float32)  # camera → ProPhoto
 
 
 # --------------------------------------------------------------------------- #
-# GPU : black-level, WB, demosaic, matrice, stats
+# GPU: black-level, WB, demosaic, matrix, stats
 # --------------------------------------------------------------------------- #
 def _demosaic_bilinear(val: torch.Tensor, chan_map: torch.Tensor) -> torch.Tensor:
-    """Demosaic par convolution normalisée. `val` HxW (0-1, WB appliqué), `chan_map`
-    HxW dans {0,1,2}. Retourne (3,H,W) caméra-RGB linéaire."""
+    """Demosaic via normalized convolution. `val` HxW (0-1, WB applied), `chan_map`
+    HxW in {0,1,2}. Returns (3,H,W) linear camera-RGB."""
     K = _BILINEAR_K.to(val.device)
     planes = []
     v4 = val.unsqueeze(0).unsqueeze(0)  # 1,1,H,W
@@ -155,21 +156,23 @@ def _demosaic_bilinear(val: torch.Tensor, chan_map: torch.Tensor) -> torch.Tenso
 
 
 def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
-    """Pipeline GPU complet d'un bayer déballé → stats exposition + gray-world."""
+    """Full GPU pipeline for an unpacked bayer → exposure + gray-world stats."""
     dev = gpu.device()
     H, W = rb.bayer.shape
 
-    # H2D en uint16 (48 Mo) puis cast float32 SUR GPU — au lieu d'un astype float32
-    # côté CPU qui doublait le trafic PCIe et allouait 96 Mo hôte (revue Fable 5 P-06).
+    # H2D as uint16 (48 MB) then cast to float32 ON GPU — instead of an astype
+    # float32 on the CPU side, which doubled PCIe traffic and allocated 96 MB
+    # host-side (Fable 5 review P-06).
     bayer = torch.from_numpy(rb.bayer).to(dev).to(torch.float32)
     pat = torch.from_numpy(rb.pattern.astype(np.int64)).to(dev)          # 2x2
     idx = pat.repeat((H + 1) // 2, (W + 1) // 2)[:H, :W]                 # HxW index 0..3
 
     black_v = torch.tensor(rb.black, dtype=torch.float32, device=dev)    # (4,)
-    # WB normalisée au vert (index 1) : neutre → (g,g,g).
-    # Convention dcraw/LibRaw : cam_mul[G2]==0 signifie « G2 = G1 » — sans cette
-    # garde les sites G2 seraient multipliés par 0 (canal vert faussé au demosaic).
-    # No-op sur Sony ARW (G2=G1 déjà), casse d'autres boîtiers sinon (C-01).
+    # WB normalized to green (index 1): neutral → (g,g,g).
+    # dcraw/LibRaw convention: cam_mul[G2]==0 means "G2 = G1" — without this
+    # guard the G2 sites would be multiplied by 0 (green channel corrupted at
+    # demosaic). No-op on Sony ARW (G2=G1 already), breaks other camera bodies
+    # otherwise (C-01).
     wb = list(rb.wb)
     if len(wb) > 3 and wb[3] == 0:
         wb[3] = wb[1]
@@ -179,9 +182,9 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
 
     black_map = black_v[idx]
     denom = (rb.white - black_map).clamp_min(1.0)
-    val = ((bayer - black_map).clamp_min(0.0) / denom) * wb_norm[idx]    # HxW, WB appliqué
+    val = ((bayer - black_map).clamp_min(0.0) / denom) * wb_norm[idx]    # HxW, WB applied
 
-    # index couleur CFA → canal RGB 0/1/2 via color_desc.
+    # CFA color index → RGB channel 0/1/2 via color_desc.
     letter_to_c = {"R": 0, "G": 1, "B": 2}
     chan_of_index = torch.tensor(
         [letter_to_c[rb.color_desc[i]] for i in range(len(rb.color_desc))],
@@ -189,18 +192,18 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
     )
     chan_map = chan_of_index[idx]                                        # HxW in {0,1,2}
 
-    cam_rgb = _demosaic_bilinear(val, chan_map)                         # 3,H,W caméra
-    M = torch.from_numpy(_cam_to_prophoto(rb.cam_xyz)).to(dev)          # 3x3 caméra→ProPhoto
-    # (3,H,W) → (H*W,3) @ M.T → ProPhoto, clampé [0,1] (parité LibRaw output range).
+    cam_rgb = _demosaic_bilinear(val, chan_map)                         # 3,H,W camera
+    M = torch.from_numpy(_cam_to_prophoto(rb.cam_xyz)).to(dev)          # 3x3 camera→ProPhoto
+    # (3,H,W) → (H*W,3) @ M.T → ProPhoto, clamped [0,1] (parity with LibRaw output range).
     flat = cam_rgb.reshape(3, -1).T                                     # N,3
-    pp = (flat @ M.T).clamp(0.0, 1.0)                                   # N,3 ProPhoto linéaire
+    pp = (flat @ M.T).clamp(0.0, 1.0)                                   # N,3 linear ProPhoto
 
-    # Exposition (Y de XYZ ProPhoto) — mêmes poids/seuils que analysis.exposure_stats.
+    # Exposure (Y from ProPhoto XYZ) — same weights/thresholds as analysis.exposure_stats.
     y_w = torch.tensor(color.PROPHOTO_TO_Y, dtype=torch.float32, device=dev)
     luma = pp @ y_w                                                     # N
 
     def _exposure(pp_sub: torch.Tensor, luma_sub: torch.Tensor) -> ExposureStats:
-        """ExposureStats sur un sous-ensemble de pixels (global ou zone nette)."""
+        """ExposureStats over a subset of pixels (global or sharp zone)."""
         n = luma_sub.numel()
         if n == 0:
             return ExposureStats(0.0, 0.0, 0.0, 0.0)
@@ -212,17 +215,18 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
         )
 
     def _grayworld(pp_sub: torch.Tensor) -> tuple[float, float]:
-        """Gray-world ProPhoto (g/r, g/b) — comme analysis.gray_world_wb."""
+        """ProPhoto gray-world (g/r, g/b) — same as analysis.gray_world_wb."""
         if pp_sub.numel() == 0:
             return 0.0, 0.0
         mean_rgb = pp_sub.mean(dim=0) + 1e-9
         return float(mean_rgb[1] / mean_rgb[0]), float(mean_rgb[1] / mean_rgb[2])
 
-    # Global (frame entier).
+    # Global (whole frame).
     exposure = _exposure(pp, luma)
     grayworld_rg, grayworld_bg = _grayworld(pp)
 
-    # Tone/bandes zone nette — sRGB dérivé du ProPhoto, comparable aux JPEG (boîtier/aperçu).
+    # Sharp-zone tone/bands — sRGB derived from ProPhoto, comparable to JPEGs
+    # (camera/preview).
     pp_hw3 = pp.reshape(H, W, 3)
     hwc_u8 = _prophoto_linear_to_srgb_u8_gpu(pp_hw3)
     lab = render_metrics_gpu._srgb_u8_to_lab(hwc_u8)
@@ -230,7 +234,7 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
     tone = render_metrics_gpu.tone_stats(hwc_u8, lab, mask=sharp)
     bands = render_metrics_gpu.band_stats(hwc_u8, lab, mask=sharp)
 
-    # Zone nette (mêmes réductions Y/gray-world, restreintes au masque net).
+    # Sharp zone (same Y/gray-world reductions, restricted to the sharp mask).
     mask_flat = sharp.reshape(-1)
     exposure_sharp = _exposure(pp[mask_flat], luma[mask_flat])
     grayworld_rg_sharp, grayworld_bg_sharp = _grayworld(pp[mask_flat])
@@ -253,7 +257,7 @@ def process_bayer_gpu(rb: RawBayer) -> RawGpuResult:
 
 
 def analyze_raw_gpu(path: str) -> RawGpuResult | None:
-    """Unpack CPU + traitement GPU d'un RAW. None si illisible."""
+    """CPU unpack + GPU processing of a RAW. None if unreadable."""
     rb = unpack_raw(path)
     if rb is None:
         return None

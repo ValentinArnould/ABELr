@@ -1,16 +1,16 @@
-"""Métriques en espace rendu — **portage torch** de `render_metrics` (GPU ou CPU).
+"""Render-space metrics — **torch port** of `render_metrics` (GPU or CPU).
 
-Mêmes mesures que `render_metrics` (tone L*, neutres a*/b*, bandes HSL) et **mêmes
-dataclasses** (`ToneStats`, `NeutralStats`, `BandStats`), mais tout le calcul tourne
-en tenseurs torch plutôt qu'en numpy. Le device suit `gpu.device()` (GPU prioritaire,
-repli CPU si aucun CUDA utilisable — cf. `core/gpu.py`). Sur GPU, l'entrée est un
-tenseur **uint8 CHW RGB déjà sur device** tel que le rend nvJPEG
-(`torchvision.io.decode_jpeg(device='cuda')`) → aucun aller-retour CPU entre le
-décodage et la mesure ; sur CPU, même chemin, tenseurs CPU.
+Same measurements as `render_metrics` (tone L*, neutral a*/b*, HSL bands) and **same
+dataclasses** (`ToneStats`, `NeutralStats`, `BandStats`), but all computation runs
+on torch tensors instead of numpy. The device follows `gpu.device()` (GPU priority,
+CPU fallback if no CUDA is usable — see `core/gpu.py`). On GPU, the input is a
+**uint8 CHW RGB tensor already on device**, as produced by nvJPEG
+(`torchvision.io.decode_jpeg(device='cuda')`) → no CPU round-trip between
+decoding and measurement; on CPU, same path, CPU tensors.
 
-Les constantes colorimétriques (sRGB→XYZ→CIELAB, seuils) sont **importées** de
-`render_metrics` pour rester l'unique source de vérité ; le portage doit reproduire
-la version numpy (vérifié par `tools/validate_gpu_vs_libraw` / tests dédiés).
+The colorimetric constants (sRGB→XYZ→CIELAB, thresholds) are **imported** from
+`render_metrics` so it stays the single source of truth; the port must reproduce
+the numpy version (verified by `tools/validate_gpu_vs_libraw` / dedicated tests).
 """
 
 from __future__ import annotations
@@ -22,18 +22,18 @@ from . import render_metrics as rm
 from .pipeline import RenderAnalysis, RenderAnalysisDual
 from .render_metrics import BandStats, NeutralStats, ToneStats
 
-# Résolu une fois : GPU si disponible, sinon CPU (gpu.device() ne lève jamais).
-# Les modules amont (gpu_jpeg, gpu_schedule) décodent déjà sur ce même device via
-# gpu.device() — cohérent, jamais de tenseur CUDA mélangé à un calcul CPU.
+# Resolved once: GPU if available, otherwise CPU (gpu.device() never raises).
+# Upstream modules (gpu_jpeg, gpu_schedule) already decode on this same device via
+# gpu.device() — consistent, never a CUDA tensor mixed with a CPU computation.
 _DEV = gpu.device()
 
 
 def _const(arr) -> torch.Tensor:
-    """Constante numpy → tenseur float32 sur le device courant (GPU ou CPU)."""
+    """numpy constant → float32 tensor on the current device (GPU or CPU)."""
     return torch.as_tensor(arr, dtype=torch.float32, device=_DEV)
 
 
-# Matrices/constantes (mêmes valeurs que render_metrics).
+# Matrices/constants (same values as render_metrics).
 _SRGB_LIN_TO_XYZ = _const(rm._SRGB_LIN_TO_XYZ_D65)        # 3x3
 _D65 = _const(rm._D65_WHITE)                              # (3,)
 _BAND_CENTERS = _const(rm._BAND_CENTERS)                  # (8,)
@@ -53,7 +53,7 @@ _BAND_NAMES = rm.BAND_NAMES
 # Helpers
 # --------------------------------------------------------------------------- #
 def _to_hwc_u8(chw_u8: torch.Tensor) -> torch.Tensor:
-    """nvJPEG/CPU sort du CHW uint8 ; on travaille en HWC. Force RGB 3 canaux sur le device courant."""
+    """nvJPEG/CPU outputs CHW uint8; we work in HWC. Force RGB 3 channels on the current device."""
     if chw_u8.device != _DEV:
         chw_u8 = chw_u8.to(_DEV)
     if chw_u8.dim() == 3 and chw_u8.shape[0] in (1, 3):
@@ -66,10 +66,10 @@ def _to_hwc_u8(chw_u8: torch.Tensor) -> torch.Tensor:
 
 
 def _q(x: torch.Tensor, q: float) -> float:
-    """Quantile (interpolation linéaire, comme numpy) d'un tenseur 1D, en float.
+    """Quantile (linear interpolation, like numpy) of a 1D tensor, as float.
 
-    `torch.quantile` borne le nombre d'éléments (~16M) ; on sous-échantillonne par pas
-    constant au-delà (les centiles globaux d'un grand rendu sont insensibles au pas).
+    `torch.quantile` caps the number of elements (~16M); we subsample at a
+    constant stride beyond that (a large render's global percentiles are insensitive to stride).
     """
     if x.numel() == 0:
         return 0.0
@@ -79,7 +79,7 @@ def _q(x: torch.Tensor, q: float) -> float:
 
 
 def _srgb_u8_to_lab(hwc_u8: torch.Tensor) -> torch.Tensor:
-    """RGB uint8 sRGB (HWC) → CIELAB (HWC : L* 0-100, a*, b*) sur CUDA."""
+    """RGB uint8 sRGB (HWC) → CIELAB (HWC: L* 0-100, a*, b*) on CUDA."""
     x = hwc_u8.float() / 255.0
     a = 0.055
     lin = torch.where(x <= 0.04045, x / 12.92, ((x + a) / (1.0 + a)) ** 2.4)
@@ -95,7 +95,7 @@ def _srgb_u8_to_lab(hwc_u8: torch.Tensor) -> torch.Tensor:
 
 
 def _hsv_hue_sat(hwc_u8: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Teinte (deg 0-360) et saturation HSV (0-1) d'un RGB uint8 HWC. Torch pur."""
+    """Hue (deg 0-360) and HSV saturation (0-1) of a uint8 RGB HWC. Pure torch."""
     rgb = hwc_u8.float() / 255.0
     r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
     cmax = rgb.amax(dim=-1)
@@ -116,7 +116,7 @@ def _hsv_hue_sat(hwc_u8: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 # --------------------------------------------------------------------------- #
-# 1. Tone (exposition L*)
+# 1. Tone (exposure L*)
 # --------------------------------------------------------------------------- #
 def tone_stats(
     hwc_u8: torch.Tensor, lab: torch.Tensor, mask: torch.Tensor | None = None
@@ -143,7 +143,7 @@ def tone_stats(
 
 
 # --------------------------------------------------------------------------- #
-# 2. Neutral (cast WB sur quasi-neutres)
+# 2. Neutral (WB cast on near-neutrals)
 # --------------------------------------------------------------------------- #
 def neutral_stats(lab: torch.Tensor, mask: torch.Tensor | None = None) -> NeutralStats:
     lstar = lab[..., 0]
@@ -166,7 +166,7 @@ def neutral_stats(lab: torch.Tensor, mask: torch.Tensor | None = None) -> Neutra
 
 
 # --------------------------------------------------------------------------- #
-# 3. Bandes HSL
+# 3. HSL bands
 # --------------------------------------------------------------------------- #
 def band_stats(
     hwc_u8: torch.Tensor, lab: torch.Tensor, mask: torch.Tensor | None = None
@@ -206,14 +206,14 @@ def band_stats(
 
 
 # --------------------------------------------------------------------------- #
-# Composition (équivalent GPU de pipeline.analyze_rendered)
+# Composition (GPU equivalent of pipeline.analyze_rendered)
 # --------------------------------------------------------------------------- #
 def analyze_rendered_gpu(chw_u8: torch.Tensor) -> RenderAnalysis:
-    """Analyse un rendu décodé sur GPU (uint8 CHW) en une seule passe Lab CUDA.
+    """Analyze a render decoded on GPU (uint8 CHW) in a single CUDA Lab pass.
 
-    Restreint tone/neutral/bandes à la **zone nette** (top 25% le plus net,
-    `sharpness.sharp_mask_gpu` sur L*) — exclut le flou de bokeh/arrière-plan
-    de l'histogramme mesuré.
+    Restricts tone/neutral/bands to the **sharp zone** (sharpest top 25%,
+    `sharpness.sharp_mask_gpu` on L*) — excludes bokeh/background blur
+    from the measured histogram.
     """
     from . import sharpness
 
@@ -228,10 +228,10 @@ def analyze_rendered_gpu(chw_u8: torch.Tensor) -> RenderAnalysis:
 
 
 def analyze_rendered_gpu_dual(chw_u8: torch.Tensor) -> RenderAnalysisDual:
-    """Équivalent GPU de `pipeline.analyze_rendered_dual` : global + zone nette.
+    """GPU equivalent of `pipeline.analyze_rendered_dual`: global + sharp zone.
 
-    Une seule conversion Lab CUDA + une seule carte de netteté, partagées entre les
-    deux échelles (global = `mask=None`, sharp = masque net).
+    A single CUDA Lab conversion + a single sharpness map, shared between the
+    two scales (global = `mask=None`, sharp = sharp mask).
     """
     from . import sharpness
 

@@ -1,7 +1,7 @@
-"""Intégration de l'axe "calib" (Étalonnage) dans `core.autocorrect.plan()` —
-transplant k-NN depuis les seeds, actif dans les deux modes de référence
-(contrairement à expo/wb/hsl qui n'ont de cible mesurable qu'en mode seeds ou
-via l'ancre neutre embedded).
+"""Integration of the "calib" (Calibration) axis in `core.autocorrect.plan()` —
+k-NN transplant from the seeds, active in both reference modes
+(unlike expo/wb/hsl, which only have a measurable target in seeds mode or
+via the embedded neutral anchor).
 """
 
 from __future__ import annotations
@@ -48,12 +48,12 @@ def test_plan_seeds_mode_transplants_calibration():
     assert dev["ShadowTint"] == 8
     assert dev["RedHue"] == -15
     assert dev["BlueSaturation"] == 20
-    assert "RedSaturation" not in dev  # non seedé → pas écrit
+    assert "RedSaturation" not in dev  # not seeded → not written
 
 
 def test_plan_embedded_mode_still_transplants_calibration_via_seeds():
-    # Mode embedded forcé, AUCUNE ancre T/N (pas de embedded_*/neutral_*) : expo/wb/hsl
-    # n'auraient rien à corriger, mais calib doit quand même matcher k-NN sur RAW.
+    # Forced embedded mode, NO T/N anchor at all (no embedded_*/neutral_*): expo/wb/hsl
+    # would have nothing to correct, but calib must still k-NN-match on RAW.
     seed_pool = [_seed_with_calib(green_hue=12.0)]
     target = ac.PhotoMeasure(
         photo_id="p1", path="p1.ARW", current_develop={}, exif_camera="ILCE-7M3",
@@ -79,11 +79,11 @@ def test_plan_embedded_mode_no_seed_pool_skips_calib_axis():
         [target], axes=frozenset({"calib"}), forced_embedded=True, model=None, seed_pool=None,
     )
     assert adjustments == []
-    assert any("calib" in note and "ignoré" in note for note in diag.notes)
+    assert any("calib" in note and "skipped" in note for note in diag.notes)
 
 
 def test_plan_seeds_mode_ignores_calib_axis_when_no_seed_has_calibration():
-    seed_pool = [_seed_with_calib()]  # aucun champ calib renseigné
+    seed_pool = [_seed_with_calib()]  # no calib field filled in
     target = ac.PhotoMeasure(
         photo_id="p1", path="p1.ARW", current_develop={}, exif_camera="ILCE-7M3",
         analysis=_analysis(), raw_tone=_tone(), asshot_rg=0.5, asshot_bg=0.5,

@@ -1,9 +1,9 @@
-"""Queue de jobs thread-safe — pont entre le thread GUI et le thread serveur FastAPI.
+"""Thread-safe job queue — bridge between the GUI thread and the FastAPI server thread.
 
-Le plugin Lr est TOUJOURS client : il récupère les jobs (GET /jobs/pending) et
-soumet les résultats (POST /jobs/{id}/result). Le GUI produit les jobs et attend
-leurs résultats. Comme FastAPI (uvicorn) tourne dans un thread séparé du GUI,
-l'accès est protégé par un Lock et la synchronisation se fait via threading.Event.
+The Lr plugin is ALWAYS the client: it fetches jobs (GET /jobs/pending) and
+submits results (POST /jobs/{id}/result). The GUI produces jobs and waits for
+their results. Since FastAPI (uvicorn) runs in a thread separate from the GUI,
+access is protected by a Lock and synchronization goes through threading.Event.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .models import Job, JobResult, JobStatus, JobType
 
 
 class _JobEntry:
-    """État interne d'un job + événement de complétion."""
+    """Internal state of a job + completion event."""
 
     def __init__(self, job: Job) -> None:
         self.job = job
@@ -29,31 +29,32 @@ class _JobEntry:
 
 
 class JobQueue:
-    """Queue FIFO thread-safe avec attente bloquante du résultat."""
+    """Thread-safe FIFO queue with blocking wait for the result."""
 
-    # Au-delà de ce délai, une entrée jamais récupérée (worker timeouté, plugin
-    # mort avant de POSTer) est considérée orpheline et évincée → borne la RAM.
-    # 900 s : au-dessus du plus long timeout worker légitime (render_probe sur une
-    # grosse sélection), pour ne jamais évincer un job encore attendu.
-    _ENTRY_TTL = 900.0  # secondes
-    # Borne dure de la file d'attente : au-delà, submit() refuse (plugin déconnecté
-    # + producteur en boucle = fuite RAM sinon).
+    # Beyond this delay, an entry that's never been picked up (worker timed
+    # out, plugin died before POSTing) is considered orphaned and evicted →
+    # bounds RAM usage. 900s: above the longest legitimate worker timeout
+    # (render_probe on a large selection), so we never evict a job that's
+    # still awaited.
+    _ENTRY_TTL = 900.0  # seconds
+    # Hard cap on the queue: beyond this, submit() refuses (plugin
+    # disconnected + producer looping = RAM leak otherwise).
     _MAX_PENDING = 100
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._pending: deque[str] = deque()
         self._jobs: dict[str, _JobEntry] = {}
-        # Horodatage du dernier GET /jobs/pending du plugin = battement de cœur
-        # du pont. Tant que le pont écoute, il poll toutes les 300ms.
+        # Timestamp of the plugin's last GET /jobs/pending = bridge heartbeat.
+        # As long as the bridge is listening, it polls every 300ms.
         self._last_poll_at: Optional[float] = None
 
     def _prune_locked(self, now: float) -> None:
-        """Évince les entrées orphelines trop vieilles. À appeler sous `_lock`.
+        """Evicts orphaned entries that are too old. Must be called under `_lock`.
 
-        Les jobs récupérés sont déjà retirés par `wait_result` ; ceci ne ramasse
-        que les orphelins (jamais consommés) pour empêcher `_jobs` de croître sans
-        fin (fuite RAM si l'app tourne longtemps avec beaucoup de jobs).
+        Fetched jobs are already removed by `wait_result`; this only sweeps
+        orphans (never consumed) to prevent `_jobs` from growing without
+        bound (RAM leak if the app runs a long time with many jobs).
         """
         stale = [
             jid for jid, e in self._jobs.items()
@@ -62,18 +63,20 @@ class JobQueue:
         for jid in stale:
             self._jobs.pop(jid, None)
         if stale:
-            # Retire aussi les ids fantômes de la file (sinon ils comptent dans
-            # la borne _MAX_PENDING alors que next_pending les sauterait).
+            # Also strip the now-ghost ids from the queue (otherwise they'd
+            # count toward the _MAX_PENDING cap even though next_pending
+            # would just skip them).
             self._pending = deque(jid for jid in self._pending if jid in self._jobs)
 
     # ------------------------------------------------------------------ #
-    # Côté producteur (GUI)
+    # Producer side (GUI)
     # ------------------------------------------------------------------ #
     def submit(self, job_type: JobType, payload: Optional[dict[str, Any]] = None) -> str:
-        """Crée un job, le pousse dans la queue, retourne son job_id.
+        """Creates a job, pushes it onto the queue, returns its job_id.
 
-        Lève RuntimeError si la file dépasse `_MAX_PENDING` (plugin déconnecté
-        pendant que des producteurs soumettent en boucle) — mieux qu'une fuite RAM.
+        Raises RuntimeError if the queue exceeds `_MAX_PENDING` (plugin
+        disconnected while producers keep submitting in a loop) — better
+        than a RAM leak.
         """
         job_id = str(uuid.uuid4())
         job = Job(job_id=job_id, type=job_type, payload=payload or {})
@@ -82,19 +85,19 @@ class JobQueue:
             self._prune_locked(time.time())
             if len(self._pending) >= self._MAX_PENDING:
                 raise RuntimeError(
-                    f"File de jobs saturée ({self._MAX_PENDING} en attente) — "
-                    "le plugin Lightroom ne récupère plus les jobs (pont inactif ?)."
+                    f"Job queue saturated ({self._MAX_PENDING} pending) — "
+                    "the Lightroom plugin is no longer picking up jobs (bridge inactive?)."
                 )
             self._jobs[job_id] = entry
             self._pending.append(job_id)
         return job_id
 
     def wait_result(self, job_id: str, timeout: float = 30.0) -> Optional[JobResult]:
-        """Bloque jusqu'au résultat ou au timeout. None si timeout.
+        """Blocks until the result or the timeout. None on timeout.
 
-        À appeler depuis un worker, jamais depuis le thread Qt principal
-        (sinon le GUI gèle). Le résultat récupéré est aussitôt **retiré** de
-        `_jobs` (consommé → libère la RAM).
+        Must be called from a worker, never from the main Qt thread
+        (otherwise the GUI freezes). The fetched result is immediately
+        **removed** from `_jobs` (consumed → frees RAM).
         """
         with self._lock:
             entry = self._jobs.get(job_id)
@@ -107,27 +110,27 @@ class JobQueue:
         return None
 
     # ------------------------------------------------------------------ #
-    # Côté plugin (via endpoints FastAPI)
+    # Plugin side (via FastAPI endpoints)
     # ------------------------------------------------------------------ #
     def mark_poll(self) -> None:
-        """Le plugin vient de poller : rafraîchit le battement de cœur du pont."""
+        """The plugin just polled: refreshes the bridge heartbeat."""
         with self._lock:
             self._last_poll_at = time.time()
 
     def seconds_since_poll(self) -> Optional[float]:
-        """Secondes depuis le dernier poll plugin. None si jamais vu."""
+        """Seconds since the plugin's last poll. None if never seen."""
         with self._lock:
             if self._last_poll_at is None:
                 return None
             return time.time() - self._last_poll_at
 
     def bridge_connected(self, threshold: float = 5.0) -> bool:
-        """True si le plugin a pollé dans les `threshold` dernières secondes."""
+        """True if the plugin polled within the last `threshold` seconds."""
         since = self.seconds_since_poll()
         return since is not None and since <= threshold
 
     def next_pending(self) -> Optional[Job]:
-        """Retourne le prochain job en attente et le passe IN_PROGRESS. None si vide."""
+        """Returns the next pending job and moves it to IN_PROGRESS. None if empty."""
         with self._lock:
             while self._pending:
                 job_id = self._pending.popleft()
@@ -139,7 +142,7 @@ class JobQueue:
         return None
 
     def submit_result(self, result: JobResult) -> bool:
-        """Enregistre le résultat soumis par le plugin. False si job inconnu."""
+        """Records the result submitted by the plugin. False if the job is unknown."""
         with self._lock:
             entry = self._jobs.get(result.job_id)
             if entry is None:
@@ -148,7 +151,7 @@ class JobQueue:
             entry.status = (
                 JobStatus.DONE if result.status == "ok" else JobStatus.FAILED
             )
-            entry.done_event.set()  # sous le lock : état + signal publiés atomiquement
+            entry.done_event.set()  # under the lock: state + signal published atomically
         return True
 
     # ------------------------------------------------------------------ #
@@ -164,5 +167,5 @@ class JobQueue:
             return entry.status if entry else None
 
 
-# Instance partagée (singleton applicatif).
+# Shared instance (application singleton).
 job_queue = JobQueue()

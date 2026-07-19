@@ -1,6 +1,6 @@
-"""Routes FastAPI — serveur localhost que le plugin Lr interroge en polling.
+"""FastAPI routes — localhost server that the Lr plugin polls.
 
-Le plugin est client : il fait GET /jobs/pending puis POST /jobs/{id}/result.
+The plugin is the client: it does GET /jobs/pending then POST /jobs/{id}/result.
 """
 
 from __future__ import annotations
@@ -17,15 +17,15 @@ from ..mcp.server import mcp
 from .job_queue import job_queue
 from .models import JobResult
 
-# Crée l'app ASGI MCP **avant** le lifespan : `streamable_http_app()` instancie
-# le session manager (création lazy) que le lifespan démarre ensuite.
+# Creates the MCP ASGI app **before** the lifespan: `streamable_http_app()`
+# instantiates the session manager (lazy creation), which the lifespan then starts.
 _mcp_app = mcp.streamable_http_app()
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Forward le lifespan du session manager MCP — REQUIS quand on monte le
-    serveur MCP sur une app hôte, sinon RuntimeError « Task group is not initialized »."""
+    """Forwards the MCP session manager's lifespan — REQUIRED when mounting the
+    MCP server on a host app, otherwise RuntimeError "Task group is not initialized"."""
     async with mcp.session_manager.run():
         yield
 
@@ -37,13 +37,13 @@ _started_at = time.time()
 
 @app.get("/health")
 def health() -> dict:
-    """Healthcheck — le plugin vérifie au démarrage que l'App tourne."""
+    """Healthcheck — the plugin checks at startup that the App is running."""
     return {"status": "ok", "uptime_s": round(time.time() - _started_at, 1)}
 
 
 @app.get("/status")
 def status_() -> dict:
-    """État global de l'App."""
+    """Overall App state."""
     return {
         "status": "ready",
         "pending_jobs": job_queue.pending_count(),
@@ -54,10 +54,10 @@ def status_() -> dict:
 
 @app.get("/bridge")
 def bridge() -> dict:
-    """État du pont plugin : a-t-il pollé récemment ?
+    """Plugin bridge state: has it polled recently?
 
-    Le plugin Lr poll /jobs/pending toutes les 300ms tant que sa boucle d'écoute
-    tourne. Ce battement de cœur permet de savoir si le pont est encore actif.
+    The Lr plugin polls /jobs/pending every 300ms as long as its listen loop
+    is running. This heartbeat is how we know whether the bridge is still active.
     """
     return {
         "connected": job_queue.bridge_connected(),
@@ -67,31 +67,31 @@ def bridge() -> dict:
 
 @app.get("/jobs/pending")
 def jobs_pending() -> Response:
-    """Le plugin récupère le prochain job. 204 (sans corps — RFC) si aucun job."""
-    job_queue.mark_poll()  # battement de cœur du pont
+    """The plugin fetches the next job. 204 (no body — RFC) if there is none."""
+    job_queue.mark_poll()  # bridge heartbeat
     job = job_queue.next_pending()
     if job is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-    # Sérialisation APRÈS le pop (le job est déjà IN_PROGRESS) : en cas d'échec,
-    # marquer le job FAILED et libérer le worker qui l'attend, au lieu de le
-    # laisser pendre jusqu'au TTL 900 s (revue Fable 5 B-02).
+    # Serialization AFTER the pop (the job is already IN_PROGRESS): on failure,
+    # mark the job FAILED and free the worker waiting on it, instead of letting
+    # it hang until the 900s TTL (Fable 5 review B-02).
     try:
         payload = job.model_dump_json()
     except Exception as exc:
         job_queue.submit_result(JobResult(
             job_id=job.job_id, status="error",
-            error=f"payload non sérialisable côté serveur : {exc}",
+            error=f"payload not serializable server-side: {exc}",
         ))
-        raise HTTPException(status_code=500, detail="payload non sérialisable")
+        raise HTTPException(status_code=500, detail="payload not serializable")
     return Response(content=payload, media_type="application/json")
 
 
 @app.post("/shutdown")
 def shutdown() -> dict:
-    """Arrêt du process (GUI + serveur) — utilisé par le plugin pour « Relancer ».
+    """Stops the process (GUI + server) — used by the plugin for "Restart".
 
-    Termine tout le process Python après un court délai, le temps de renvoyer la
-    réponse. Le plugin relance ensuite un process neuf.
+    Terminates the whole Python process after a short delay, long enough to
+    return the response. The plugin then launches a fresh process.
     """
     threading.Timer(0.3, lambda: os._exit(0)).start()
     return {"status": "shutting_down"}
@@ -99,16 +99,16 @@ def shutdown() -> dict:
 
 @app.post("/jobs/{job_id}/result")
 def jobs_result(job_id: str, result: JobResult) -> dict:
-    """Le plugin soumet le résultat d'un job."""
+    """The plugin submits a job's result."""
     if result.job_id != job_id:
         raise HTTPException(
-            status_code=400, detail="job_id du chemin ≠ job_id du corps"
+            status_code=400, detail="path job_id != body job_id"
         )
     if not job_queue.submit_result(result):
-        raise HTTPException(status_code=404, detail="job_id inconnu")
+        raise HTTPException(status_code=404, detail="unknown job_id")
     return {"status": "accepted"}
 
 
-# Serveur MCP monté en dernier (après les routes) : URL http://127.0.0.1:5000/mcp.
-# Les outils MCP partagent le même `job_queue` que les routes ci-dessus.
+# MCP server mounted last (after the routes): URL http://127.0.0.1:5000/mcp.
+# The MCP tools share the same `job_queue` as the routes above.
 app.mount("/mcp", _mcp_app)

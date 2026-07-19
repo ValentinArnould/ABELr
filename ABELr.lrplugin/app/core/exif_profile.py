@@ -1,20 +1,19 @@
-"""Profil créatif boîtier Sony (Creative Style / Creative Look).
+"""Sony camera creative profile (Creative Style / Creative Look).
 
-Le profil créatif choisi au boîtier (Standard, IN, SH, FL, VV, VV2, Neutral…) change
-fortement le rendu du JPEG embarqué **et** biaise les habitudes d'exposition (on
-sous-expose souvent le RAW sous IN/SH pour protéger les hautes lumières du JPEG). Ce
-profil n'est **pas** exposé par le SDK Lightroom ni par LibRaw/rawpy — il vit dans le
-maker note Sony. On le lit via **exiftool** (binaire externe, déjà requis sur la
-machine), hors Lr, directement sur le `.ARW` (comme `raw.read_asshot_wb`).
+The creative profile chosen in-camera (Standard, IN, SH, FL, VV, VV2, Neutral...)
+strongly changes the embedded JPEG's rendering **and** biases exposure habits (RAW
+is often underexposed under IN/SH to protect the JPEG's highlights). This profile
+is **not** exposed by the Lightroom SDK nor by LibRaw/rawpy — it lives in the Sony
+maker note. It is read via **exiftool** (external binary, already required on the
+machine), outside Lr, directly from the `.ARW` (like `raw.read_asshot_wb`).
 
-Tag retenu (prouvé sur ARW ILCE-7M4 réels, plusieurs jeux) : `Sony:CreativeStyle`
-(ex. `Standard`, `SH`, `VV2`). Les tags `SR2DataIFD*:ColorMode` sont une table
-d'énumération statique (toutes les valeurs possibles) — **pas** la valeur réelle, à
-ne pas utiliser.
+Tag used (proven on real ILCE-7M4 ARW files, several batches): `Sony:CreativeStyle`
+(e.g. `Standard`, `SH`, `VV2`). The `SR2DataIFD*:ColorMode` tags are a static
+enumeration table (all possible values) — **not** the actual value, do not use.
 
-Extraction par lot via `-@ argfile` (fichier temporaire UTF-8) : amortit le coût de
-lancement du process sur les séries 500-1000 ET évite la limite argv Windows
-(CreateProcess ~32 767 caractères, dépassée dès ~300 chemins — revue Fable 5 A-01).
+Batch extraction via `-@ argfile` (UTF-8 temp file): amortizes the process launch
+cost over series of 500-1000 AND avoids the Windows argv limit
+(CreateProcess ~32,767 characters, exceeded from ~300 paths onward — Fable 5 review A-01).
 """
 
 from __future__ import annotations
@@ -27,16 +26,16 @@ from pathlib import Path
 
 _log = logging.getLogger("abelr.exif_profile")
 
-# Tag maker note Sony portant le profil créatif effectif de la prise de vue.
+# Sony maker note tag carrying the effective creative profile of the shot.
 _TAG = "-Sony:CreativeStyle"
 
-# N'avertir qu'une fois par process de l'absence d'exiftool (sinon spam sur un lot).
+# Only warn once per process about exiftool being missing (otherwise it spams a batch).
 _missing_warned = False
 
 
 def exiftool_available() -> bool:
-    """True si le binaire `exiftool` répond dans le PATH. Utilisable au démarrage
-    (GUI) pour signaler la dégradation avant de lancer une série."""
+    """True if the `exiftool` binary responds on the PATH. Usable at startup
+    (GUI) to flag the degradation before launching a batch."""
     try:
         subprocess.run(
             ["exiftool", "-ver"], capture_output=True, timeout=10, check=False
@@ -47,44 +46,44 @@ def exiftool_available() -> bool:
 
 
 def _warn_exiftool_missing() -> None:
-    """Avertit UNE fois que le profil créatif sera absent (dégradation silencieuse sinon)."""
+    """Warns ONCE that the creative profile will be missing (otherwise silent degradation)."""
     global _missing_warned
     if _missing_warned:
         return
     _missing_warned = True
     _log.warning(
-        "exiftool introuvable dans le PATH — profil créatif Sony (CreativeStyle) "
-        "indisponible : le matching embedded ignore le profil (qualité dégradée). "
-        "Installer exiftool (https://exiftool.org) et l'ajouter au PATH."
+        "exiftool not found on PATH — Sony creative profile (CreativeStyle) "
+        "unavailable: embedded matching ignores the profile (degraded quality). "
+        "Install exiftool (https://exiftool.org) and add it to PATH."
     )
 
 
 def read_capture_profile(path: str | Path) -> str | None:
-    """Profil créatif boîtier d'un ARW (ex. "Standard"/"SH"/"VV2"), ou None.
+    """Camera creative profile of an ARW (e.g. "Standard"/"SH"/"VV2"), or None.
 
-    None si exiftool est absent, le fichier illisible, ou le tag absent. Robuste :
-    n'exceptionne jamais (le profil est un enrichissement optionnel du matching).
+    None if exiftool is missing, the file is unreadable, or the tag is absent. Robust:
+    never raises (the profile is an optional enrichment of the matching).
     """
     result = read_capture_profiles([str(path)])
     return result.get(str(path))
 
 
 def read_capture_profiles(paths: list[str]) -> dict[str, str | None]:
-    """Lit le profil créatif d'un **lot** de RAW en un seul appel exiftool.
+    """Reads the creative profile of a **batch** of RAW files in a single exiftool call.
 
-    Un seul lancement de process pour tout le lot (le coût de spawn exiftool domine
-    sur les grandes séries). Retourne `{chemin: profil|None}` — tout chemin sans tag
-    lisible est mappé à None. Ne lève jamais.
+    A single process launch for the whole batch (exiftool spawn cost dominates
+    on large series). Returns `{path: profile|None}` — any path without a
+    readable tag is mapped to None. Never raises.
     """
     out: dict[str, str | None] = {p: None for p in paths}
     if not paths:
         return out
 
-    # -s3 : valeur brute (sans nom de tag). -j : JSON avec SourceFile → mapping
-    # fiable même si exiftool réordonne le lot. Chemins passés via argfile `-@`
-    # (un argument par ligne, UTF-8) : pas de limite argv Windows, et
-    # `-charset filename=UTF8` fait lire l'argfile/écrire SourceFile en UTF-8
-    # (chemins accentués FR — A-01/A-02).
+    # -s3: raw value (no tag name). -j: JSON with SourceFile -> reliable
+    # mapping even if exiftool reorders the batch. Paths passed via argfile `-@`
+    # (one argument per line, UTF-8): no Windows argv limit, and
+    # `-charset filename=UTF8` makes it read the argfile/write SourceFile in UTF-8
+    # (accented FR paths — A-01/A-02).
     argfile = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -101,7 +100,7 @@ def read_capture_profiles(paths: list[str]) -> dict[str, str | None]:
             timeout=max(120, len(paths)), check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        _warn_exiftool_missing()  # binaire absent → avertir (une fois), pas de crash
+        _warn_exiftool_missing()  # binary missing -> warn (once), no crash
         return out
     finally:
         if argfile is not None:
@@ -125,8 +124,8 @@ def read_capture_profiles(paths: list[str]) -> dict[str, str | None]:
         style = entry.get("CreativeStyle")
         if src is None:
             continue
-        # exiftool renvoie SourceFile en chemin normalisé (slashes) : re-mapper sur
-        # la clé d'entrée correspondante (comparaison insensible aux séparateurs).
+        # exiftool returns SourceFile as a normalized path (slashes): re-map to
+        # the matching input key (separator-insensitive comparison).
         key = _match_path(src, paths)
         if key is not None and style:
             out[key] = str(style).strip()
@@ -134,12 +133,12 @@ def read_capture_profiles(paths: list[str]) -> dict[str, str | None]:
 
 
 def _match_path(src: str, paths: list[str]) -> str | None:
-    """Retrouve le chemin d'origine correspondant à un `SourceFile` exiftool."""
+    """Finds the original path matching an exiftool `SourceFile`."""
     norm_src = src.replace("\\", "/").casefold()
     for p in paths:
         if p.replace("\\", "/").casefold() == norm_src:
             return p
-    # Repli : comparer sur le nom de fichier seul.
+    # Fallback: compare on the filename alone.
     src_name = Path(src).name.casefold()
     for p in paths:
         if Path(p).name.casefold() == src_name:

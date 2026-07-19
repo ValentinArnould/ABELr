@@ -1,12 +1,12 @@
-"""JPEG embarqué boîtier — prior d'exposition (et look initial).
+"""Embedded camera JPEG — exposure prior (and initial look).
 
-Chaque ARW contient le JPEG rendu **par le boîtier** : c'est l'exposition jugée
-bonne à la prise de vue + le premier look (Creative Look Sony). sRGB display-referred.
-On s'en sert comme **repli de cible d'exposition** quand les seeds manquent (décision
-utilisateur : seeds d'abord, JPEG boîtier ensuite).
+Every ARW contains the JPEG rendered **by the camera body**: it's the exposure
+judged correct at capture time + the initial look (Sony Creative Look). sRGB
+display-referred. Used as an **exposure-target fallback** when seeds are missing
+(user decision: seeds first, camera JPEG second).
 
-Extraction via `raw.load_thumbnail` (LibRaw `extract_thumb`) ; mesure de clarté via
-`render_metrics.tone_stats` (CIE L*, même métrique que le rendu LR → comparable).
+Extracted via `raw.load_thumbnail` (LibRaw `extract_thumb`); lightness measured
+via `render_metrics.tone_stats` (CIE L*, same metric as the LR render → comparable).
 """
 
 from __future__ import annotations
@@ -21,13 +21,14 @@ from . import raw, render_metrics
 from .pipeline import RenderAnalysis
 from .render_metrics import BandStats, ToneStats
 
-# Plafond dur du nombre de process de lecture RAW (anti-gel). Même sur une grosse
-# machine, au-delà la RAM (un interpréteur spawné + buffers par process) explose.
+# Hard cap on the number of RAW-reading processes (anti-freeze). Even on a
+# beefy machine, beyond this RAM (one spawned interpreter + buffers per process)
+# blows up.
 _MAX_RAW_WORKERS = 8
 
 
 def load_embedded_rgb(path: str | Path) -> np.ndarray | None:
-    """RGB uint8 sRGB du JPEG embarqué boîtier, ou None si absent/illisible."""
+    """uint8 sRGB RGB of the embedded camera JPEG, or None if absent/unreadable."""
     try:
         thumb = raw.load_thumbnail(path)
     except Exception:
@@ -41,10 +42,10 @@ def load_embedded_rgb(path: str | Path) -> np.ndarray | None:
 
 
 def embedded_tone(path: str | Path) -> ToneStats | None:
-    """Clarté perçue (CIE L*) du JPEG embarqué boîtier, ou None.
+    """Perceived lightness (CIE L*) of the embedded camera JPEG, or None.
 
-    Même `tone_stats` que sur le rendu LR → la médiane L* est directement comparable
-    à la cible d'exposition. Sert de prior quand peu/pas de seeds.
+    Uses the same `tone_stats` as the LR render → the median L* is directly
+    comparable to the exposure target. Serves as a prior when few/no seeds exist.
     """
     rgb = load_embedded_rgb(path)
     if rgb is None:
@@ -53,24 +54,24 @@ def embedded_tone(path: str | Path) -> ToneStats | None:
 
 
 def embedded_target_l(path: str | Path) -> float | None:
-    """Médiane L* du JPEG boîtier (cible d'exposition de repli), ou None."""
+    """Median L* of the camera JPEG (fallback exposure target), or None."""
     ts = embedded_tone(path)
     return ts.median_l if ts is not None else None
 
 
 # --------------------------------------------------------------------------- #
-# Lecture RAW combinée (UNE ouverture rawpy) + lot parallèle
+# Combined RAW read (ONE rawpy open) + parallel batch
 # --------------------------------------------------------------------------- #
 @dataclass
 class RawReference:
-    """Tout ce qu'on tire d'une photo via UNE ouverture du RAW.
+    """Everything extracted from a photo via ONE RAW open.
 
-    embedded_tone / embedded_bands : mesures du JPEG boîtier zone nette (cibles mode
-                                     embedded ; = `sharp.tone`/`sharp.bands`).
-    asshot_rg / asshot_bg          : WB as-shot (entrée du modèle WB seeds).
-    sharp / glob                   : analyse complète (tone+neutral+bandes) zone nette
-                                     et globale du JPEG boîtier (chemin GPU dual).
-    mask_sharp_frac                : fraction de pixels retenus par le masque net.
+    embedded_tone / embedded_bands: sharp-zone measurements of the camera JPEG
+                                     (embedded-mode targets; = `sharp.tone`/`sharp.bands`).
+    asshot_rg / asshot_bg          : as-shot WB (input to the seeds WB model).
+    sharp / glob                   : full analysis (tone+neutral+bands), sharp zone
+                                     and global, of the camera JPEG (dual GPU path).
+    mask_sharp_frac                : fraction of pixels retained by the sharp mask.
     """
 
     embedded_tone: ToneStats | None
@@ -83,11 +84,11 @@ class RawReference:
 
 
 def read_raw_reference(path: str | Path) -> RawReference:
-    """Ouvre le RAW **une seule fois** → JPEG boîtier (tone+bandes) + WB as-shot.
+    """Opens the RAW **once** → camera JPEG (tone+bands) + as-shot WB.
 
-    Fonction de niveau module → picklable pour `ProcessPoolExecutor`. L'ouverture
-    rawpy (~quelques secondes/photo) est le coût dominant : la faire une fois pour
-    les deux usages, et paralléliser, est le bon levier perf (cf. `read_raw_references`).
+    Module-level function → picklable for `ProcessPoolExecutor`. The rawpy open
+    (~a few seconds/photo) is the dominant cost: doing it once for both uses,
+    and parallelizing, is the right perf lever (see `read_raw_references`).
     """
     import rawpy
 
@@ -120,12 +121,13 @@ def read_raw_reference(path: str | Path) -> RawReference:
 
 
 def _bounded_workers(n_paths: int) -> int:
-    """Nombre de process **borné** pour le lot.
+    """**Bounded** process count for the batch.
 
-    CRITIQUE : `ProcessPoolExecutor(max_workers=None)` lançait `min(32, cpu+4)`
-    process, chacun important rawpy/numpy/cv2 (spawn Windows) + ouvrant un RAW →
-    saturation CPU/RAM = gel du PC. On borne aux **cœurs physiques** (heuristique
-    HT = logiques // 2), plafonné, et jamais plus que le nombre de photos.
+    CRITICAL: `ProcessPoolExecutor(max_workers=None)` used to spawn
+    `min(32, cpu+4)` processes, each importing rawpy/numpy/cv2 (Windows spawn)
+    + opening a RAW → CPU/RAM saturation = PC freeze. We cap at **physical
+    cores** (HT heuristic = logical // 2), capped further, and never more than
+    the number of photos.
     """
     logical = os.cpu_count() or 4
     physical = max(1, logical // 2)
@@ -134,10 +136,10 @@ def _bounded_workers(n_paths: int) -> int:
 
 @dataclass
 class EmbeddedExtract:
-    """Sortie de l'unpack CPU embedded — **picklable**, octets JPEG **non décodés**.
+    """Output of the embedded CPU unpack — **picklable**, JPEG bytes **not decoded**.
 
-    Le décodage du JPEG boîtier est délégué au GPU (nvJPEG). Cet unpack n'ouvre le RAW
-    que pour lire la WB as-shot (métadonnée) et extraire les octets de la miniature.
+    Decoding the camera JPEG is delegated to the GPU (nvJPEG). This unpack only
+    opens the RAW to read the as-shot WB (metadata) and extract the thumbnail bytes.
     """
 
     asshot_rg: float | None
@@ -146,10 +148,10 @@ class EmbeddedExtract:
 
 
 def extract_from_open(r) -> EmbeddedExtract:
-    """EmbeddedExtract depuis un handle rawpy DÉJÀ ouvert.
+    """EmbeddedExtract from an ALREADY-open rawpy handle.
 
-    Extrait pour l'unpack unifié du scheduler (revue Fable 5 P-02) : la même
-    ouverture rawpy sert au bayer (`gpu_raw.bayer_from_open`) ET au JPEG boîtier.
+    Extracted for the scheduler's unified unpack (Fable 5 review P-02): the same
+    rawpy open serves both the bayer (`gpu_raw.bayer_from_open`) AND the camera JPEG.
     """
     import rawpy
 
@@ -164,11 +166,11 @@ def extract_from_open(r) -> EmbeddedExtract:
 
 
 def extract_reference(path: str) -> EmbeddedExtract:
-    """Ouvre le RAW (CPU) → WB as-shot + **octets** du JPEG boîtier (sans décoder).
+    """Opens the RAW (CPU) → as-shot WB + camera JPEG **bytes** (undecoded).
 
-    Pendant CPU de `read_raw_reference` pour le pipeline GPU : le demosaic/décodage
-    pixel n'est pas fait ici, seulement l'I/O conteneur (irréductible, LibRaw). Le JPEG
-    sera décodé par lot sur GPU (`gpu_jpeg`). Picklable (niveau module).
+    CPU stage of `read_raw_reference` for the GPU pipeline: pixel demosaic/decode
+    is not done here, only the container I/O (irreducible, LibRaw). The JPEG will
+    be decoded in a batch on GPU (`gpu_jpeg`). Picklable (module level).
     """
     import rawpy
 
@@ -182,12 +184,12 @@ def extract_reference(path: str) -> EmbeddedExtract:
 def read_raw_references(
     paths: list[str], max_workers: int | None = None
 ) -> dict[str, RawReference]:
-    """Lit en **parallèle borné** les références RAW d'un lot de chemins.
+    """Reads RAW references for a batch of paths in **bounded parallel**.
 
-    LibRaw libère le GIL et chaque ouverture est indépendante → scaling quasi-linéaire
-    sur les cœurs physiques. `max_workers=None` → borne sûre (`_bounded_workers`, JAMAIS
-    32, cf. le gel). Renvoie {chemin: RawReference}. Replie en séquentiel si le pool
-    échoue (ex. environnement sans spawn).
+    LibRaw releases the GIL and each open is independent → near-linear scaling
+    across physical cores. `max_workers=None` → safe bound (`_bounded_workers`,
+    NEVER 32, see the freeze note). Returns {path: RawReference}. Falls back to
+    sequential if the pool fails (e.g. an environment without spawn support).
     """
     if not paths:
         return {}

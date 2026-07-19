@@ -1,18 +1,18 @@
-"""Matching k-NN sur seeds — remplace `regime.py` côté app live (`wb_model.py`
-reste live : `refine_temp_tint` raffine Temp/Tint après le k-NN, cf. autocorrect).
+"""k-NN matching on seeds — replaces `regime.py` on the live app side (`wb_model.py`
+stays live: `refine_temp_tint` refines Temp/Tint after the k-NN, cf. autocorrect).
 
-Au lieu d'une régression physique (pente boîtier r/g → Temperature) ou d'un
-recalage purement render-space, on cherche pour chaque photo cible les **seeds**
-(marqués explicitement par l'utilisateur, `cache.is_seed`) dont l'analyse RAW
-(zone nette, `core.sharpness`) est la plus proche, et on utilise **leur** aperçu
-rendu (`PreviewJPEG`, déjà retouché par l'utilisateur — la référence de style
-voulue) comme cible pour les axes Exposition/WB/HSL.
+Instead of a physical regression (camera slope r/g → Temperature) or a purely
+render-space recalibration, for each target photo we look for the **seeds**
+(explicitly marked by the user, `cache.is_seed`) whose RAW analysis (sharp zone,
+`core.sharpness`) is closest, and use **their** rendered preview (`PreviewJPEG`,
+already retouched by the user — the desired style reference) as the target for
+the Exposure/WB/HSL axes.
 
-`exposure.py`/`hsl.py`/`autocorrect.py` consomment `target_from_seeds(...)` pour
-obtenir une cible (ToneStats + bandes + Temperature/Tint) à comparer à l'état
-**courant**, mesuré frais (hash vérifié) par le caller — c'est ce hash-check
-côté caller qui garantit qu'on ne recompound jamais un delta sur une mesure
-périmée (cf. CLAUDE.md / plan de refonte).
+`exposure.py`/`hsl.py`/`autocorrect.py` consume `target_from_seeds(...)` to get
+a target (ToneStats + bands + Temperature/Tint) to compare against the
+**current** state, freshly measured (hash-checked) by the caller — it's this
+hash-check on the caller side that guarantees we never recompound a delta on a
+stale measurement (cf. CLAUDE.md / refactor plan).
 """
 
 from __future__ import annotations
@@ -26,11 +26,11 @@ from .render_metrics import BandStats, ToneStats, band_is_reliable
 K_MAX = 3
 
 
-# Étalonnage caméra (panneau "Calibration caméra") : 7 réglages plats, transplantés
-# tels quels depuis les seeds (comme Temperature/Tint) — pas de mesure/inversion
-# possible, ce sont des réglages créatifs sans cible objective côté rendu.
-# Note : "RedHue"/"GreenHue"/"BlueHue" sont des curseurs linéaires -100..100 (pas
-# un angle de teinte) → moyenne pondérée classique, pas de moyenne circulaire.
+# Camera Calibration (the "Camera Calibration" panel): 7 flat settings, transplanted
+# as-is from the seeds (like Temperature/Tint) — no measurement/inversion possible,
+# these are creative settings with no objective target on the render side.
+# Note: "RedHue"/"GreenHue"/"BlueHue" are linear -100..100 sliders (not a hue
+# angle) → classic weighted average, not circular averaging.
 CALIB_FIELDS = (
     "shadow_tint",
     "red_hue", "red_saturation",
@@ -44,14 +44,14 @@ class SeedVector:
     photo_id: str
     asshot_rg: float | None
     asshot_bg: float | None
-    raw_median_l: float | None              # ToneStats.median_l du RAW (zone nette)
-    temperature: float | None               # Temperature retouchée par l'utilisateur
+    raw_median_l: float | None              # ToneStats.median_l of the RAW (sharp zone)
+    temperature: float | None               # Temperature retouched by the user
     tint: float | None
-    preview_tone: ToneStats | None          # PreviewJPEG du seed (cible expo)
-    preview_bands: list[BandStats] | None   # PreviewJPEG du seed (cible HSL)
-    profile_capture: str | None = None      # profil créatif boîtier (filtre de groupe)
-    ev100: float | None = None              # contexte scène (non utilisé dans la distance)
-    shadow_tint: float | None = None        # Étalonnage — cf. CALIB_FIELDS
+    preview_tone: ToneStats | None          # seed's PreviewJPEG (exposure target)
+    preview_bands: list[BandStats] | None   # seed's PreviewJPEG (HSL target)
+    profile_capture: str | None = None      # camera creative profile (group filter)
+    ev100: float | None = None              # scene context (not used in the distance)
+    shadow_tint: float | None = None        # Calibration — cf. CALIB_FIELDS
     red_hue: float | None = None
     red_saturation: float | None = None
     green_hue: float | None = None
@@ -62,8 +62,8 @@ class SeedVector:
 
 @dataclass
 class SeedTarget:
-    """Cible agrégée depuis les k seeds les plus proches (ou un seed unique si
-    correspondance quasi exacte)."""
+    """Target aggregated from the k nearest seeds (or a single seed if the match
+    is near-exact)."""
 
     temperature: float | None
     tint: float | None
@@ -92,9 +92,9 @@ def _f(dev: dict, key: str, default: float | None = None) -> float | None:
 
 
 def build_seed_vector(conn, uuid: str) -> SeedVector | None:
-    """Construit le vecteur d'un seed depuis le cache (sans vérif de fraîcheur —
-    cf. `cache.get_source_raw_latest`). `None` si l'analyse RAW manque (le seed
-    n'est pas encore passé par "Analyser sélection")."""
+    """Builds a seed's vector from the cache (no freshness check —
+    cf. `cache.get_source_raw_latest`). `None` if the RAW analysis is missing
+    (the seed hasn't gone through "Analyze selection" yet)."""
     sr = cachemod.get_source_raw_latest(conn, uuid)
     if sr is None or sr["asshot_rg"] is None:
         return None
@@ -124,7 +124,7 @@ def build_seed_vector(conn, uuid: str) -> SeedVector | None:
 
 
 def build_seed_pool(conn) -> list[SeedVector]:
-    """Tous les seeds exploitables du catalogue (analyse RAW présente)."""
+    """All usable seeds in the catalog (RAW analysis present)."""
     out = []
     for uuid in cachemod.list_seed_uuids(conn):
         v = build_seed_vector(conn, uuid)
@@ -134,8 +134,8 @@ def build_seed_pool(conn) -> list[SeedVector]:
 
 
 def _distance(target: SeedVector, seed: SeedVector, scale: dict[str, float]) -> float:
-    """Distance euclidienne normalisée (z-score) sur (asshot_rg, asshot_bg, raw_median_l).
-    Une feature manquante d'un côté ou de l'autre est ignorée (pas de pénalité)."""
+    """Normalized Euclidean distance (z-score) over (asshot_rg, asshot_bg, raw_median_l).
+    A feature missing on either side is ignored (no penalty)."""
     acc = 0.0
     for key in ("asshot_rg", "asshot_bg", "raw_median_l"):
         tv, sv = getattr(target, key), getattr(seed, key)
@@ -147,9 +147,9 @@ def _distance(target: SeedVector, seed: SeedVector, scale: dict[str, float]) -> 
 
 
 def _feature_scale(seeds: list[SeedVector]) -> dict[str, float]:
-    """Écart-type (par feature) du pool de seeds — normalise la distance euclidienne
-    pour que des features d'échelles très différentes (rg/bg ~0.1-3, L* ~0-100)
-    pèsent comparablement."""
+    """Standard deviation (per feature) of the seed pool — normalizes the Euclidean
+    distance so that features on very different scales (rg/bg ~0.1-3, L* ~0-100)
+    weigh comparably."""
     scale: dict[str, float] = {}
     for key in ("asshot_rg", "asshot_bg", "raw_median_l"):
         vals = [getattr(s, key) for s in seeds if getattr(s, key) is not None]
@@ -165,14 +165,14 @@ def _feature_scale(seeds: list[SeedVector]) -> dict[str, float]:
 def k_nearest(
     target: SeedVector, seeds: list[SeedVector], k: int | None = None
 ) -> list[tuple[SeedVector, float]]:
-    """Les k seeds les plus proches de `target` (hors target lui-même).
+    """The k seeds closest to `target` (excluding target itself).
 
-    `k` par défaut = `min(K_MAX, max(1, n_seeds // 2))`. Si le plus proche est à
-    une distance quasi nulle (correspondance exacte), ne renvoie que celui-là.
+    `k` defaults to `min(K_MAX, max(1, n_seeds // 2))`. If the closest one is at
+    a near-zero distance (exact match), only that one is returned.
 
-    Intention du `pool // 2` (revue Fable 5 A-07) : sur un petit pool (3-5 seeds),
-    moyenner la moitié du pool diluerait la cible avec des seeds éloignés — k=3
-    n'est donc atteint qu'à partir de 6 seeds, et c'est voulu.
+    Intent behind the `pool // 2` (Fable 5 review A-07): on a small pool (3-5
+    seeds), averaging half the pool would dilute the target with distant seeds
+    — so k=3 is only reached from 6 seeds onward, and that's intentional.
     """
     pool = [s for s in seeds if s.photo_id != target.photo_id]
     if not pool:
@@ -196,7 +196,7 @@ def _circular_mean_deg(values: list[float]) -> float:
 
 
 def _weighted(values: list[tuple[float, float]]) -> float | None:
-    """Moyenne pondérée `[(valeur, poids), ...]`. None si rien d'exploitable."""
+    """Weighted average `[(value, weight), ...]`. None if nothing usable."""
     total_w = sum(w for _, w in values)
     if total_w <= 0:
         return None
@@ -241,21 +241,21 @@ def _weighted_bands(matches: list[tuple[SeedVector, float]]) -> list[BandStats] 
     return out
 
 
-# Divergence max tolérée (points curseur, échelle -100..100) entre les k seeds
-# matchés sur un même champ Étalonnage avant de refuser la moyenne pondérée et
-# de replier sur le seed le plus proche (cf. PLAN.md C2 — un `RedHue` +30 chez un
-# seed et -20 chez un autre ne doit pas produire une moyenne qui ne correspond à
-# aucun seed réel). Valeur provisoire choisie dans le même ordre de grandeur que
-# les gardes de correction existantes (`hsl._MAX_SAT=25`) faute de données seeds
-# réelles conflictuelles pour la trancher (cf. C3, non tranché).
+# Maximum tolerated divergence (slider points, -100..100 scale) between the k
+# seeds matched on the same Calibration field before refusing the weighted
+# average and falling back to the nearest seed (cf. PLAN.md C2 — a `RedHue` of
+# +30 on one seed and -20 on another shouldn't produce an average that matches
+# no real seed). Provisional value chosen in the same order of magnitude as the
+# existing correction guards (`hsl._MAX_SAT=25`), for lack of real conflicting
+# seed data to settle it (cf. C3, unresolved).
 _CALIB_SPREAD_MAX = 25.0
 
 
 def _weighted_calib_field(matches: list[tuple[SeedVector, float]], field: str) -> float | None:
-    """Moyenne pondérée d'un champ Étalonnage — sauf si les seeds matchés
-    divergent trop sur ce champ (`_CALIB_SPREAD_MAX`), auquel cas on replie sur
-    la valeur du seed le plus proche en distance plutôt que de moyenner à
-    l'aveugle (cf. PLAN.md C2)."""
+    """Weighted average of a Calibration field — unless the matched seeds diverge
+    too much on that field (`_CALIB_SPREAD_MAX`), in which case we fall back to
+    the value of the nearest seed by distance rather than averaging blindly
+    (cf. PLAN.md C2)."""
     items = [(m, d) for m, d in matches if getattr(m, field) is not None]
     if not items:
         return None
@@ -267,7 +267,7 @@ def _weighted_calib_field(matches: list[tuple[SeedVector, float]], field: str) -
 
 
 def target_from_seeds(matches: list[tuple[SeedVector, float]]) -> SeedTarget | None:
-    """Agrège les seeds matchés (pondération 1/distance) en une cible unique."""
+    """Aggregates the matched seeds (1/distance weighting) into a single target."""
     if not matches:
         return None
     temps = [(m.temperature, 1.0 / (d + 1e-6)) for m, d in matches if m.temperature is not None]
@@ -290,13 +290,15 @@ def target_from_seeds(matches: list[tuple[SeedVector, float]]) -> SeedTarget | N
 
 
 def _filter_by_profile(target: SeedVector, seeds: list[SeedVector]) -> list[SeedVector]:
-    """Restreint le pool aux seeds du **même profil créatif** que la cible, si possible.
+    """Restricts the pool to seeds sharing the **same creative profile** as the
+    target, if possible.
 
-    Le profil créatif boîtier (Standard/IN/SH/VV2…) corrèle avec le style de retouche
-    et le biais d'exposition (cf. sous-expo volontaire sous IN/SH). Matcher dans le même
-    groupe évite de transférer une cible d'un autre régime. **Filtre doux** : si la
-    cible n'a pas de profil, ou qu'aucun seed ne le partage, on garde le pool complet
-    (jamais de pool vide → pas de régression sur les petits jeux de seeds)."""
+    The camera creative profile (Standard/IN/SH/VV2…) correlates with editing
+    style and exposure bias (cf. intentional under-exposure under IN/SH).
+    Matching within the same group avoids transferring a target from a
+    different regime. **Soft filter**: if the target has no profile, or no
+    seed shares it, the full pool is kept (never an empty pool → no
+    regression on small seed sets)."""
     if target.profile_capture is None:
         return seeds
     same = [s for s in seeds if s.profile_capture == target.profile_capture]
@@ -310,6 +312,6 @@ def match_target(
     *,
     profile_aware: bool = True,
 ) -> SeedTarget | None:
-    """Raccourci : (filtre profil doux) + k plus proches + agrégation en une cible."""
+    """Shortcut: (soft profile filter) + k nearest + aggregation into a single target."""
     pool = _filter_by_profile(target, seeds) if profile_aware else seeds
     return target_from_seeds(k_nearest(target, pool, k))

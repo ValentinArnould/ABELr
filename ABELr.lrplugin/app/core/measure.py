@@ -1,19 +1,19 @@
-"""Sélection du canal de mesure du **rendu** (output-referred).
+"""Selection of the **render** (output-referred) measurement channel.
 
-Trois canaux, choisis par fiabilité/rapidité (décision utilisateur) :
+Three channels, chosen for reliability/speed (user decision):
 
-1. **requestJpegThumbnail** (job plugin `get_thumbnails` / `render_probe`) — rendu Lr
-   frais, écrit en JPEG sur disque par le plugin. Reflète les réglages courants (ou
-   sondés). Canal **prioritaire** ; c'est aussi le seul qui permet de SONDER la réponse.
-2. **Previews.lrdata** (`previews.PreviewIndex`) — aperçu rendu déjà en cache. Gratuit,
-   rapide, mais peut être périmé/absent. Repli passif.
-3. **LrExportSession** — export plein rendu, lent/coûteux. Dernier recours (non câblé
-   ici ; à activer côté plugin si le canal 1 s'avère renvoyer un cache périmé).
+1. **requestJpegThumbnail** (plugin job `get_thumbnails` / `render_probe`) — fresh Lr
+   render, written as JPEG to disk by the plugin. Reflects the current (or probed)
+   settings. **Priority** channel; also the only one that lets us PROBE the response.
+2. **Previews.lrdata** (`previews.PreviewIndex`) — already-cached rendered preview. Free,
+   fast, but may be stale/absent. Passive fallback.
+3. **LrExportSession** — full render export, slow/costly. Last resort (not wired
+   here; to be enabled on the plugin side if channel 1 turns out to return a stale cache).
 
-Ce module est **côté App** : il ne soumet pas de job lui-même (ça vit dans les workers
-GUI via la queue). Il reçoit les entrées disponibles (un chemin de miniature déjà rendue
-et/ou un `PreviewIndex`) et renvoie le meilleur RGB rendu décodé, prêt pour `render_metrics`.
-Le décodage réutilise `previews.decode_rendered_preview` (gère JPEG brut et en-tête `.lrfprev`).
+This module is **App-side**: it doesn't submit a job itself (that lives in the GUI
+workers via the queue). It receives the available inputs (a path to an already-rendered
+thumbnail and/or a `PreviewIndex`) and returns the best decoded rendered RGB, ready for `render_metrics`.
+Decoding reuses `previews.decode_rendered_preview` (handles raw JPEG and the `.lrfprev` header).
 """
 
 from __future__ import annotations
@@ -28,17 +28,17 @@ from .previews import PreviewIndex
 
 
 class RenderChannel(str, Enum):
-    THUMBNAIL = "thumbnail"   # requestJpegThumbnail (frais, prioritaire)
-    PREVIEW = "preview"       # Previews.lrdata (repli passif)
-    EXPORT = "export"         # LrExportSession (dernier recours, non câblé)
-    NONE = "none"             # aucun rendu disponible
+    THUMBNAIL = "thumbnail"   # requestJpegThumbnail (fresh, priority)
+    PREVIEW = "preview"       # Previews.lrdata (passive fallback)
+    EXPORT = "export"         # LrExportSession (last resort, not wired)
+    NONE = "none"             # no render available
 
 
 def decode_jpeg_file(path: str | Path) -> np.ndarray:
-    """Décode un JPEG rendu (miniature plugin ou fichier Previews.lrdata) en RGB uint8.
+    """Decodes a rendered JPEG (plugin thumbnail or Previews.lrdata file) into RGB uint8.
 
-    Délègue à `previews.decode_rendered_preview` : gère le JPEG brut (offset 0) comme
-    le conteneur `.lrfprev` (en-tête `AgHg`, recherche du marqueur SOI).
+    Delegates to `previews.decode_rendered_preview`: handles both raw JPEG (offset 0) and
+    the `.lrfprev` container (header `AgHg`, looks for the SOI marker).
     """
     return previews.decode_rendered_preview(path)
 
@@ -49,11 +49,11 @@ def resolve_render_path(
     preview_index: PreviewIndex | None = None,
     id_global: str | None = None,
 ) -> tuple[Path | None, RenderChannel]:
-    """Localise le **fichier** de rendu (sans décoder) selon la priorité de canal.
+    """Locates the render **file** (without decoding) following channel priority.
 
-    Pendant de `load_rendered` pour le pipeline **GPU** : on veut le chemin (pour en
-    lire les octets et décoder sur GPU via nvJPEG), pas un array décodé CPU.
-    Priorité : miniature fraîche (plugin) → aperçu Previews.lrdata → None.
+    Counterpart to `load_rendered` for the **GPU** pipeline: we want the path (to
+    read its bytes and decode on GPU via nvJPEG), not a CPU-decoded array.
+    Priority: fresh thumbnail (plugin) → Previews.lrdata preview → None.
     """
     if thumbnail_path is not None and Path(thumbnail_path).is_file():
         return Path(thumbnail_path), RenderChannel.THUMBNAIL
@@ -70,25 +70,25 @@ def load_rendered(
     preview_index: PreviewIndex | None = None,
     id_global: str | None = None,
 ) -> tuple[np.ndarray | None, RenderChannel]:
-    """Retourne (RGB uint8 rendu, canal utilisé) selon ce qui est disponible.
+    """Returns (rendered RGB uint8, channel used) based on what's available.
 
-    Priorité : miniature fraîche (plugin) → aperçu Previews.lrdata (passif) → rien.
-    Le caller fournit `thumbnail_path` s'il a déjà fait rendre la photo par le plugin
-    (job `get_thumbnails`/`render_probe`), et/ou un `PreviewIndex` + `id_global` pour
-    le repli passif.
+    Priority: fresh thumbnail (plugin) → Previews.lrdata preview (passive) → nothing.
+    The caller supplies `thumbnail_path` if it already had the plugin render the photo
+    (job `get_thumbnails`/`render_probe`), and/or a `PreviewIndex` + `id_global` for
+    the passive fallback.
     """
-    # 1. Miniature fraîche écrite par le plugin (canal prioritaire).
+    # 1. Fresh thumbnail written by the plugin (priority channel).
     if thumbnail_path is not None and Path(thumbnail_path).is_file():
         try:
             return decode_jpeg_file(thumbnail_path), RenderChannel.THUMBNAIL
         except ValueError:
-            pass  # fichier illisible → on tente le repli
+            pass  # unreadable file → try the fallback
 
-    # 2. Aperçu rendu déjà en cache (repli passif).
+    # 2. Already-cached rendered preview (passive fallback).
     if preview_index is not None and id_global:
         rgb = preview_index.load_rendered(id_global)
         if rgb is not None:
             return rgb, RenderChannel.PREVIEW
 
-    # 3. LrExportSession : dernier recours, non câblé ici.
+    # 3. LrExportSession: last resort, not wired here.
     return None, RenderChannel.NONE

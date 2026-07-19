@@ -1,14 +1,14 @@
-"""Masque de « zone nette » — restreint les mesures d'histogramme au sujet net.
+"""'Sharp zone' mask — restricts histogram measurements to the in-focus subject.
 
-Un Laplacien (filtre passe-haut) mesure la netteté locale ; les zones de flou
-(bokeh, mouvement, hors-profondeur de champ) ont une magnitude proche de zéro.
-On garde le **top `SHARP_TOP_FRACTION`** des pixels les plus nets — c'est sur
-cette zone que `render_metrics`/`render_metrics_gpu` calculent tone/neutral/
-bandes, pour que l'histogramme reflète le sujet plutôt qu'un arrière-plan flou.
+A Laplacian (high-pass filter) measures local sharpness; blurred areas (bokeh,
+motion, out of depth-of-field) have a magnitude close to zero. We keep the
+**top `SHARP_TOP_FRACTION`** sharpest pixels — `render_metrics`/`render_metrics_gpu`
+compute tone/neutral/bands over this zone, so the histogram reflects the subject
+rather than a blurred background.
 
-Deux implémentations identiques (même formule, même seuil) :
-- `sharp_mask` : numpy, utilisée par les scripts `tools/` (CPU).
-- `sharp_mask_gpu` : torch CUDA, utilisée par le chemin live GPU-strict.
+Two identical implementations (same formula, same threshold):
+- `sharp_mask`: numpy, used by the `tools/` scripts (CPU).
+- `sharp_mask_gpu`: torch CUDA, used by the live GPU-strict path.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ import numpy as np
 if TYPE_CHECKING:
     import torch
 
-SHARP_TOP_FRACTION = 0.25  # top 25% des pixels les plus nets retenus
+SHARP_TOP_FRACTION = 0.25  # top 25% sharpest pixels retained
 
 
 def _laplacian_magnitude(luma: np.ndarray) -> np.ndarray:
-    """|Laplacien| (4*centre - voisins N/S/E/O) sur une carte de luminance HxW."""
+    """|Laplacian| (4*center - N/S/E/W neighbors) over an HxW luminance map."""
     p = np.pad(luma, 1, mode="edge")
     lap = (
         4.0 * p[1:-1, 1:-1]
@@ -37,11 +37,11 @@ def _laplacian_magnitude(luma: np.ndarray) -> np.ndarray:
 
 
 def sharp_mask(luma: np.ndarray, top_fraction: float = SHARP_TOP_FRACTION) -> np.ndarray:
-    """Masque bool HxW : True = pixel parmi les `top_fraction` les plus nets.
+    """Bool mask HxW: True = pixel among the `top_fraction` sharpest.
 
-    `luma` : carte 2D (L* CIELAB pour un rendu sRGB, ou Y linéaire pour un RAW).
-    Si l'image est uniforme (magnitude nulle partout), tout est retenu (pas de
-    zone nette identifiable → ne pas restreindre).
+    `luma`: 2D map (CIELAB L* for an sRGB render, or linear Y for a RAW).
+    If the image is uniform (magnitude zero everywhere), everything is kept (no
+    identifiable sharp zone → don't restrict).
     """
     mag = _laplacian_magnitude(luma.astype(np.float32))
     if not np.any(mag > 0):
@@ -51,7 +51,7 @@ def sharp_mask(luma: np.ndarray, top_fraction: float = SHARP_TOP_FRACTION) -> np
 
 
 def sharp_mask_gpu(luma: torch.Tensor, top_fraction: float = SHARP_TOP_FRACTION) -> torch.Tensor:
-    """Équivalent CUDA de `sharp_mask`. `luma` : tenseur 2D (H, W) float sur GPU."""
+    """CUDA equivalent of `sharp_mask`. `luma`: 2D tensor (H, W) float on GPU."""
     import torch
 
     p = torch.nn.functional.pad(luma.float()[None, None], (1, 1, 1, 1), mode="replicate")[0, 0]
@@ -60,8 +60,8 @@ def sharp_mask_gpu(luma: torch.Tensor, top_fraction: float = SHARP_TOP_FRACTION)
     if not torch.any(mag > 0):
         return torch.ones_like(luma, dtype=torch.bool)
     flat = mag.reshape(-1)
-    # torch.quantile borne le nombre d'éléments (~16M) — sous-échantillonne au-delà
-    # (même pattern que render_metrics_gpu._q ; un grand rendu/RAW dépasse vite ce seuil).
+    # torch.quantile caps the number of elements (~16M) — subsample beyond that
+    # (same pattern as render_metrics_gpu._q; a large render/RAW quickly exceeds this).
     if flat.numel() > 8_000_000:
         flat = flat[:: (flat.numel() // 8_000_000 + 1)]
     threshold = torch.quantile(flat, 1.0 - top_fraction)

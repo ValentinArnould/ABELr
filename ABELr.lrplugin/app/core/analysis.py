@@ -1,16 +1,16 @@
-"""Analyse exposition / balance des blancs (numpy).
+"""Exposure / white balance analysis (numpy).
 
-Deux sources d'entrée :
-- **RAW ProPhoto linéaire** : `exposure_stats` / `gray_world_wb` — source physique,
-  float32 produit par `image_source.load_for_analysis`. Indépendant du style appliqué.
-- **Preview JPEG rendue** : `analyze_preview_jpeg` — rendu Lr (profil + presets cuits),
-  sRGB display-referred u8. Encode le résultat visuel réel. Meilleure corrélation avec
-  l'exposition choisie par l'utilisateur (r=0.937 sur vérité terrain n=10, vs 0.914 RAW).
-  WB masquée sur tons moyens (validée sur previews exposées — invalide à expo ≈ 0).
+Two input sources:
+- **Linear ProPhoto RAW**: `exposure_stats` / `gray_world_wb` — physical source,
+  float32 produced by `image_source.load_for_analysis`. Independent of the applied style.
+- **Rendered JPEG preview**: `analyze_preview_jpeg` — Lr render (profile + presets baked in),
+  sRGB display-referred u8. Encodes the actual visual result. Better correlation with
+  the exposure chosen by the user (r=0.937 on n=10 ground truth, vs 0.914 for RAW).
+  WB masked on mid-tones (validated on exposed previews — invalid at exposure ≈ 0).
 
-Consommé par `gui.autocorrect_worker` (`ev100`, `ExposureStats`) et par la parité
-GPU (`core.gpu_raw` réutilise les seuils de clipping). Le calcul des corrections
-vit dans `core.seed_match` / `core.wb_model` / `core.autocorrect`.
+Consumed by `gui.autocorrect_worker` (`ev100`, `ExposureStats`) and by GPU parity
+(`core.gpu_raw` reuses the clipping thresholds). Correction computation lives in
+`core.seed_match` / `core.wb_model` / `core.autocorrect`.
 """
 
 from __future__ import annotations
@@ -23,27 +23,27 @@ import numpy as np
 
 from . import color
 
-# Seuils de clipping en **linéaire** (0-1). Hautes lumières : un canal quasi saturé.
-# Ombres : luminance quasi nulle. Réglables selon le rendu visé.
+# Clipping thresholds in **linear** (0-1). Highlights: a channel nearly saturated.
+# Shadows: near-zero luminance. Adjustable depending on the target render.
 _HIGHLIGHT_CLIP = 0.99
 _SHADOW_CLIP = 0.0008
 
 
 @dataclass
 class ExposureStats:
-    """Métriques d'exposition d'une image (échelle **linéaire 0-1**)."""
+    """Exposure metrics of an image (**linear 0-1** scale)."""
 
-    mean_luma: float           # luminance Y moyenne (linéaire)
-    median_luma: float         # luminance Y médiane (linéaire)
-    clipped_highlights: float  # fraction de pixels à canal ≥ 0.99
-    clipped_shadows: float     # fraction de pixels à luminance ≤ 0.0008
+    mean_luma: float           # mean Y luminance (linear)
+    median_luma: float         # median Y luminance (linear)
+    clipped_highlights: float  # fraction of pixels with a channel ≥ 0.99
+    clipped_shadows: float     # fraction of pixels with luminance ≤ 0.0008
 
 
 def exposure_stats(rgb: np.ndarray) -> ExposureStats:
-    """Métriques d'exposition d'un RGB ProPhoto linéaire.
+    """Exposure metrics of a linear ProPhoto RGB.
 
-    Luminance via Y de XYZ (exacte, indépendante du gamut). Le clipping hautes
-    lumières est détecté par canal (un seul canal saturé suffit), les ombres sur Y.
+    Luminance via XYZ's Y (exact, gamut-independent). Highlight clipping is
+    detected per channel (a single saturated channel is enough), shadows on Y.
     """
     luma = color.luminance(rgb)
     total = luma.size
@@ -56,17 +56,17 @@ def exposure_stats(rgb: np.ndarray) -> ExposureStats:
 
 
 def parse_shutter_seconds(shutter: str | float | None) -> float | None:
-    """Convertit une vitesse d'obturation EXIF en secondes.
+    """Converts an EXIF shutter speed into seconds.
 
-    Accepte `"1/200"`, `"0.5"`, `"1\""` (parfois formaté par le SDK Lr) ou un float.
-    Retourne None si non interprétable.
+    Accepts `"1/200"`, `"0.5"`, `"1\""` (sometimes formatted by the Lr SDK) or a float.
+    Returns None if not interpretable.
     """
     if shutter is None:
         return None
     if isinstance(shutter, (int, float)):
         return float(shutter) if shutter > 0 else None
-    # Lr localisé FR formate les poses lentes avec une virgule (« 0,4 s ») —
-    # normaliser avant float() (revue Fable 5 A-03).
+    # French-localized Lr formats slow shutter speeds with a comma ("0,4 s") —
+    # normalize before float() (Fable 5 review A-03).
     s = str(shutter).strip().rstrip('"s ').strip().replace(",", ".")
     try:
         if "/" in s:
@@ -84,13 +84,13 @@ def ev100(
     aperture: float | None,
     shutter: str | float | None,
 ) -> float | None:
-    """Exposure Value normalisé ISO 100 depuis le triangle d'exposition EXIF.
+    """Exposure Value normalized to ISO 100 from the EXIF exposure triangle.
 
-    `EV100 = log2(aperture² / t) - log2(ISO/100)` où `t` = temps de pose (s).
-    Mesure la lumière ambiante de la scène **indépendamment** des pixels — sert de
-    contexte scène (plein soleil ≈ 15-16, intérieur ≈ 5-8, nuit < 3) pour le matching
-    k-NN et pour interpréter un biais de sous-exposition volontaire. None si une
-    donnée manque ou est invalide.
+    `EV100 = log2(aperture² / t) - log2(ISO/100)` where `t` = exposure time (s).
+    Measures the scene's ambient light **independently** of the pixels — serves as
+    scene context (bright sun ≈ 15-16, indoor ≈ 5-8, night < 3) for the k-NN
+    matching and to interpret a deliberate underexposure bias. None if some
+    data is missing or invalid.
     """
     t = parse_shutter_seconds(shutter)
     if not iso or not aperture or aperture <= 0 or t is None or t <= 0 or iso <= 0:
@@ -101,12 +101,12 @@ def ev100(
 
 
 def gray_world_wb(rgb: np.ndarray) -> tuple[float, float]:
-    """Estimation balance des blancs gray-world, sur RGB **linéaire**.
+    """Gray-world white balance estimate, on **linear** RGB.
 
-    Hypothèse gray-world : en moyenne la scène est neutre. Retourne
-    (gain_g_sur_r, gain_g_sur_b) — le cast résiduel par rapport au gris, base pour
-    suggérer Temperature/Tint. L'entrée doit être linéaire (sinon biais gamma) et
-    en gamut large (sinon biais d'écrêtage des couleurs saturées).
+    Gray-world hypothesis: on average the scene is neutral. Returns
+    (g_over_r_gain, g_over_b_gain) — the residual cast relative to gray, basis for
+    suggesting Temperature/Tint. Input must be linear (otherwise gamma bias) and
+    in a wide gamut (otherwise clipping bias on saturated colors).
     """
     rgb_f = rgb.astype(np.float32) + 1e-9
     mean_r = rgb_f[..., 0].mean()
@@ -115,19 +115,19 @@ def gray_world_wb(rgb: np.ndarray) -> tuple[float, float]:
     return float(mean_g / mean_r), float(mean_g / mean_b)
 
 
-# Poids luma Rec.709 (sRGB display) — utilisés sur les previews JPEG.
+# Rec.709 luma weights (sRGB display) — used on JPEG previews.
 _REC709 = np.array([0.2126, 0.7152, 0.0722], np.float32)
 
 
 @dataclass
 class PreviewStats:
-    """Métriques d'une preview JPEG rendue (espace display sRGB).
+    """Metrics of a rendered JPEG preview (sRGB display space).
 
-    disp_median / disp_mean : luma display gamma-encodée (0-1, perceptuelle).
-    lin_median / lin_mean   : luma linéarisée (sRGB → linéaire, plus proche du signal).
-    mid_frac                : fraction de pixels de tons moyens (lin 0.05-0.6 → WB fiable).
-    gw_rg / gw_bg           : gray-world g/r, g/b sur tons moyens masqués.
-                              Invalide si mid_frac < 0.02 (photo trop sombre → expo d'abord).
+    disp_median / disp_mean : gamma-encoded display luma (0-1, perceptual).
+    lin_median / lin_mean   : linearized luma (sRGB → linear, closer to the signal).
+    mid_frac                : fraction of mid-tone pixels (lin 0.05-0.6 → reliable WB).
+    gw_rg / gw_bg           : gray-world g/r, g/b on masked mid-tones.
+                              Invalid if mid_frac < 0.02 (photo too dark → exposure first).
     """
 
     disp_median: float
@@ -140,61 +140,61 @@ class PreviewStats:
 
 
 def _srgb_u8_to_linear(u8: np.ndarray) -> np.ndarray:
-    """sRGB uint8 → float32 linéaire [0, 1] (courbe de transfert inverse sRGB)."""
+    """sRGB uint8 → linear float32 [0, 1] (inverse sRGB transfer curve)."""
     x = u8.astype(np.float32) / 255.0
     a = 0.055
     return np.where(x <= 0.04045, x / 12.92, ((x + a) / (1.0 + a)) ** 2.4)
 
 
 def analyze_preview_jpeg(path: str | Path) -> PreviewStats:
-    """Analyse une preview JPEG rendue par Lr : exposition + WB masquée tons moyens.
+    """Analyzes a JPEG preview rendered by Lr: exposure + mid-tone-masked WB.
 
-    La preview est sRGB display-referred (profil + presets cuits) → encode le rendu
-    visuel réel, indépendant du RAW source. Meilleure corrélation avec l'exposition
-    choisie par l'utilisateur que le RAW seul (r=0.937 vs 0.914, n=10).
+    The preview is sRGB display-referred (profile + presets baked in) → encodes the
+    actual visual render, independent of the source RAW. Better correlation with the
+    exposure chosen by the user than RAW alone (r=0.937 vs 0.914, n=10).
 
-    **Ordre obligatoire** : toujours appeler APRÈS une correction d'exposition correcte.
-    À expo ≈ 0 sur photos sombres (nuit), mid_frac peut être < 2% → gw_rg/bg non fiables
-    (gray-world explose sur pixels noirs). Le champ `mid_frac` permet de détecter ce cas.
+    **Mandatory order**: always call AFTER a correct exposure correction.
+    At exposure ≈ 0 on dark photos (night), mid_frac can be < 2% → gw_rg/bg unreliable
+    (gray-world blows up on black pixels). The `mid_frac` field lets you detect this case.
 
-    Accepte deux types de fichiers :
-    - Fichier `.jpg` standard (miniature de requestJpegThumbnail) → décodé directement.
-    - Fichier preview Lr sans extension (`Previews.lrdata`) → SOI-seeking pour l'en-tête
-      AgHg (même logique que `previews.decode_rendered_preview`).
+    Accepts two file types:
+    - Standard `.jpg` file (requestJpegThumbnail thumbnail) → decoded directly.
+    - Extensionless Lr preview file (`Previews.lrdata`) → SOI-seeking for the AgHg
+      header (same logic as `previews.decode_rendered_preview`).
 
-    Lève ValueError si le fichier n'existe pas ou ne se décode pas.
+    Raises ValueError if the file doesn't exist or fails to decode.
     """
     import cv2
 
     _JPEG_SOI = b"\xff\xd8\xff"
     p = Path(path)
     if not p.exists():
-        raise ValueError(f"Preview introuvable : {p}")
+        raise ValueError(f"Preview not found: {p}")
 
-    # Lecture brute + détection du flux JPEG (gère l'en-tête AgHg des .lrfprev
-    # et les fichiers sans extension de Previews.lrdata, comme cv2.imread ne
-    # peut pas les identifier par extension).
+    # Raw read + JPEG stream detection (handles the AgHg header of .lrfprev
+    # files and the extensionless files of Previews.lrdata, since cv2.imread
+    # can't identify them by extension).
     data = p.read_bytes()
     start = 0 if data[:3] == _JPEG_SOI else data.find(_JPEG_SOI)
     if start == -1:
-        raise ValueError(f"Aucun flux JPEG dans {p}")
+        raise ValueError(f"No JPEG stream in {p}")
     arr = np.frombuffer(data, np.uint8, offset=start)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
-        raise ValueError(f"Décodage JPEG échoué : {p}")
+        raise ValueError(f"JPEG decoding failed: {p}")
     rgb = img[:, :, ::-1]  # BGR → RGB uint8
 
     lin = _srgb_u8_to_linear(rgb)
     disp_luma = (rgb.astype(np.float32) / 255.0) @ _REC709
     lin_luma = lin @ _REC709
 
-    # Masque tons moyens (linéaire 0.05–0.6) pour gray-world fiable.
+    # Mid-tone mask (linear 0.05-0.6) for reliable gray-world.
     mid = (lin_luma > 0.05) & (lin_luma < 0.6)
     mid_frac = float(mid.mean())
     if mid_frac >= 0.02:
         sub = lin[mid]
     else:
-        # Repli : pixels les plus lumineux (au moins quelque chose à mesurer).
+        # Fallback: brightest pixels (at least something to measure).
         thresh = float(np.percentile(lin_luma, 80))
         sub = lin[lin_luma > thresh]
 

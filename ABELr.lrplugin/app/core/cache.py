@@ -1,36 +1,38 @@
-"""Cache SQLite des analyses/calculs — évite de re-décoder à chaque opération.
+"""SQLite cache for analyses/computations — avoids re-decoding on every operation.
 
-Un fichier `ABELr_cache.db` est créé **dans le dossier du catalogue actif**
-(à côté du `.lrcat`, cf. `catalog.resolve_catalog`). Il est alimenté par tous les
-calculs pixel : les opérations consultent d'abord le cache et ne re-décodent (GPU)
-que les éléments manquants ou dont le contenu a changé.
+A `ABELr_cache.db` file is created **in the active catalog's folder**
+(next to the `.lrcat`, cf. `catalog.resolve_catalog`). It is fed by all
+pixel computations: operations check the cache first and only re-decode (GPU)
+items that are missing or whose content has changed.
 
-Cinq tables, **clé commune `uuid`** (= `id_global` du catalogue Lr) :
+Five tables, **common key `uuid`** (= the Lr catalog's `id_global`):
 
-| Table                | Source décodée              | Clé de fraîcheur (`hash_*`)        |
-|----------------------|-----------------------------|------------------------------------|
-| `LightroomPicture`   | métadonnées catalogue       | `hash_develop` (réglages develop)  |
-| `SourceRAW`          | pixels RAW (.ARW)           | `hash_raw` (taille+mtime du RAW)   |
-| `InCameraJPEG`       | JPEG boîtier embarqué       | `hash_jpeg` = signature du RAW (le JPEG vit dedans) |
-| `PreviewJPEG`        | aperçu rendu Lr             | `hash_preview` = signature du fichier source |
-| `NeutralPreviewJPEG` | rendu neutre (As Shot/Exp0) | `hash_style` (sous-ensemble style) |
+| Table                | Decoded source                | Freshness key (`hash_*`)           |
+|----------------------|--------------------------------|------------------------------------|
+| `LightroomPicture`   | catalog metadata               | `hash_develop` (develop settings)  |
+| `SourceRAW`          | RAW pixels (.ARW)               | `hash_raw` (RAW size+mtime)        |
+| `InCameraJPEG`       | embedded in-camera JPEG        | `hash_jpeg` = RAW signature (the JPEG lives inside it) |
+| `PreviewJPEG`        | Lr-rendered preview            | `hash_preview` = source file signature |
+| `NeutralPreviewJPEG` | neutral render (As Shot/Exp0)  | `hash_style` (style subset)         |
 
-`hash_jpeg`/`hash_preview` = `raw_signature` (taille:mtime salée), PAS un sha1 des
-octets (revue Fable 5 DB-02 — l'ancienne doc décrivait un mécanisme inexistant).
+`hash_jpeg`/`hash_preview` = `raw_signature` (salted size:mtime), NOT a sha1 of
+the bytes (Fable 5 review DB-02 — the old doc described a mechanism that never
+existed).
 
-**Nomenclature unifiée des colonnes** (on ignore la rétrocompatibilité) :
-famille en préfixe (`luma_`/`wb_`/`tone_`/`neutral_`/`hsl_`/`delta_`/`mask_`/
-`exif_`/`profile_`/`hash_`), **portée en suffixe** `_global`/`_sharp` (jamais nue).
-Les mesures existent en paire **global** (frame entier) + **sharp** (zone nette,
-`core.sharpness`) partout où c'est pertinent — le delta global↔sharp révèle
-contre-jour / cast fond≠sujet, et le global sert de repli si le masque net dégénère.
+**Unified column naming** (backward compatibility is not a goal):
+family as prefix (`luma_`/`wb_`/`tone_`/`neutral_`/`hsl_`/`delta_`/`mask_`/
+`exif_`/`profile_`/`hash_`), **scope as suffix** `_global`/`_sharp` (never bare).
+Measurements exist in pairs, **global** (whole frame) + **sharp** (sharp zone,
+`core.sharpness`) wherever relevant — the global↔sharp delta reveals
+backlight / background≠subject color cast, and global is the fallback if the
+sharp mask degenerates.
 
-Contrôle de version par `PRAGMA user_version` : si le schéma stocké ne correspond
-pas à `SCHEMA_VERSION`, toutes les tables sont **supprimées et recréées** (pas de
-migration ligne à ligne — le cache est reconstruit depuis les RAW).
+Version control via `PRAGMA user_version`: if the stored schema doesn't match
+`SCHEMA_VERSION`, all tables are **dropped and recreated** (no row-by-row
+migration — the cache is rebuilt from the RAWs).
 
-SQLite standard en lecture-écriture (WAL) — cohabite avec le `.lrcat` ouvert par
-Lightroom (fichier distinct, aucun verrou sur le catalogue).
+Standard read-write SQLite (WAL) — coexists with the `.lrcat` Lightroom has
+open (separate file, no lock on the catalog).
 """
 
 from __future__ import annotations
@@ -49,37 +51,37 @@ from .render_metrics import BandStats, NeutralStats, ToneStats
 
 CACHE_FILENAME = "ABELr_cache.db"
 
-# Version du **schéma** (structure des tables). Un changement de structure
-# déclenche un DROP+recreate via `PRAGMA user_version`.
+# **Schema** version (table structure). A structure change
+# triggers a DROP+recreate via `PRAGMA user_version`.
 SCHEMA_VERSION = 4
 
-# Salée dans les hash de fraîcheur (`raw_signature`, `style_hash`) :
-# un changement d'algorithme de mesure (nouvelles paires global/sharp, deltas…)
-# doit invalider tout le contenu caché sans migration — bump quand le calcul change.
-ANALYSIS_VERSION = "v6-calib-style-keys"  # bump : ajout clés Étalonnage à _STYLE_KEYS (axe "calib")
+# Salted into the freshness hashes (`raw_signature`, `style_hash`):
+# a change in the measurement algorithm (new global/sharp pairs, deltas…)
+# must invalidate all cached content without migration — bump when the computation changes.
+ANALYSIS_VERSION = "v6-calib-style-keys"  # bump: added Calibration keys to _STYLE_KEYS (the "calib" axis)
 
-# Sous-ensemble "style" des réglages develop = tout ce qui affecte le rendu NEUTRE
-# (probe `render_probe` : WB As Shot + Exposure2012=0 + **HSL 24 à zéro**, le reste
-# intact). Clé de fraîcheur du NeutralPreview (`hash_style`).
+# "Style" subset of develop settings = everything that affects the NEUTRAL render
+# (`render_probe` probe: WB As Shot + Exposure2012=0 + **HSL 24 zeroed**, everything
+# else intact). Freshness key for NeutralPreview (`hash_style`).
 #
-# - Les 24 clés HSL sont **exclues** : le probe les neutralise, donc un Apply HSL
-#   ne doit PAS invalider l'ancre (sinon re-probe complet à chaque cycle).
-# - Les réglages de ton (Contrast/Highlights/…/Dehaze/Vibrance/Saturation) et le
-#   crop sont **inclus** : ils ne sont pas neutralisés par le probe et changent le
-#   rendu neutre — sans eux l'ancre serait périmée silencieusement.
-# - Temp/Tint/Exposure restent hors clé (neutralisés par le probe).
+# - The 24 HSL keys are **excluded**: the probe neutralizes them, so an HSL Apply
+#   must NOT invalidate the anchor (otherwise a full re-probe on every cycle).
+# - Tone settings (Contrast/Highlights/…/Dehaze/Vibrance/Saturation) and the
+#   crop are **included**: they are not neutralized by the probe and do change
+#   the neutral render — without them the anchor would go stale silently.
+# - Temp/Tint/Exposure stay out of the key (neutralized by the probe).
 _STYLE_KEYS = (
     "CameraProfile", "ProcessVersion",
     "Contrast2012", "Highlights2012", "Shadows2012", "Whites2012", "Blacks2012",
     "Clarity2012", "Dehaze", "Vibrance", "Saturation", "Texture",
     "CropLeft", "CropRight", "CropTop", "CropBottom", "CropAngle",
-    # Étalonnage caméra : ni WB/Expo/HSL, pas neutralisé par le probe → change le
-    # rendu neutre, doit invalider l'ancre (axe "calib", transplant k-NN).
+    # Camera calibration: not WB/Expo/HSL, not neutralized by the probe → changes
+    # the neutral render, must invalidate the anchor (the "calib" axis, k-NN transplant).
     "EnableCalibration", "ShadowTint",
     "RedHue", "RedSaturation", "GreenHue", "GreenSaturation", "BlueHue", "BlueSaturation",
-    # Color Grading — noms SDK hybrides (revue Fable 5 DB-01) : ombres/HL Hue+Sat
-    # = SplitToning*, le reste ColorGrade*. Les anciens noms ColorGradeShadowHue…
-    # n'existent pas dans le SDK et ne matchaient jamais.
+    # Color Grading — hybrid SDK names (Fable 5 review DB-01): shadows/HL Hue+Sat
+    # = SplitToning*, everything else ColorGrade*. The old ColorGradeShadowHue…
+    # names don't exist in the SDK and never matched anything.
     "SplitToningShadowHue", "SplitToningShadowSaturation",
     "SplitToningHighlightHue", "SplitToningHighlightSaturation",
     "SplitToningBalance",
@@ -87,7 +89,7 @@ _STYLE_KEYS = (
     "ColorGradeMidtoneHue", "ColorGradeMidtoneSat", "ColorGradeMidtoneLum",
     "ColorGradeGlobalHue", "ColorGradeGlobalSat", "ColorGradeGlobalLum",
     "ColorGradeBlending",
-    # Courbes : paramétrique + points (tables JSON), non neutralisées par le probe.
+    # Curves: parametric + point tables (JSON), not neutralized by the probe.
     "ParametricShadows", "ParametricDarks", "ParametricLights", "ParametricHighlights",
     "ParametricShadowSplit", "ParametricMidtoneSplit", "ParametricHighlightSplit",
     "ToneCurveName2012", "ToneCurvePV2012",
@@ -96,19 +98,19 @@ _STYLE_KEYS = (
 
 
 # --------------------------------------------------------------------------- #
-# Localisation + connexion
+# Location + connection
 # --------------------------------------------------------------------------- #
 def cache_path_for_catalog(catalog_path: str | Path) -> Path:
-    """Chemin du `.db` cache : même dossier que le `.lrcat`."""
+    """Path of the cache `.db`: same folder as the `.lrcat`."""
     return Path(catalog_path).parent / CACHE_FILENAME
 
 
 def open_cache(catalog_path: str | Path) -> sqlite3.Connection:
-    """Ouvre (crée si besoin) le cache en lecture-écriture et garantit le schéma.
+    """Opens (creates if needed) the cache read-write and ensures the schema.
 
-    WAL + `synchronous=NORMAL` : écritures rapides, robustes au crash, sans bloquer
-    les lectures. `check_same_thread=False` car le GUI et ses workers (QThread)
-    peuvent y accéder ; chaque accès reste sérialisé par SQLite.
+    WAL + `synchronous=NORMAL`: fast writes, crash-robust, without blocking
+    reads. `check_same_thread=False` because the GUI and its workers (QThread)
+    may access it; each access stays serialized by SQLite.
     """
     db = cache_path_for_catalog(catalog_path)
     conn = sqlite3.connect(str(db), check_same_thread=False)
@@ -126,11 +128,11 @@ _TABLES = (
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Crée le schéma ; DROP+recreate si `user_version` ≠ `SCHEMA_VERSION`.
+    """Creates the schema; DROP+recreate if `user_version` ≠ `SCHEMA_VERSION`.
 
-    On abandonne la migration incrémentale : le cache étant intégralement
-    reconstruit depuis les RAW/JPEG, un changement de structure jette et recrée
-    les tables (bien plus simple et sûr qu'une suite d'`ALTER`).
+    Incremental migration is not used: since the cache is fully rebuilt from
+    the RAW/JPEG files, a structure change drops and recreates the tables
+    (much simpler and safer than a series of `ALTER`s).
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version != SCHEMA_VERSION:
@@ -140,7 +142,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.commit()
     else:
-        _init_schema(conn)  # CREATE IF NOT EXISTS — no-op si déjà présent
+        _init_schema(conn)  # CREATE IF NOT EXISTS — no-op if already present
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -155,11 +157,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             exif_aperture     REAL,
             exif_shutter      TEXT,
             exif_focal_length REAL,
-            profile_capture   TEXT,      -- profil créatif boîtier (IN/SH/ST/VV2…)
-            profile_dcp       TEXT,      -- CameraProfile Lr, extrait à plat
-            develop_json      TEXT,      -- JSON snapshot develop courant
+            profile_capture   TEXT,      -- in-camera creative profile (IN/SH/ST/VV2…)
+            profile_dcp       TEXT,      -- Lr CameraProfile, extracted flat
+            develop_json      TEXT,      -- JSON snapshot of current develop settings
             hash_develop      TEXT,
-            hash_style        TEXT,      -- sous-ensemble style (cf. _STYLE_KEYS)
+            hash_style        TEXT,      -- style subset (cf. _STYLE_KEYS)
             is_seed           INTEGER DEFAULT 0,
             cached_at         REAL
         );
@@ -184,8 +186,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             mask_sharp_frac        REAL,
             ev100                  REAL,
             profile_capture        TEXT,
-            tone_sharp             TEXT,  -- JSON ToneStats (zone nette)
-            hsl_sharp              TEXT,  -- JSON list[BandStats] (zone nette)
+            tone_sharp             TEXT,  -- JSON ToneStats (sharp zone)
+            hsl_sharp              TEXT,  -- JSON list[BandStats] (sharp zone)
             cached_at              REAL
         );
 
@@ -200,10 +202,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             hsl_global        TEXT,
             mask_sharp_frac   REAL,
             profile_capture   TEXT,
-            delta_luma_median REAL,   -- vs SourceRAW.luma_median_sharp (même uuid)
+            delta_luma_median REAL,   -- vs SourceRAW.luma_median_sharp (same uuid)
             delta_wb_cast_a   REAL,
             delta_wb_cast_b   REAL,
-            delta_hsl         TEXT,   -- JSON list de deltas par bande
+            delta_hsl         TEXT,   -- JSON list of per-band deltas
             cached_at         REAL
         );
 
@@ -230,8 +232,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             neutral_global  TEXT,
             hsl_global      TEXT,
             mask_sharp_frac REAL,
-            wb_asshot_temp  REAL,   -- Temperature numérique lue après WhiteBalance='As Shot'
-            wb_asshot_tint  REAL,   -- Tint numérique idem (base d'une correction WB absolue)
+            wb_asshot_temp  REAL,   -- numeric Temperature read after WhiteBalance='As Shot'
+            wb_asshot_tint  REAL,   -- numeric Tint likewise (basis for an absolute WB correction)
             cached_at       REAL
         );
 
@@ -243,35 +245,36 @@ def _init_schema(conn: sqlite3.Connection) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Hash de fraîcheur — « le contenu de l'élément a-t-il changé ? »
+# Freshness hash — "has the item's content changed?"
 # --------------------------------------------------------------------------- #
 def raw_signature(path: str | Path) -> str:
-    """Signature rapide d'un fichier RAW : `taille:mtime_ns` (pas de relecture).
+    """Quick signature of a RAW file: `size:mtime_ns` (no re-read).
 
-    Suffisant pour détecter une réécriture du `.ARW` ; bien plus rapide qu'un
-    sha256 du fichier entier (~50 Mo). Retourne `"0:0"` si le fichier est absent.
+    Enough to detect a rewrite of the `.ARW`; much faster than a sha256 of
+    the whole file (~50 MB). Returns `"0:0"` if the file is missing.
     """
     p = Path(path)
     try:
         st = p.stat()
         return f"{st.st_size}:{st.st_mtime_ns}:{ANALYSIS_VERSION}"
     except OSError:
-        # Repli salé lui aussi (revue Fable 5 DB-04) : jamais écrit en base en
-        # pratique (le décodage échoue avant), mais pas de collision inter-versions.
+        # The fallback is salted too (Fable 5 review DB-04): never actually
+        # written to the database in practice (decoding fails first), but no
+        # cross-version collision.
         return f"0:0:{ANALYSIS_VERSION}"
 
 
 def develop_hash(develop: dict[str, Any] | None) -> str:
-    """Hash stable d'un dict de réglages develop (détecte une retouche manuelle)."""
+    """Stable hash of a develop-settings dict (detects a manual edit)."""
     payload = json.dumps(develop or {}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def style_hash(develop: dict[str, Any] | None) -> str:
-    """Hash du sous-ensemble **style** des réglages (cf. `_STYLE_KEYS`).
+    """Hash of the **style** subset of the settings (cf. `_STYLE_KEYS`).
 
-    Clé de fraîcheur du rendu neutre : ne change que si le profil DCP / HSL /
-    Color Grading change — insensible à Temp/Tint/Exposure (qu'on neutralise).
+    Freshness key for the neutral render: only changes if the DCP profile / HSL /
+    Color Grading changes — insensitive to Temp/Tint/Exposure (which we neutralize).
     """
     dev = develop or {}
     subset = {k: dev[k] for k in _STYLE_KEYS if k in dev}
@@ -280,7 +283,7 @@ def style_hash(develop: dict[str, Any] | None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# (dé)sérialisation des dataclasses ↔ JSON
+# dataclass (de)serialization ↔ JSON
 # --------------------------------------------------------------------------- #
 def _tone_to_json(t: ToneStats | None) -> str | None:
     return json.dumps(asdict(t)) if t is not None else None
@@ -307,7 +310,7 @@ def _bands_from_json(s: str | None) -> list[BandStats] | None:
 
 
 def _analysis_from_row(row: sqlite3.Row, scope: str) -> RenderAnalysis | None:
-    """Reconstruit une RenderAnalysis depuis les colonnes `tone_<scope>` etc."""
+    """Rebuilds a RenderAnalysis from the `tone_<scope>` columns etc."""
     tone = _tone_from_json(row[f"tone_{scope}"])
     neutral = _neutral_from_json(row[f"neutral_{scope}"])
     bands = _bands_from_json(row[f"hsl_{scope}"])
@@ -317,7 +320,7 @@ def _analysis_from_row(row: sqlite3.Row, scope: str) -> RenderAnalysis | None:
 
 
 # --------------------------------------------------------------------------- #
-# LightroomPicture (ancre)
+# LightroomPicture (anchor)
 # --------------------------------------------------------------------------- #
 def put_picture(
     conn: sqlite3.Connection,
@@ -330,15 +333,15 @@ def put_picture(
     profile_capture: str | None = None,
     commit: bool = True,
 ) -> None:
-    """Insère/MAJ la ligne d'ancrage (métadonnées + snapshot develop).
+    """Inserts/updates the anchor row (metadata + develop snapshot).
 
-    UPSERT (pas `INSERT OR REPLACE`) : préserve `is_seed`, sinon chaque réanalyse
-    écraserait le marquage seed avec la valeur par défaut. `profile_dcp` et
-    `hash_style` sont dérivés du snapshot develop.
+    UPSERT (not `INSERT OR REPLACE`): preserves `is_seed`, otherwise every
+    re-analysis would overwrite the seed marking with the default value.
+    `profile_dcp` and `hash_style` are derived from the develop snapshot.
 
-    `commit=False` : l'appelant regroupe plusieurs écritures dans une transaction
-    et committe lui-même (revue Fable 5 P-07/DB-03 — un commit par boucle gelait
-    le GUI et payait ~1 500 commits par run).
+    `commit=False`: the caller batches several writes into one transaction
+    and commits itself (Fable 5 review P-07/DB-03 — one commit per loop
+    iteration froze the GUI and cost ~1,500 commits per run).
     """
     exif = exif or {}
     dev = current_develop or {}
@@ -369,10 +372,10 @@ def put_picture(
 
 
 # --------------------------------------------------------------------------- #
-# Seeds — marquage explicite (remplace l'heuristique WhiteBalance=="Custom")
+# Seeds — explicit marking (replaces the WhiteBalance=="Custom" heuristic)
 # --------------------------------------------------------------------------- #
 def set_seed(conn: sqlite3.Connection, uuid: str, value: bool, commit: bool = True) -> None:
-    """Marque/démarque une photo comme seed. Crée la ligne d'ancrage si absente."""
+    """Marks/unmarks a photo as a seed. Creates the anchor row if missing."""
     conn.execute(
         "INSERT INTO LightroomPicture (uuid, is_seed, cached_at) VALUES (?,?,?) "
         "ON CONFLICT(uuid) DO UPDATE SET is_seed=excluded.is_seed",
@@ -395,7 +398,7 @@ def list_seed_uuids(conn: sqlite3.Connection) -> list[str]:
 
 
 def get_picture(conn: sqlite3.Connection, uuid: str) -> Optional[dict[str, Any]]:
-    """Ligne `LightroomPicture` (path, current_develop, is_seed…), sans contrôle de fraîcheur."""
+    """`LightroomPicture` row (path, current_develop, is_seed…), no freshness check."""
     row = conn.execute("SELECT * FROM LightroomPicture WHERE uuid=?", (uuid,)).fetchone()
     if row is None:
         return None
@@ -408,10 +411,10 @@ def get_picture(conn: sqlite3.Connection, uuid: str) -> Optional[dict[str, Any]]
 
 
 def get_source_raw_latest(conn: sqlite3.Connection, uuid: str) -> Optional[dict[str, Any]]:
-    """Dernière analyse RAW connue pour `uuid`, **sans vérifier le hash de fraîcheur**.
+    """Latest known RAW analysis for `uuid`, **without checking the freshness hash**.
 
-    Utilisé pour les seeds (vecteur k-NN) : le RAW d'un seed change rarement après
-    son marquage, et exiger une réanalyse à chaque correspondance serait coûteux.
+    Used for seeds (k-NN vector): a seed's RAW rarely changes after it's
+    marked, and requiring a re-analysis on every match would be costly.
     """
     row = conn.execute(
         "SELECT * FROM SourceRAW WHERE uuid=?", (uuid,)
@@ -420,8 +423,8 @@ def get_source_raw_latest(conn: sqlite3.Connection, uuid: str) -> Optional[dict[
 
 
 def get_preview_jpeg_latest(conn: sqlite3.Connection, uuid: str) -> Optional[RenderAnalysis]:
-    """Dernier aperçu rendu connu pour `uuid` (zone nette), sans vérifier le hash
-    de fraîcheur (référence de style d'un seed — cf. `get_source_raw_latest`)."""
+    """Latest known rendered preview for `uuid` (sharp zone), without checking the
+    freshness hash (a seed's style reference — cf. `get_source_raw_latest`)."""
     row = conn.execute(
         "SELECT * FROM PreviewJPEG WHERE uuid=?", (uuid,)
     ).fetchone()
@@ -429,14 +432,14 @@ def get_preview_jpeg_latest(conn: sqlite3.Connection, uuid: str) -> Optional[Ren
 
 
 # --------------------------------------------------------------------------- #
-# SourceRAW (pixels RAW : expo + as-shot WB + gray-world, global + zone nette)
+# SourceRAW (RAW pixels: exposure + as-shot WB + gray-world, global + sharp zone)
 # --------------------------------------------------------------------------- #
 def _source_raw_dict(row: sqlite3.Row) -> dict[str, Any]:
-    """Mappe une ligne SourceRAW → dict consommateur.
+    """Maps a SourceRAW row → consumer dict.
 
-    Clés **stables** pour les consommateurs existants (`seed_match`, worker) :
+    Keys **stable** for existing consumers (`seed_match`, worker):
     `asshot_rg`/`asshot_bg`/`tone`/`bands`/`exposure`/`grayworld_rg`/`grayworld_bg`
-    (= mesures globales, comportement historique) + clés `*_sharp` neuves.
+    (= global measurements, historical behavior) + new `*_sharp` keys.
     """
     exposure_global = (
         ExposureStats(
@@ -470,7 +473,7 @@ def _source_raw_dict(row: sqlite3.Row) -> dict[str, Any]:
 def get_source_raw(
     conn: sqlite3.Connection, uuid: str, hash_raw: str
 ) -> Optional[dict[str, Any]]:
-    """Renvoie les scalaires RAW cachés si le `hash_raw` correspond, sinon None."""
+    """Returns the cached RAW scalars if `hash_raw` matches, otherwise None."""
     row = conn.execute(
         "SELECT * FROM SourceRAW WHERE uuid=? AND hash_raw=?", (uuid, hash_raw)
     ).fetchone()
@@ -495,8 +498,8 @@ def put_source_raw(
     bands: list[BandStats] | None = None,
     commit: bool = True,
 ) -> None:
-    """Écrit la ligne SourceRAW (paires global + zone nette). Tous les champs de
-    mesure sont optionnels (l'autocorrect peut n'écrire que la WB as-shot)."""
+    """Writes the SourceRAW row (global + sharp-zone pairs). All measurement
+    fields are optional (autocorrect may write only the as-shot WB)."""
     gg = grayworld_global or (None, None)
     gs = grayworld_sharp or (None, None)
     conn.execute(
@@ -528,7 +531,7 @@ def put_source_raw(
 
 
 # --------------------------------------------------------------------------- #
-# InCameraJPEG (JPEG boîtier : tone/neutral/bandes global + sharp + deltas vs RAW)
+# InCameraJPEG (in-camera JPEG: tone/neutral/bands global + sharp + deltas vs RAW)
 # --------------------------------------------------------------------------- #
 def _delta_bands_to_json(deltas: list[dict[str, Any]] | None) -> str | None:
     return json.dumps(deltas) if deltas is not None else None
@@ -537,11 +540,11 @@ def _delta_bands_to_json(deltas: list[dict[str, Any]] | None) -> str | None:
 def get_in_camera_jpeg(
     conn: sqlite3.Connection, uuid: str, hash_jpeg: str
 ) -> Optional[dict[str, Any]]:
-    """Ligne InCameraJPEG cachée si `hash_jpeg` correspond, sinon None.
+    """Cached InCameraJPEG row if `hash_jpeg` matches, otherwise None.
 
-    Retourne un dict : `sharp`/`global` (RenderAnalysis), deltas, `mask_sharp_frac`,
-    `profile_capture`. La clé `tone`/`bands` (zone nette) est aussi exposée pour les
-    consommateurs qui n'utilisent que la cible embedded.
+    Returns a dict: `sharp`/`global` (RenderAnalysis), deltas, `mask_sharp_frac`,
+    `profile_capture`. The `tone`/`bands` key (sharp zone) is also exposed for
+    consumers that only use the embedded target.
     """
     row = conn.execute(
         "SELECT * FROM InCameraJPEG WHERE uuid=? AND hash_jpeg=?", (uuid, hash_jpeg)
@@ -602,7 +605,7 @@ def put_in_camera_jpeg(
 
 
 # --------------------------------------------------------------------------- #
-# PreviewJPEG / NeutralPreviewJPEG (rendus : analyse complète global + sharp)
+# PreviewJPEG / NeutralPreviewJPEG (renders: full global + sharp analysis)
 # --------------------------------------------------------------------------- #
 def _put_render_dual(
     conn: sqlite3.Connection,
@@ -638,7 +641,7 @@ def _put_render_dual(
 def get_preview_jpeg(
     conn: sqlite3.Connection, uuid: str, hash_preview: str
 ) -> Optional[RenderAnalysis]:
-    """Aperçu rendu (zone nette) si `hash_preview` correspond, sinon None."""
+    """Rendered preview (sharp zone) if `hash_preview` matches, otherwise None."""
     row = conn.execute(
         "SELECT * FROM PreviewJPEG WHERE uuid=? AND hash_preview=?", (uuid, hash_preview)
     ).fetchone()
@@ -662,10 +665,10 @@ def put_preview_jpeg(
 def get_neutral_preview(
     conn: sqlite3.Connection, uuid: str, hash_style: str
 ) -> Optional[dict[str, Any]]:
-    """Rendu neutre (WB As Shot / Exp 0 / HSL 0, style intact) si `hash_style` correspond.
+    """Neutral render (WB As Shot / Exp 0 / HSL 0, style intact) if `hash_style` matches.
 
-    Retourne un dict : `sharp`/`glob` (RenderAnalysis), `asshot_temp`/`asshot_tint`
-    (WB numérique de l'As Shot, lue par le plugin pendant le probe), `mask_sharp_frac`.
+    Returns a dict: `sharp`/`glob` (RenderAnalysis), `asshot_temp`/`asshot_tint`
+    (the As Shot's numeric WB, read by the plugin during the probe), `mask_sharp_frac`.
     """
     row = conn.execute(
         "SELECT * FROM NeutralPreviewJPEG WHERE uuid=? AND hash_style=?", (uuid, hash_style)

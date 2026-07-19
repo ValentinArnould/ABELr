@@ -1,24 +1,24 @@
-"""Contexte GPU/CPU — sélection de device, budget VRAM, pool de streams.
+"""GPU/CPU context — device selection, VRAM budget, stream pool.
 
-Politique projet (mise à jour — décision utilisateur) : **GPU prioritaire, fallback
-CPU si aucun GPU CUDA utilisable**. Historiquement ce module imposait un GPU-strict
-(`require_cuda()` levait plutôt que de retomber sur le CPU) ; l'objectif de faire
-tourner le plugin sur des machines sans NVIDIA a fait lever cette contrainte. Ce
-module centralise la décision :
+Project policy (updated — user decision): **GPU-first, CPU fallback if no usable
+CUDA GPU is present**. Historically this module enforced GPU-strict behavior
+(`require_cuda()` raised instead of falling back to CPU); the goal of running the
+plugin on machines without an NVIDIA GPU led to lifting that constraint. This
+module centralizes the decision:
 
-- `device()` renvoie `cuda` si disponible, sinon `cpu` — **jamais d'exception** ;
-  tout le reste du pipeline (`gpu_raw`, `gpu_jpeg`, `render_metrics_gpu`,
-  `gpu_schedule`) route son device par cet appel, donc bascule automatiquement.
-- `require_cuda()` reste disponible pour les usages qui veulent explicitement
-  exiger CUDA (outils de calibration/parité GPU) — ce n'est plus le chemin par défaut.
-- `vram_budget_bytes()` expose la VRAM disponible pour le scheduler en vagues
-  (`gpu_schedule`) si GPU, ou un plafond RAM fixe conservateur si CPU.
-- `streams()` fournit un pool de `torch.cuda.Stream` (GPU uniquement) pour recouvrir
-  upload H2D et calcul ("multithread GPU").
+- `device()` returns `cuda` if available, otherwise `cpu` — **never raises**;
+  the rest of the pipeline (`gpu_raw`, `gpu_jpeg`, `render_metrics_gpu`,
+  `gpu_schedule`) routes its device through this call, so it switches automatically.
+- `require_cuda()` remains available for call sites that explicitly want to
+  require CUDA (calibration/GPU-parity tools) — it is no longer the default path.
+- `vram_budget_bytes()` exposes the VRAM available to the wave scheduler
+  (`gpu_schedule`) on GPU, or a conservative fixed RAM cap on CPU.
+- `streams()` provides a pool of `torch.cuda.Stream` (GPU only) to overlap
+  H2D upload with compute ("GPU multithreading").
 
-Le seul travail CPU **irréductible** même en présence d'un GPU (cf. `gpu_raw`) est
-l'unpack/décompression du conteneur ARW par LibRaw : aucun codec GPU n'existe pour
-l'ARW Sony.
+The only CPU work that stays **irreducible** even with a GPU present (see
+`gpu_raw`) is unpacking/decompressing the ARW container via LibRaw: no GPU codec
+exists for Sony ARW.
 """
 
 from __future__ import annotations
@@ -29,75 +29,75 @@ import torch
 
 
 class GpuUnavailable(RuntimeError):
-    """Levée par `require_cuda()` quand un GPU CUDA est explicitement exigé mais absent."""
+    """Raised by `require_cuda()` when a CUDA GPU is explicitly required but absent."""
 
 
-# Seul le SUCCÈS est mémoïsé (revue Fable 5 C-02) : un échec d'init transitoire
-# (OOM au lancement, driver occupé) mémorisé par lru_cache condamnait le process
-# jusqu'au redémarrage alors que le GPU était revenu.
+# Only SUCCESS is memoized (Fable 5 review C-02): a transient init failure
+# (OOM at startup, driver busy) memoized by lru_cache would have condemned the
+# process until restart even though the GPU had come back.
 _cuda_ok = False
 
-# Budget RAM hôte conservateur utilisé par le scheduler quand on tourne en CPU
-# (pas de VRAM à interroger). Volontairement prudent : le CPU est déjà le chemin
-# lent, pas la peine de risquer un swap en visant trop grand.
+# Conservative host RAM budget used by the scheduler when running on CPU
+# (no VRAM to query). Deliberately cautious: CPU is already the slow path,
+# no point risking a swap by aiming too high.
 _CPU_BUDGET_BYTES = 2_000_000_000
 
 
 def _diagnose() -> str | None:
-    """Retourne un message d'erreur si CUDA est inutilisable, sinon None."""
+    """Returns an error message if CUDA is unusable, otherwise None."""
     global _cuda_ok
     if _cuda_ok:
         return None
     if not torch.cuda.is_available():
         return (
-            "torch.cuda.is_available() == False — driver NVIDIA absent, ou build torch "
-            "CPU-only. Installez torch CUDA (cu124) pour activer le GPU : "
+            "torch.cuda.is_available() == False — no NVIDIA driver, or CPU-only torch "
+            "build. Install torch CUDA (cu124) to enable the GPU: "
             "pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124"
         )
     try:
-        torch.zeros(1, device="cuda")  # force l'init du contexte CUDA
-    except Exception as exc:  # contexte cassé, OOM au démarrage, etc.
-        return f"initialisation du contexte CUDA échouée : {exc}"
+        torch.zeros(1, device="cuda")  # force CUDA context init
+    except Exception as exc:  # broken context, OOM at startup, etc.
+        return f"CUDA context initialization failed: {exc}"
     _cuda_ok = True
     return None
 
 
 def is_available() -> bool:
-    """True si un GPU CUDA utilisable est présent (sans lever)."""
+    """True if a usable CUDA GPU is present (never raises)."""
     return _diagnose() is None
 
 
 def require_cuda() -> None:
-    """Lève `GpuUnavailable` si pas de GPU utilisable.
+    """Raises `GpuUnavailable` if no usable GPU is present.
 
-    Réservé aux usages qui veulent explicitement exiger CUDA (calibration, tests de
-    parité) — le pipeline normal utilise `device()`, qui ne lève jamais.
+    Reserved for call sites that explicitly want to require CUDA (calibration,
+    parity tests) — the normal pipeline uses `device()`, which never raises.
     """
     err = _diagnose()
     if err:
-        raise GpuUnavailable(f"GPU CUDA requis mais indisponible : {err}")
+        raise GpuUnavailable(f"CUDA GPU required but unavailable: {err}")
 
 
 def device() -> torch.device:
-    """Device de calcul : `cuda` si utilisable, sinon `cpu` (jamais d'exception)."""
+    """Compute device: `cuda` if usable, otherwise `cpu` (never raises)."""
     return torch.device("cuda") if is_available() else torch.device("cpu")
 
 
 def device_name() -> str:
-    """Nom du device courant — nom GPU si CUDA, sinon repère explicite CPU."""
+    """Name of the current device — GPU name if CUDA, otherwise an explicit CPU marker."""
     if is_available():
         return torch.cuda.get_device_name(0)
-    return "CPU (fallback — pas de GPU CUDA détecté)"
+    return "CPU (fallback — no CUDA GPU detected)"
 
 
 # --------------------------------------------------------------------------- #
-# Budget VRAM/RAM (pour le scheduler en vagues)
+# VRAM/RAM budget (for the wave scheduler)
 # --------------------------------------------------------------------------- #
 def free_total_vram() -> tuple[int, int]:
-    """(libre, total) en octets de la VRAM du device courant.
+    """(free, total) in bytes of VRAM on the current device.
 
-    Exige CUDA (pas de notion de VRAM en CPU) — le scheduler doit passer par
-    `vram_budget_bytes()`, qui gère la branche CPU.
+    Requires CUDA (no notion of VRAM on CPU) — the scheduler should go through
+    `vram_budget_bytes()`, which handles the CPU branch.
     """
     require_cuda()
     free, total = torch.cuda.mem_get_info()
@@ -105,12 +105,12 @@ def free_total_vram() -> tuple[int, int]:
 
 
 def vram_budget_bytes(margin: float = 0.75) -> int:
-    """VRAM raisonnablement utilisable = libre × marge ; plafond RAM fixe si CPU.
+    """Reasonably usable VRAM = free × margin; fixed RAM cap if CPU.
 
-    La marge (<1) réserve de la place au contexte CUDA, à la fragmentation et aux
-    tampons intermédiaires du décodage/demosaic — sur 8 Go la marge évite l'OOM dur.
-    En CPU, pas de VRAM à mesurer : `_CPU_BUDGET_BYTES` fixe borne les vagues du
-    scheduler à une taille raisonnable.
+    The margin (<1) reserves headroom for the CUDA context, fragmentation, and
+    decode/demosaic intermediate buffers — on 8 GB the margin avoids a hard OOM.
+    On CPU there's no VRAM to measure: the fixed `_CPU_BUDGET_BYTES` caps the
+    scheduler's waves to a reasonable size.
     """
     if not is_available():
         return _CPU_BUDGET_BYTES
@@ -119,20 +119,20 @@ def vram_budget_bytes(margin: float = 0.75) -> int:
 
 
 def empty_cache() -> None:
-    """Rend la VRAM mise en cache par l'allocateur torch à la fin d'une vague."""
+    """Releases VRAM cached by the torch allocator at the end of a wave."""
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
 # --------------------------------------------------------------------------- #
-# Pool de CUDA streams (overlap upload/compute)
+# CUDA stream pool (overlap upload/compute)
 # --------------------------------------------------------------------------- #
 _streams_lock = threading.Lock()
 _streams: list[torch.cuda.Stream] = []
 
 
 def streams(n: int = 2) -> list[torch.cuda.Stream]:
-    """Pool partagé de `n` CUDA streams (créés paresseusement, réutilisés)."""
+    """Shared pool of `n` CUDA streams (lazily created, reused)."""
     require_cuda()
     with _streams_lock:
         while len(_streams) < n:
@@ -141,6 +141,6 @@ def streams(n: int = 2) -> list[torch.cuda.Stream]:
 
 
 def synchronize() -> None:
-    """Attend la fin de tous les kernels en vol sur le device."""
+    """Waits for all in-flight kernels on the device to finish."""
     if torch.cuda.is_available():
         torch.cuda.synchronize()

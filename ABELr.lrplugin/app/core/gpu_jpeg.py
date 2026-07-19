@@ -1,16 +1,16 @@
-"""Décodage JPEG (nvJPEG GPU si dispo, sinon libjpeg CPU via torchvision) + analyse rendu.
+"""JPEG decoding (GPU nvJPEG if available, otherwise CPU libjpeg via torchvision) + render analysis.
 
-Remplace `cv2.imdecode` (CPU pur) partout où on lit un JPEG pour l'analyse : aperçu
-rendu Lr (`Previews.lrdata` / miniature plugin) et JPEG boîtier embarqué. Le device
-suit `gpu.device()` (GPU prioritaire, repli CPU si aucun CUDA — cf. `core/gpu.py`) :
-`decode_jpeg(..., device='cuda')` délègue à nvJPEG et décode **par lot** (une liste de
-buffers) pour amortir les lancements kernel = "multithread GPU" ; en CPU, torchvision
-décode via libjpeg-turbo (pas de batching réel, mais même API/contrat de sortie).
+Replaces `cv2.imdecode` (pure CPU) everywhere a JPEG is read for analysis: Lr rendered
+preview (`Previews.lrdata` / plugin thumbnail) and embedded in-camera JPEG. The device
+follows `gpu.device()` (GPU priority, CPU fallback if no CUDA — see `core/gpu.py`):
+`decode_jpeg(..., device='cuda')` delegates to nvJPEG and decodes **in batch** (a list of
+buffers) to amortize kernel launches = "GPU multithreading"; on CPU, torchvision
+decodes via libjpeg-turbo (no real batching, but same API/output contract).
 
-Sortie : tenseurs **uint8 CHW RGB sur le device courant**, prêts pour
-`render_metrics_gpu` (aucun aller-retour CPU superflu entre décodage et mesure quand
-GPU). Un JPEG illisible renvoie `None` à sa position (jamais d'exception qui tue le
-lot) — le caller le compte comme « sans rendu ».
+Output: **uint8 CHW RGB tensors on the current device**, ready for
+`render_metrics_gpu` (no superfluous CPU round-trip between decoding and measurement when
+on GPU). An unreadable JPEG returns `None` at its position (never an exception that kills the
+batch) — the caller counts it as "no render".
 """
 
 from __future__ import annotations
@@ -29,15 +29,15 @@ _JPEG_SOI = b"\xff\xd8\xff"
 
 
 def extract_jpeg_stream(data: bytes) -> Optional[bytes]:
-    """Isole le flux JPEG dans un buffer brut.
+    """Isolates the JPEG stream within a raw buffer.
 
-    Gère le conteneur Lr `.lrfprev` (en-tête `AgHg`) et les fichiers sans extension de
-    `Previews.lrdata` : on cherche le marqueur SOI `FF D8 FF`. None si absent.
+    Handles both the Lr `.lrfprev` container (header `AgHg`) and the extensionless
+    files of `Previews.lrdata`: looks for the SOI marker `FF D8 FF`. None if absent.
 
-    Limitation assumée (revue Fable 5 C-05) : on prend le PREMIER SOI — sur un
-    conteneur multi-flux ce serait le plus petit niveau. Sans effet en pratique :
-    `previews.find_rendered_preview` choisit déjà le fichier de niveau max, le
-    `.lrfprev` multi-niveaux n'est qu'un repli.
+    Accepted limitation (Fable 5 review C-05): takes the FIRST SOI — on a
+    multi-stream container this would be the smallest level. No effect in practice:
+    `previews.find_rendered_preview` already picks the max-level file, the
+    multi-level `.lrfprev` is only a fallback.
     """
     if data[:3] == _JPEG_SOI:
         return data
@@ -46,16 +46,16 @@ def extract_jpeg_stream(data: bytes) -> Optional[bytes]:
 
 
 def _to_uint8_1d(blob: bytes) -> torch.Tensor:
-    # bytearray → buffer inscriptible (évite l'avertissement frombuffer non-writable).
+    # bytearray → writable buffer (avoids the frombuffer non-writable warning).
     return torch.frombuffer(bytearray(blob), dtype=torch.uint8)
 
 
 def decode_blobs(blobs: list[bytes]) -> list[Optional[torch.Tensor]]:
-    """Décode une liste de buffers JPEG sur le device courant (nvJPEG batché si GPU).
+    """Decodes a list of JPEG buffers on the current device (batched nvJPEG if GPU).
 
-    Retourne des tenseurs uint8 (3,H,W) sur `gpu.device()`, alignés sur l'entrée. En
-    cas d'échec du lot (un buffer non supporté), repli **par élément** : les bons
-    passent, les mauvais deviennent `None`.
+    Returns uint8 tensors (3,H,W) on `gpu.device()`, aligned with the input. If
+    the batch fails (one unsupported buffer), falls back **per element**: the good
+    ones go through, the bad ones become `None`.
     """
     if not blobs:
         return []
@@ -75,7 +75,7 @@ def decode_blobs(blobs: list[bytes]) -> list[Optional[torch.Tensor]]:
 
 
 def decode_file(path: str | Path) -> Optional[torch.Tensor]:
-    """Lit un fichier (JPEG brut ou `.lrfprev`) et le décode sur GPU. None si illisible."""
+    """Reads a file (raw JPEG or `.lrfprev`) and decodes it on GPU. None if unreadable."""
     p = Path(path)
     try:
         data = p.read_bytes()
@@ -89,7 +89,7 @@ def decode_file(path: str | Path) -> Optional[torch.Tensor]:
 
 
 def decode_files(paths: list[str | Path]) -> list[Optional[torch.Tensor]]:
-    """Lit puis décode (GPU, batché) une liste de fichiers JPEG/`.lrfprev`."""
+    """Reads then decodes (GPU, batched) a list of JPEG/`.lrfprev` files."""
     blobs: list[bytes] = []
     positions: list[int] = []
     out: list[Optional[torch.Tensor]] = [None] * len(paths)
@@ -107,13 +107,13 @@ def decode_files(paths: list[str | Path]) -> list[Optional[torch.Tensor]]:
 
 
 def analyze_blob(blob: bytes) -> Optional[RenderAnalysis]:
-    """Décode (GPU) un buffer JPEG et renvoie l'analyse rendu, ou None si illisible."""
+    """Decodes (GPU) a JPEG buffer and returns the render analysis, or None if unreadable."""
     res = decode_blobs([blob])
     chw = res[0] if res else None
     return analyze_rendered_gpu(chw) if chw is not None else None
 
 
 def analyze_file(path: str | Path) -> Optional[RenderAnalysis]:
-    """Décode (GPU) un fichier rendu et renvoie l'analyse, ou None si illisible."""
+    """Decodes (GPU) a rendered file and returns the analysis, or None if unreadable."""
     chw = decode_file(path)
     return analyze_rendered_gpu(chw) if chw is not None else None

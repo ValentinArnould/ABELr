@@ -1,19 +1,19 @@
-"""Détection du régime WB d'un event — décide si le modèle physique est fiable.
+"""Detects an event's WB regime — decides whether the physical model is trustworthy.
 
-Deux régimes observés (mémoire projet) :
-- **Physique** (event typique, ex. CGC) : la Temperature suit l'AWB boîtier ; les
-  seeds tombent sur la droite pente·(r/g)+intercept avec un faible résidu. Le
-  modèle `wb_model` s'applique → corrections automatiques fiables.
-- **Artistique** (ex. Yggdrasil, look uniforme imposé) : l'as-shot n'a aucun
-  pouvoir, le résidu des seeds ≈ dispersion brute. Aucun modèle as-shot ne marche
-  → repli (boucle fermée / manuel).
+Two observed regimes (project memory):
+- **Physical** (typical event, e.g. CGC): Temperature follows the camera AWB;
+  the seeds fall on the slope·(r/g)+intercept line with a small residual. The
+  `wb_model` applies → reliable automatic corrections.
+- **Artistic** (e.g. Yggdrasil, an imposed uniform look): as-shot has no
+  predictive power, the seed residual ≈ raw dispersion. No as-shot model
+  works → fallback (closed loop / manual).
 
-Discriminateur : **résidu / étalement des Temperature seeds**. Ce n'est PAS le
-résidu absolu qui sépare les régimes (CGC 357K et Yggdrasil 425K sont proches),
-mais la part de variance que la pente explique :
-- CGC : résidu 357K / spread 1171K ≈ 0.30 → la pente explique l'essentiel → physique.
-- Yggdrasil : 425K / 548K ≈ 0.78 → la pente n'explique rien (≈ baseline) → artistique.
-Sur peu de seeds le ratio est bruité → label + chiffres, pas décision binaire dure.
+Discriminator: **residual / spread of the seed Temperatures**. It's NOT the
+absolute residual that separates the regimes (CGC 357K and Yggdrasil 425K are
+close), but the share of variance the slope explains:
+- CGC: residual 357K / spread 1171K ≈ 0.30 → the slope explains most of it → physical.
+- Yggdrasil: 425K / 548K ≈ 0.78 → the slope explains nothing (≈ baseline) → artistic.
+On few seeds the ratio is noisy → label + numbers, not a hard binary decision.
 """
 
 from __future__ import annotations
@@ -23,21 +23,21 @@ from enum import Enum
 
 from .wb_model import WBCalibration
 
-# Ratio résidu/étalement en-dessous duquel la pente explique l'essentiel (physique).
+# Residual/spread ratio below which the slope explains most of it (physical).
 RATIO_OK = 0.50
-# Ratio au-dessus duquel la pente n'explique presque rien (artistique).
+# Ratio above which the slope explains almost nothing (artistic).
 RATIO_BAD = 0.70
-# Étalement de Temperature seed (K) en-dessous duquel les seeds ne testent pas la
-# pente (éclairage trop homogène) : le ratio n'est pas fiable, intercept seul vaut.
+# Seed Temperature spread (K) below which the seeds don't exercise the slope
+# (lighting too uniform): the ratio isn't reliable, only the intercept counts.
 MIN_SPREAD_K = 150.0
-# En-dessous de ce nombre de seeds, régime jugé incertain (résidu trop bruité).
+# Below this number of seeds, the regime is deemed uncertain (residual too noisy).
 MIN_SEEDS_FOR_REGIME = 4
 
 
 class Regime(str, Enum):
-    PHYSICS = "physics"        # modèle as-shot fiable → auto
-    UNCERTAIN = "uncertain"    # peu de seeds / résidu moyen → appliquer + vérifier
-    ARTISTIC = "artistic"      # as-shot sans pouvoir → repli manuel/boucle fermée
+    PHYSICS = "physics"        # reliable as-shot model → auto
+    UNCERTAIN = "uncertain"    # few seeds / mid residual → apply + verify
+    ARTISTIC = "artistic"      # as-shot has no power → manual/closed-loop fallback
 
 
 @dataclass
@@ -49,42 +49,42 @@ class RegimeReport:
 
     @property
     def apply_exposure(self) -> bool:
-        """N'appliquer l'expo modélisée que hors régime artistique."""
+        """Only apply the modeled exposure outside the artistic regime."""
         return self.regime is not Regime.ARTISTIC
 
 
 def detect(cal: WBCalibration) -> RegimeReport:
-    """Classe le régime depuis la calibration WB (ratio résidu/étalement seeds)."""
+    """Classifies the regime from the WB calibration (seed residual/spread ratio)."""
     n, res, spread = cal.n_seeds, cal.residual_k, cal.temp_spread_k
 
     if n < MIN_SEEDS_FOR_REGIME:
         return RegimeReport(
             Regime.UNCERTAIN, res, n,
-            f"Peu de seeds ({n}) : intercept calibré mais régime incertain. "
-            f"Ajoutez des seeds couvrant les éclairages, vérifiez le résultat.",
+            f"Few seeds ({n}): intercept calibrated but regime uncertain. "
+            f"Add seeds covering the lighting conditions, check the result.",
         )
     if spread < MIN_SPREAD_K:
         return RegimeReport(
             Regime.UNCERTAIN, res, n,
-            f"Seeds trop homogènes (étalement {spread:.0f}K) : la pente n'est pas "
-            f"testée. Intercept appliqué, ajoutez des seeds d'éclairages variés.",
+            f"Seeds too uniform (spread {spread:.0f}K): the slope isn't "
+            f"exercised. Intercept applied, add seeds from varied lighting.",
         )
     ratio = res / spread
     if ratio <= RATIO_OK:
         return RegimeReport(
             Regime.PHYSICS, res, n,
-            f"Régime physique (résidu/étalement {ratio:.2f} ≤ {RATIO_OK}) : la pente "
-            f"explique la WB, corrections as-shot fiables.",
+            f"Physical regime (residual/spread {ratio:.2f} ≤ {RATIO_OK}): the slope "
+            f"explains the WB, as-shot corrections are reliable.",
         )
     if ratio >= RATIO_BAD:
         return RegimeReport(
             Regime.ARTISTIC, res, n,
-            f"Régime artistique (résidu/étalement {ratio:.2f} ≥ {RATIO_BAD}) : "
-            f"l'as-shot ne prédit pas la WB choisie. WB seule appliquée avec "
-            f"prudence ; expo et exceptions à traiter à la main.",
+            f"Artistic regime (residual/spread {ratio:.2f} ≥ {RATIO_BAD}): "
+            f"as-shot doesn't predict the chosen WB. WB alone applied with "
+            f"caution; exposure and exceptions need manual handling.",
         )
     return RegimeReport(
         Regime.UNCERTAIN, res, n,
-        f"Régime incertain (résidu/étalement {ratio:.2f}) : corrections "
-        f"appliquées, vérifier les outliers.",
+        f"Uncertain regime (residual/spread {ratio:.2f}): corrections "
+        f"applied, check for outliers.",
     )

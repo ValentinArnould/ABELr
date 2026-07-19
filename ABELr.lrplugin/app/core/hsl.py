@@ -1,19 +1,19 @@
-"""Étalonnage HSL par bande — réduire la sursaturation, ajuster la luminance,
-recentrer la teinte (objectif utilisateur).
+"""Per-band HSL calibration — reduce oversaturation, adjust luminance,
+recenter hue (user objective).
 
-Mesure sur le **rendu** (`render_metrics.band_stats`, 8 bandes Lr) ; le RAW peut
-servir de **garde** (ne réduire la saturation d'une bande que si le RAW confirme
-qu'elle est vraiment chargée à la capture, pas un artefact du profil). Inversion
-mesure→curseur via la **réponse calibrée** par bande (`core.response.BandResponse`) ;
-sans calibration, on applique un nudge conservateur borné (heuristique transparente).
+Measured on the **rendered output** (`render_metrics.band_stats`, 8 Lr bands); the RAW
+can serve as a **guard** (only reduce a band's saturation if the RAW confirms it was
+genuinely heavy at capture, not a profile artifact). Measurement-to-slider inversion
+via the **calibrated response** per band (`core.response.BandResponse`); without
+calibration, a bounded conservative nudge is applied (transparent heuristic).
 
-Curseurs émis (noms SDK, valeurs absolues -100…+100) : `SaturationAdjustment<Bande>`,
-`LuminanceAdjustment<Bande>`, `HueAdjustment<Bande>`. Les deltas calculés sont **ajoutés
-à la valeur courante** du curseur (le rendu mesuré reflète déjà les curseurs actuels).
+Sliders emitted (SDK names, absolute values -100...+100): `SaturationAdjustment<Band>`,
+`LuminanceAdjustment<Band>`, `HueAdjustment<Band>`. The computed deltas are **added
+to the slider's current value** (the measured render already reflects the current sliders).
 
-⚠️ **Expérimental** : à valider par vérité terrain (script `tools/validate_hsl.py`)
-avant de faire confiance. Garde-fous serrés par défaut (bandes peuplées, deltas plafonnés,
-zone morte) pour ne jamais sur-corriger.
+Warning: **Experimental** — needs ground-truth validation (`tools/validate_hsl.py` script)
+before being trusted. Tight guardrails by default (populated bands, capped deltas,
+dead zone) so it never over-corrects.
 """
 
 from __future__ import annotations
@@ -25,32 +25,32 @@ from .render_metrics import BandStats
 from .response import BandResponse, ResponseModel
 
 # --------------------------------------------------------------------------- #
-# Garde-fous et gains nominaux (heuristiques, à remplacer par le sondage)
+# Guardrails and nominal gains (heuristics, to be replaced by the calibration survey)
 # --------------------------------------------------------------------------- #
-# Population minimale d'une bande pour la corriger.
+# Minimum population of a band for it to be corrected.
 _MIN_FRAC = render_metrics._BAND_MIN_FRAC
-# Zones mortes : en deçà, on ne touche pas (anti micro-correction).
-_DEADBAND_CHROMA = 4.0   # ΔC* CIELAB
-_DEADBAND_L = 3.0        # ΔL*
-_DEADBAND_HUE = 6.0      # degrés
-# Plafonds de delta de curseur (unités Lr).
+# Dead zones: below this, leave it alone (anti micro-correction).
+_DEADBAND_CHROMA = 4.0   # dC* CIELAB
+_DEADBAND_L = 3.0        # dL*
+_DEADBAND_HUE = 6.0      # degrees
+# Slider delta caps (Lr units).
 _MAX_SAT = 25
 _MAX_LUM = 20
 _MAX_HUE = 15
-# Plafonds dédiés, plus stricts, quand la cible est un transplant brut du JPEG
-# boîtier (`BandTarget.embedded_raw=True`, mode `ignore_bias=True`) : le JPEG a sa
-# propre science couleur (profil créatif) sur L*/teinte, on ne veut pas la copier
-# intégralement (« corriger, pas copier ») — seule la saturation a déjà sa garde
-# réduction-seule, L*/teinte n'en avaient aucune avant H3.
+# Dedicated, stricter caps when the target is a raw transplant from the camera
+# JPEG (`BandTarget.embedded_raw=True`, `ignore_bias=True` mode): the JPEG has its
+# own color science (creative profile) on L*/hue, we don't want to copy it
+# wholesale ("correct, don't copy") — only saturation already had a
+# reduction-only guard, L*/hue had none before H3.
 _MAX_LUM_EMBEDDED_RAW = 10
 _MAX_HUE_EMBEDDED_RAW = 8
-# Fraction de pixels quasi-saturés (S≥0.97) déclenchant une réduction même sans
-# référence de chroma (sursaturation « dure »).
+# Fraction of near-saturated pixels (S>=0.97) that triggers a reduction even
+# without a chroma reference ("hard" oversaturation).
 _SAT_CLIP_TRIGGER = 0.05
 
-# Gains nominaux quand la réponse n'est PAS calibrée (heuristiques bornées) :
-# +1 unité de SaturationAdjustment ≈ +0.6 C* ; +1 Luminance ≈ +0.4 L* ;
-# +1 Hue ≈ +0.35° (ordres de grandeur Lr typiques — à confirmer par sondage).
+# Nominal gains when the response is NOT calibrated (bounded heuristics):
+# +1 unit of SaturationAdjustment ~= +0.6 C*; +1 Luminance ~= +0.4 L*;
+# +1 Hue ~= +0.35 degrees (typical Lr orders of magnitude — to be confirmed by survey).
 _NOM_DCHROMA_DSAT = 0.6
 _NOM_DL_DLUM = 0.4
 _NOM_DHUE_DHUE = 0.35
@@ -58,16 +58,16 @@ _NOM_DHUE_DHUE = 0.35
 
 @dataclass
 class BandTarget:
-    """Référence d'une bande (médiane des seeds / image de référence). Champs optionnels.
+    """Reference for a band (median of the seeds / reference image). Optional fields.
 
-    raw_oversat : si False, le RAW NE confirme PAS la charge de cette bande → on
-    s'interdit d'en réduire la saturation (évite de corriger un effet de profil).
-    None = pas d'info RAW (on ne bloque pas).
+    raw_oversat: if False, the RAW does NOT confirm this band's load -> saturation
+    reduction is forbidden for it (avoids correcting a profile effect).
+    None = no RAW info (does not block).
 
-    embedded_raw : True si `chroma`/`lstar`/`hue` sont un transplant brut du JPEG
-    boîtier (mode `ignore_bias=True`, pas de norme de biais soustraite) → plafonds
-    L*/teinte plus stricts (`_MAX_LUM_EMBEDDED_RAW`/`_MAX_HUE_EMBEDDED_RAW`) pour ne
-    jamais recopier intégralement la science couleur du profil créatif.
+    embedded_raw: True if `chroma`/`lstar`/`hue` are a raw transplant from the camera
+    JPEG (`ignore_bias=True` mode, no bias norm subtracted) -> stricter L*/hue caps
+    (`_MAX_LUM_EMBEDDED_RAW`/`_MAX_HUE_EMBEDDED_RAW`) so the creative profile's color
+    science is never copied wholesale.
     """
 
     name: str
@@ -79,15 +79,15 @@ class BandTarget:
 
 
 def raw_confirms_oversat(raw_band: BandStats | None, min_frac: float = _MIN_FRAC) -> bool | None:
-    """Le RAW (zone nette) confirme-t-il qu'une bande est réellement chargée à la
-    capture ? Peuple `BandTarget.raw_oversat` (garde anti-sur-correction : ne pas
-    réduire une saturation que le rendu montre mais que le RAW dément).
+    """Does the RAW (sharp zone) confirm that a band is genuinely heavy at
+    capture? Populates `BandTarget.raw_oversat` (anti-over-correction guard: don't
+    reduce a saturation that the render shows but the RAW contradicts).
 
-    None : pas de mesure RAW pour cette bande, ou population RAW insuffisante
-    (`min_frac`) → aucune info, on ne bloque pas (comportement historique).
-    True/False sinon, sur le même seuil de sursaturation dure (`_SAT_CLIP_TRIGGER`,
-    pixels quasi-saturés S≥0.97) que celui utilisé sur le rendu — évidence directe
-    du capteur, pas un seuil de chroma inventé.
+    None: no RAW measurement for this band, or insufficient RAW population
+    (`min_frac`) -> no info, does not block (historical behavior).
+    True/False otherwise, on the same hard-oversaturation threshold (`_SAT_CLIP_TRIGGER`,
+    near-saturated pixels S>=0.97) used on the render — direct sensor evidence,
+    not an invented chroma threshold.
     """
     if raw_band is None or raw_band.frac < min_frac:
         return None
@@ -96,7 +96,7 @@ def raw_confirms_oversat(raw_band: BandStats | None, min_frac: float = _MIN_FRAC
 
 @dataclass
 class HslCorrection:
-    """Delta de curseurs HSL décidé pour une bande (diagnostic + application)."""
+    """HSL slider deltas decided for a band (diagnostic + application)."""
 
     name: str
     d_saturation: int = 0
@@ -106,7 +106,7 @@ class HslCorrection:
 
 
 def _hue_diff(a: float, b: float) -> float:
-    """Différence circulaire signée a−b dans (−180, 180]."""
+    """Signed circular difference a-b in (-180, 180]."""
     return (a - b + 180.0) % 360.0 - 180.0
 
 
@@ -121,35 +121,35 @@ def plan_band(
     *,
     min_frac: float = _MIN_FRAC,
 ) -> HslCorrection | None:
-    """Décide les deltas HSL d'une bande, ou None si rien à faire / bande non fiable."""
+    """Decides the HSL deltas for a band, or None if nothing to do / band unreliable."""
     if not render_metrics.band_is_reliable(stats, min_frac):
         return None
 
     reasons: list[str] = []
     d_sat = d_lum = d_hue = 0
 
-    # --- Saturation : RÉDUCTION SEULE de la sursaturation --------------------
-    # Objectif utilisateur : « surtout réduire la saturation excessive ». On ne
-    # rehausse JAMAIS la saturation (sinon on copierait la sursaturation d'un JPEG
-    # boîtier punchy) → on agit uniquement quand le rendu est PLUS saturé que la
-    # référence (excès positif), et le delta est borné à ≤ 0.
+    # --- Saturation: REDUCTION ONLY of oversaturation -------------------------
+    # User objective: "mainly reduce excessive saturation". We NEVER raise
+    # saturation (otherwise we'd copy the oversaturation of a punchy camera
+    # JPEG) -> we only act when the render is MORE saturated than the
+    # reference (positive excess), and the delta is capped at <= 0.
     target_chroma = target.chroma if target else None
     excess = 0.0
     if target_chroma is not None:
-        excess = stats.median_chroma - target_chroma  # >0 = trop saturé vs référence
-    # Sursaturation dure (pixels écrêtés en S) → réduire même sans référence.
+        excess = stats.median_chroma - target_chroma  # >0 = too saturated vs reference
+    # Hard oversaturation (S-clipped pixels) -> reduce even without a reference.
     if stats.sat_clip_frac >= _SAT_CLIP_TRIGGER:
         excess = max(excess, _DEADBAND_CHROMA + 1.0)
         reasons.append(f"sat_clip={stats.sat_clip_frac:.2f}")
-    # Le RAW peut interdire une réduction (bande non chargée à la capture).
+    # The RAW can forbid a reduction (band not loaded at capture).
     raw_blocks = target is not None and target.raw_oversat is False
     if excess >= _DEADBAND_CHROMA and not raw_blocks:
         gain = resp.dchroma_dsat if abs(resp.dchroma_dsat) > 1e-9 else _NOM_DCHROMA_DSAT
-        d_sat = _clamp(-excess / gain, -_MAX_SAT, 0)  # réduction seule (≤ 0)
+        d_sat = _clamp(-excess / gain, -_MAX_SAT, 0)  # reduction only (<= 0)
         if d_sat:
             reasons.append(f"ΔC*={excess:+.1f}→sat{d_sat:+d}")
 
-    # --- Luminance : rapprocher de la clarté de référence --------------------
+    # --- Luminance: move closer to the reference lightness --------------------
     strict = target is not None and target.embedded_raw
     if target and target.lstar is not None:
         dl = target.lstar - stats.median_l
@@ -160,9 +160,9 @@ def plan_band(
             if d_lum:
                 reasons.append(f"ΔL*={dl:+.1f}→lum{d_lum:+d}")
 
-    # --- Teinte : recentrer la dérive ----------------------------------------
+    # --- Hue: recenter the drift ----------------------------------------------
     if target and target.hue is not None:
-        dh = _hue_diff(target.hue, stats.median_hue)  # ce qu'il faut ajouter à la teinte
+        dh = _hue_diff(target.hue, stats.median_hue)  # amount to add to the hue
         if abs(dh) >= _DEADBAND_HUE:
             gain = resp.dhue_dhue if abs(resp.dhue_dhue) > 1e-9 else _NOM_DHUE_DHUE
             max_hue = _MAX_HUE_EMBEDDED_RAW if strict else _MAX_HUE
@@ -182,11 +182,11 @@ def plan_hsl(
     *,
     min_frac: float = _MIN_FRAC,
 ) -> tuple[dict[str, int], list[HslCorrection]]:
-    """Planifie les corrections HSL de toutes les bandes.
+    """Plans the HSL corrections for all bands.
 
-    Retourne (develop_delta, corrections) où `develop_delta` est un dict de clés SDK
-    (`SaturationAdjustment<Bande>`, etc.) → **delta** à ajouter à la valeur courante.
-    Le worker fait la somme avec les valeurs courantes avant d'envoyer le job.
+    Returns (develop_delta, corrections) where `develop_delta` is a dict of SDK keys
+    (`SaturationAdjustment<Band>`, etc.) -> **delta** to add to the current value.
+    The worker sums it with the current values before sending the job.
     """
     targets = targets or {}
     develop: dict[str, int] = {}
