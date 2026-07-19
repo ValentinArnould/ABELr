@@ -8,8 +8,8 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
-            "python": "app/.venv/scripts/python.exe",
-            "program": "app/main.py",
+            "python": "ABELr.lrplugin/app/.venv/scripts/python.exe",
+            "program": "ABELr.lrplugin/app/main.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}"
         }

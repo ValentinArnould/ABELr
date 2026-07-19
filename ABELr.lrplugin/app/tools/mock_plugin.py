@@ -1,9 +1,9 @@
-"""Mock du plugin Lr — simule le polling pour tester l'App sans Lightroom.
+"""Mock of the Lr plugin — simulates polling to test the App without Lightroom.
 
-Reproduit le comportement du plugin Lua : boucle GET /jobs/pending puis
-POST /jobs/{id}/result avec des données factices.
+Reproduces the Lua plugin's behavior: loops on GET /jobs/pending then
+POST /jobs/{id}/result with fake data.
 
-Usage (App déjà lancée sur :5000) :
+Usage (App already running on :5000):
     python -m app.tools.mock_plugin
 """
 
@@ -18,7 +18,7 @@ import requests
 BASE = "http://127.0.0.1:5000"
 POLL_INTERVAL = 0.3
 
-# Miniatures factices (JPEG gris) écrites ici pour get_thumbnails / render_probe.
+# Fake thumbnails (gray JPEG) written here for get_thumbnails / render_probe.
 THUMBS_DIR = Path(tempfile.gettempdir()) / "abelr_mock_thumbs"
 
 FAKE_PHOTOS = [
@@ -48,10 +48,10 @@ FAKE_PHOTOS = [
     },
 ]
 
-# WB As Shot factice renvoyée par render_probe (comme le plugin après l'apply).
+# Fake As Shot WB returned by render_probe (like the plugin after apply).
 FAKE_ASSHOT = {"temp": 5300.0, "tint": 4.0}
 
-# Arbre de collections factice (jobs Phase 2 list_collections).
+# Fake collection tree (Phase 2 list_collections jobs).
 FAKE_COLLECTIONS = {
     "collections": [
         {"name": "Best of 2025", "id": "col-1", "kind": "collection", "photo_count": 12,
@@ -63,7 +63,7 @@ FAKE_COLLECTIONS = {
     ]
 }
 
-# Presets develop factices (jobs Phase 2 list_develop_presets).
+# Fake develop presets (Phase 2 list_develop_presets jobs).
 FAKE_PRESETS = {
     "presets": [
         {"name": "Sony Portrait", "uuid": "preset-aaa", "folder": "User Presets"},
@@ -73,13 +73,13 @@ FAKE_PRESETS = {
 
 
 def _batch_ok(job_id: str, applied: int, total: int) -> dict:
-    """Résultat standard d'un job batch Phase 2 (set_rating/keywords/preset…)."""
+    """Standard result for a Phase 2 batch job (set_rating/keywords/preset…)."""
     return {"job_id": job_id, "status": "ok", "photos": [],
             "applied": applied, "total": total}
 
 
 def _write_gray_jpeg(photo_id: str, level: int) -> str:
-    """Écrit un JPEG gris uni (miniature factice) et retourne son chemin absolu."""
+    """Writes a solid gray JPEG (fake thumbnail) and returns its absolute path."""
     import cv2
     import numpy as np
 
@@ -106,13 +106,13 @@ def handle(job: dict) -> dict:
     job_type = job["type"]
     payload = job.get("payload") or {}
     if job_type == "test":
-        print("  [mock] test: popup Hello World (simulée)")
+        print("  [mock] test: Hello World popup (simulated)")
         return {"job_id": job_id, "status": "ok", "photos": []}
     if job_type == "get_selected_photos":
         return {"job_id": job_id, "status": "ok", "photos": FAKE_PHOTOS}
     if job_type == "get_thumbnails":
         ids = payload.get("photo_ids") or [p["photo_id"] for p in FAKE_PHOTOS]
-        print(f"  [mock] get_thumbnails: {len(ids)} miniature(s) grise(s)")
+        print(f"  [mock] get_thumbnails: {len(ids)} gray thumbnail(s)")
         return {
             "job_id": job_id, "status": "ok", "photos": [],
             "thumbnails": _thumbnails_for(ids, level=120),
@@ -121,11 +121,11 @@ def handle(job: dict) -> dict:
         adjustments = payload.get("adjustments") or []
         ids = [a["photo_id"] for a in adjustments]
         print(
-            f"  [mock] render_probe: {len(ids)} rendu(s) neutre(s) simulé(s) "
+            f"  [mock] render_probe: {len(ids)} simulated neutral render(s) "
             f"(settle={payload.get('settle')})"
         )
-        # Gris légèrement différent de get_thumbnails : ancre ≠ rendu courant
-        # (sinon le garde anti-probe-périmé se déclencherait à bon droit).
+        # Gray level slightly different from get_thumbnails: anchor != current render
+        # (otherwise the anti-stale-probe guard would rightly trigger).
         return {
             "job_id": job_id, "status": "ok", "photos": [],
             "thumbnails": _thumbnails_for(ids, level=140, asshot=True),
@@ -154,11 +154,11 @@ def handle(job: dict) -> dict:
     if job_type == "list_develop_presets":
         print("  [mock] list_develop_presets")
         return {"job_id": job_id, "status": "ok", "photos": [], "data": FAKE_PRESETS}
-    return {"job_id": job_id, "status": "error", "error": f"type inconnu: {job_type}"}
+    return {"job_id": job_id, "status": "error", "error": f"unknown type: {job_type}"}
 
 
 def main() -> None:
-    print(f"Mock plugin -> {BASE} (Ctrl+C pour arrêter)")
+    print(f"Mock plugin -> {BASE} (Ctrl+C to stop)")
     while True:
         try:
             resp = requests.get(f"{BASE}/jobs/pending", timeout=5)
@@ -169,7 +169,7 @@ def main() -> None:
             time.sleep(POLL_INTERVAL)
             continue
         job = resp.json()
-        print(f"Job reçu: {job['type']} ({job['job_id']})")
+        print(f"Job received: {job['type']} ({job['job_id']})")
         result = handle(job)
         requests.post(f"{BASE}/jobs/{job['job_id']}/result", json=result, timeout=5)
 
@@ -178,4 +178,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nArrêt mock plugin.")
+        print("\nStopping mock plugin.")

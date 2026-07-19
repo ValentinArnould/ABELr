@@ -1,15 +1,16 @@
-"""Audit/validation HSL en espace rendu sur un catalogue fini.
+"""HSL audit/validation in rendered space on a finished catalog.
 
-Mesure les statistiques par bande HSL (`render_metrics.band_stats`) sur l'**aperçu
-rendu** (Previews.lrdata, hors-ligne). Agrège par bande sur toute la série : chroma
-médiane, fraction de pixels quasi-saturés, dispersion de teinte. Sert à repérer les
-bandes globalement **sursaturées** (cible n°1 de l'étalonnage HSL) et incohérentes
-en teinte, et à fixer des cibles de référence par bande pour `core.hsl`.
+Measures per-band HSL statistics (`render_metrics.band_stats`) on the **rendered
+preview** (Previews.lrdata, offline). Aggregates by band across the whole series:
+median chroma, fraction of near-saturated pixels, hue dispersion. Used to spot
+bands that are globally **oversaturated** (target #1 of the HSL calibration) and
+hue-inconsistent, and to set per-band reference targets for `core.hsl`.
 
-⚠️ Valide la **mesure** par bande sur de vrais rendus. La **réponse** des curseurs
-HSL (`core.response.BandResponse`) se cale par sondage dans Lr (job `render_probe`).
+⚠️ Validates the per-band **measurement** on real renders. The **response** of
+the HSL sliders (`core.response.BandResponse`) is calibrated by probing in Lr
+(`render_probe` job).
 
-Usage : python -m app.tools.validate_hsl "essais/essai CGC" [--limit N]
+Usage: python -m app.tools.validate_hsl "essais/essai CGC" [--limit N]
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from app.core.previews import PreviewIndex  # noqa: E402
 
 
 def _circ_std_deg(degrees: list[float]) -> float:
-    """Écart-type circulaire (degrés) — correct au passage 0/360 (bande Red)."""
+    """Circular standard deviation (degrees) — correct across the 0/360 wrap (Red band)."""
     ang = np.radians(np.asarray(degrees, float))
     r = np.hypot(np.mean(np.cos(ang)), np.mean(np.sin(ang)))
     if r <= 1e-9:
@@ -60,7 +61,7 @@ def main() -> None:
     if a.limit:
         ids = ids[: a.limit]
 
-    # Agrégats par bande sur les photos où la bande est peuplée.
+    # Per-band aggregates, over photos where the band is populated.
     chroma = defaultdict(list)
     satclip = defaultdict(list)
     hue = defaultdict(list)
@@ -81,13 +82,13 @@ def main() -> None:
                 hue[b.name].append(b.median_hue)
                 lvals[b.name].append(b.median_l)
 
-    print(f"{base.name} : {len(ids)} photos, {n_used} avec aperçu rendu.\n")
+    print(f"{base.name}: {len(ids)} photos, {n_used} with rendered preview.\n")
     if not n_used:
-        print("Aucun aperçu rendu trouvé.")
+        print("No rendered preview found.")
         return
 
-    print(f"{'Bande':<9} {'n':>4} {'C* méd':>7} {'C* p90':>7} {'satClip':>8} "
-          f"{'L* méd':>7} {'hue σ':>6}")
+    print(f"{'Band':<9} {'n':>4} {'C* med':>7} {'C* p90':>7} {'satClip':>8} "
+          f"{'L* med':>7} {'hue σ':>6}")
     for name in render_metrics.BAND_NAMES:
         c = chroma.get(name)
         if not c:
@@ -97,7 +98,7 @@ def main() -> None:
         print(f"{name:<9} {len(c):>4} {np.median(c):>7.1f} {np.percentile(c,90):>7.1f} "
               f"{sc.mean():>8.3f} {np.median(lvals[name]):>7.1f} {_circ_std_deg(hue[name]):>6.1f}")
 
-    print("\nBandes candidates à réduction de saturation (C* p90 élevée ou satClip notable) :")
+    print("\nBands that are candidates for saturation reduction (high C* p90 or notable satClip):")
     flagged = []
     for name in render_metrics.BAND_NAMES:
         c = chroma.get(name)
@@ -105,7 +106,7 @@ def main() -> None:
             continue
         if np.percentile(c, 90) > 70 or np.mean(satclip[name]) > 0.03:
             flagged.append(name)
-    print("  " + (", ".join(flagged) if flagged else "aucune"))
+    print("  " + (", ".join(flagged) if flagged else "none"))
 
 
 if __name__ == "__main__":

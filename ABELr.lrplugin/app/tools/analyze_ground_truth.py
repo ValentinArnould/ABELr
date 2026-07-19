@@ -1,29 +1,29 @@
-"""Analyse « vérité terrain » : RAW d'entrée → réglages develop → JPEG final voulu.
+"""Ground truth analysis: input RAW -> develop settings -> desired final JPEG.
 
-But du projet : sur un dossier où l'on possède le RAW, les réglages Lightroom
-appliqués (catalogue) ET le JPEG final exporté, mesurer le triplet
-    (métrique RAW)  →  (réglage develop choisi)  →  (métrique JPEG final)
-afin d'apprendre à prédire la BONNE EXPOSITION et la BONNE WB par photo (le style
-étant appliqué par ailleurs). C'est le travail manuel coûteux que l'on veut automatiser.
+Project goal: on a folder where we have the RAW, the applied Lightroom settings
+(catalog) AND the exported final JPEG, measure the triplet
+    (RAW metric)  ->  (chosen develop setting)  ->  (final JPEG metric)
+in order to learn to predict the RIGHT EXPOSURE and the RIGHT WB per photo (the
+style being applied separately). This is the costly manual work we want to automate.
 
-Pour chaque photo :
-- EXIF (iso, ouverture, vitesse, focale, objectif, boîtier) — depuis le catalogue.
-- Réglages develop parsés (Adobe_imageDevelopSettings.text) : exposition, WB, tons,
-  calibration, indicateurs de style (HSL / color grade / tone curve / Look).
-- Métriques RAW en ProPhoto linéaire (core.analysis) : luminance Y, clipping,
-  gray-world ; + WB as-shot (multiplicateurs rawpy).
-- Métriques du JPEG embarqué (rendu boîtier, référence neutre).
-- Métriques du JPEG final (la cible du photographe) : luminance, gray-world, contraste.
+For each photo:
+- EXIF (iso, aperture, shutter speed, focal length, lens, camera) -- from the catalog.
+- Parsed develop settings (Adobe_imageDevelopSettings.text): exposure, WB, tones,
+  calibration, style indicators (HSL / color grade / tone curve / Look).
+- RAW metrics in linear ProPhoto (core.analysis): luminance Y, clipping,
+  gray-world; + as-shot WB (rawpy multipliers).
+- Embedded JPEG metrics (camera rendering, neutral reference).
+- Final JPEG metrics (the photographer's target): luminance, gray-world, contrast.
 
-Sortie : impression détaillée par photo + synthèse croisée + **export CSV** (un
-dataset par dossier/catalogue, réutilisable comme aide à la prédiction).
+Output: detailed per-photo printout + cross summary + **CSV export** (one
+dataset per folder/catalog, reusable as a prediction aid).
 
-Usage :
-    python -m app.tools.analyze_ground_truth "essais/essai independant 2" [--csv chemin.csv]
+Usage:
+    python -m app.tools.analyze_ground_truth "essais/essai independant 2" [--csv path.csv]
 
-Sans --csv, le CSV est écrit à côté : <dossier>/_ground_truth.csv. Les catalogues
-(.lrcat) sont découverts automatiquement sous le dossier ; chaque photo est reliée
-au catalogue qui la contient (gère plusieurs catalogues dans un même dossier).
+Without --csv, the CSV is written alongside: <folder>/_ground_truth.csv. Catalogs
+(.lrcat) are discovered automatically under the folder; each photo is linked
+to the catalog that contains it (handles multiple catalogs in the same folder).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.core import analysis, catalog, image_source  # noqa: E402
 
-# Réglages develop scalaires d'intérêt (PV 2012+).
+# Scalar develop settings of interest (PV 2012+).
 DEVELOP_KEYS = [
     "ProcessVersion", "WhiteBalance", "Temperature", "Tint",
     "Exposure2012", "Contrast2012", "Highlights2012", "Shadows2012",
@@ -57,7 +57,7 @@ _REC709 = np.array([0.2126, 0.7152, 0.0722], np.float32)
 
 
 # --------------------------------------------------------------------------- #
-# Develop text (table Lua `s = { ... }`)
+# Develop text (Lua table `s = { ... }`)
 # --------------------------------------------------------------------------- #
 def parse_develop(text: str) -> dict:
     out: dict = {}
@@ -83,7 +83,7 @@ def style_flags(text: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Catalogue
+# Catalog
 # --------------------------------------------------------------------------- #
 def discover_catalogs(base: Path) -> list[Path]:
     return sorted(base.glob("**/*.lrcat"))
@@ -132,7 +132,7 @@ def fetch_catalog_row(lrcat: Path, basename: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Métriques pixels
+# Pixel metrics
 # --------------------------------------------------------------------------- #
 def srgb_to_linear(u8: np.ndarray) -> np.ndarray:
     x = u8.astype(np.float32) / 255.0
@@ -215,7 +215,7 @@ def analyze_folder(base: Path) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# Sorties
+# Outputs
 # --------------------------------------------------------------------------- #
 CSV_FIELDS = [
     "photo", "catalog", "iso", "f", "shutter_s", "focal",
@@ -282,11 +282,11 @@ def print_report(records: list[dict]) -> None:
             fn = rec["final"]
             print(f"  JPEG fin Ylin={fn['y_mean']:.4f} (med {fn['y_median']:.4f})  "
                   f"hl{fn['hl']:.1f}% sh{fn['sh']:.1f}%  g/r={fn['gr']:.2f} g/b={fn['gb']:.2f}  "
-                  f"contraste={fn['contrast']:.3f}")
+                  f"contrast={fn['contrast']:.3f}")
 
 
 def print_summary(records: list[dict]) -> None:
-    print("\n" + "#" * 78 + "\n# SYNTHÈSE")
+    print("\n" + "#" * 78 + "\n# SUMMARY")
     for cat in sorted({r["catalog"] for r in records}):
         rs = [r for r in records if r["catalog"] == cat]
         const, var = [], []
@@ -318,12 +318,12 @@ def main(argv: list[str]) -> int:
 
     records = analyze_folder(base)
     if not records:
-        print(f"Aucun .ARW dans {base}")
+        print(f"No .ARW files in {base}")
         return 1
     print_report(records)
     print_summary(records)
     write_csv(records, csv_path)
-    print(f"\nCSV écrit : {csv_path}")
+    print(f"\nCSV written: {csv_path}")
     return 0
 
 

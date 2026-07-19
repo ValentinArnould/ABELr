@@ -1,18 +1,19 @@
 """
-Test decisif : metrique ZONE NETTE sur le RAW d'entree -> prediction Exposure/Temp.
+Decisive test: SHARP-ZONE metric on the input RAW -> Exposure/Temp prediction.
 
-Hypothese (validee partiellement sur finals) : le photographe expose et balance
-la WB sur le SUJET NET, pas sur le cadre global. Les stats globales RAW ont echoue
-(R2=0.15 expo, R2=0.06 WB sur 1157 photos). On teste si la zone nette du RAW fait mieux.
+Hypothesis (partially validated on finals): the photographer exposes and balances
+WB on the SHARP SUBJECT, not on the overall frame. Global RAW stats failed
+(R2=0.15 expo, R2=0.06 WB on 1157 photos). We test whether the RAW's sharp zone
+does better.
 
-Pour chaque RAW :
-  - decode ProPhoto lineaire (half_size) via image_source
-  - detecte zone nette : |Laplacian| lisse, top SHARP_FRAC
-  - mesure luminance Y + gray-world (g/r, g/b) DANS la zone nette
-Merge avec _features.csv (cibles develop Exposure2012/Temperature/Tint + globaux),
-puis regression + LOO-RMSE comparant zone-nette vs global.
+For each RAW:
+  - decode linear ProPhoto (half_size) via image_source
+  - detect sharp zone: smoothed |Laplacian|, top SHARP_FRAC
+  - measure luminance Y + gray-world (g/r, g/b) WITHIN the sharp zone
+Merge with _features.csv (develop targets Exposure2012/Temperature/Tint + globals),
+then regression + LOO-RMSE comparing sharp-zone vs global.
 
-Usage :
+Usage:
     python -m app.tools.sharp_raw_predict "essais/essai v3/Yggdrasil FFL 25" [--workers 10] [--sharp-csv path]
 """
 
@@ -42,10 +43,10 @@ def sharp_raw_metrics(arw: str) -> dict | None:
         loaded = image_source.load_for_analysis(arw)
     except Exception:
         return None
-    rgb = loaded.rgb  # HxWx3 float32 ProPhoto lineaire
-    luma = rgb @ color.PROPHOTO_TO_Y  # Y exact
+    rgb = loaded.rgb  # HxWx3 float32 linear ProPhoto
+    luma = rgb @ color.PROPHOTO_TO_Y  # exact Y
 
-    # zone nette : Laplacian sur luma (gamma-encode pour stabilite du detecteur)
+    # sharp zone: Laplacian on luma (gamma-encode for detector stability)
     luma_g = np.clip(luma, 0, 1) ** (1 / 2.2)
     lap = np.abs(cv2.Laplacian(luma_g.astype(np.float32), cv2.CV_32F))
     lap_s = cv2.GaussianBlur(lap, (0, 0), SIGMA_BLUR)
@@ -54,7 +55,7 @@ def sharp_raw_metrics(arw: str) -> dict | None:
     if mask.sum() < MIN_PIXELS:
         return None
 
-    zr = rgb[mask]  # (N,3) zone nette
+    zr = rgb[mask]  # (N,3) sharp zone
     zl = luma[mask]
     r, g, b = float(zr[:, 0].mean()), float(zr[:, 1].mean()), float(zr[:, 2].mean())
     return {
@@ -79,7 +80,7 @@ def load_features(csv_path: Path) -> dict[str, dict]:
 
 
 def regress(x: np.ndarray, y: np.ndarray):
-    """OLS y = a*x + b. Retourne (a, b, r2, loo_rmse, baseline_rmse)."""
+    """OLS y = a*x + b. Returns (a, b, r2, loo_rmse, baseline_rmse)."""
     n = len(x)
     A = np.vstack([x, np.ones(n)]).T
     coef, *_ = np.linalg.lstsq(A, y, rcond=None)
@@ -88,7 +89,7 @@ def regress(x: np.ndarray, y: np.ndarray):
     ss_res = float(((y - pred) ** 2).sum())
     ss_tot = float(((y - y.mean()) ** 2).sum())
     r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    # LOO via hat matrix : residu_loo = residu / (1 - h_ii)
+    # LOO via hat matrix: residual_loo = residual / (1 - h_ii)
     H_diag = (A @ np.linalg.pinv(A.T @ A) @ A.T).diagonal()
     loo_res = (y - pred) / np.clip(1 - H_diag, 1e-6, None)
     loo_rmse = float(np.sqrt((loo_res ** 2).mean()))
@@ -100,10 +101,10 @@ def report(name: str, x: np.ndarray, y: np.ndarray, unit: str):
     mask = np.isfinite(x) & np.isfinite(y)
     x, y = x[mask], y[mask]
     if len(x) < 20:
-        print(f"  {name}: trop peu de points ({len(x)})")
+        print(f"  {name}: too few points ({len(x)})")
         return
     a, b, r2, loo, base = regress(x, y)
-    flag = " <== AIDE" if loo < base * 0.95 else ""
+    flag = " <== HELPS" if loo < base * 0.95 else ""
     print(f"  {name:<28} R2={r2:5.3f}  LOO-RMSE={loo:7.3f}{unit}  (baseline {base:6.3f}){flag}")
 
 
@@ -123,15 +124,15 @@ def main():
     feats = load_features(base / "_features.csv")
     sharp_csv = Path(args.sharp_csv) if args.sharp_csv else base / "_sharp.csv"
 
-    # --- cache : decode seulement si _sharp.csv absent ---
+    # --- cache: decode only if _sharp.csv is missing ---
     if sharp_csv.is_file():
-        print(f"Cache trouve : {sharp_csv}")
+        print(f"Cache found: {sharp_csv}")
         sharp = load_features(sharp_csv)
     else:
         raws = sorted((base / "RAW").rglob("*.ARW"))
         if args.limit:
             raws = raws[: args.limit]
-        print(f"Decodage {len(raws)} RAW + zone nette ({args.workers} workers)...")
+        print(f"Decoding {len(raws)} RAW + sharp zone ({args.workers} workers)...")
         sharp = {}
         with ProcessPoolExecutor(max_workers=args.workers) as ex:
             for i, (arw, m) in enumerate(ex.map(_worker, [str(r) for r in raws])):
@@ -144,7 +145,7 @@ def main():
             w.writeheader()
             for v in sharp.values():
                 w.writerow(v)
-        print(f"Ecrit {sharp_csv} ({len(sharp)} photos)")
+        print(f"Wrote {sharp_csv} ({len(sharp)} photos)")
 
     # --- merge ---
     rows = []
@@ -168,9 +169,9 @@ def main():
             continue
 
     n = len(rows)
-    print(f"\nMerge : {n} photos avec zone-nette + cibles develop\n")
+    print(f"\nMerge: {n} photos with sharp-zone + develop targets\n")
     if n < 50:
-        print("Trop peu pour conclure.")
+        print("Too few to conclude.")
         return
 
     def col(k):
@@ -180,28 +181,28 @@ def main():
     g_y = np.log2(np.clip(col("g_ymean"), 1e-6, None))
     sz_y = np.log2(np.clip(col("sz_ymean"), 1e-6, None))
 
-    print(f"Cibles : Exposure2012 sigma={exp.std():.3f}EV  Temp sigma={temp.std():.0f}K  Tint sigma={tint.std():.1f}")
+    print(f"Targets: Exposure2012 sigma={exp.std():.3f}EV  Temp sigma={temp.std():.0f}K  Tint sigma={tint.std():.1f}")
     print()
-    print("=== EXPOSITION (cible Exposure2012, unite EV) ===")
+    print("=== EXPOSURE (target Exposure2012, unit EV) ===")
     report("global  log2(ymean)",  g_y,  exp, "EV")
-    report("ZONE NETTE log2(ymean)", sz_y, exp, "EV")
+    report("SHARP ZONE log2(ymean)", sz_y, exp, "EV")
     print()
-    print("=== WB TEMPERATURE (cible Temp, unite K) ===")
+    print("=== WB TEMPERATURE (target Temp, unit K) ===")
     report("as-shot r/g",       col("asshot_rg"), temp, "K")
-    report("ZONE NETTE g/r",    col("sz_gr"), temp, "K")
-    report("ZONE NETTE g/b",    col("sz_gb"), temp, "K")
+    report("SHARP ZONE g/r",    col("sz_gr"), temp, "K")
+    report("SHARP ZONE g/b",    col("sz_gb"), temp, "K")
     print()
-    print("=== WB TINT (cible Tint) ===")
-    report("ZONE NETTE g/r",    col("sz_gr"), tint, "")
-    report("ZONE NETTE g/b",    col("sz_gb"), tint, "")
+    print("=== WB TINT (target Tint) ===")
+    report("SHARP ZONE g/r",    col("sz_gr"), tint, "")
+    report("SHARP ZONE g/b",    col("sz_gb"), tint, "")
     print()
-    # dispersion zone-nette vs global (uniformite finals deja vue ; ici sur entree RAW)
-    print("=== DISPERSION luminance RAW d'entree (sigma stops) ===")
+    # sharp-zone vs global dispersion (finals uniformity already seen; here on input RAW)
+    print("=== Input RAW luminance DISPERSION (sigma stops) ===")
     def sig_stops(y):
         med = np.median(y)
         return float(np.std(np.log2(np.clip(y, 1e-6, None) / med)))
     print(f"  global ymean    : {sig_stops(col('g_ymean')):.3f}")
-    print(f"  zone nette ymean : {sig_stops(col('sz_ymean')):.3f}")
+    print(f"  sharp zone ymean : {sig_stops(col('sz_ymean')):.3f}")
 
 
 if __name__ == "__main__":

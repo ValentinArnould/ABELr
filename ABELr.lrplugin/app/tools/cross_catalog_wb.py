@@ -1,14 +1,14 @@
 """
-Generalisation croisee du modele WB Temp ~ as-shot entre catalogues.
+Cross-catalog generalization of the WB Temp ~ as-shot model.
 
-Decide la conception : coefficients UNIVERSELS (un modele bake, zero seed) ou
-PAR-CATALOGUE (pente commune + biais chaleur, 3-5 seeds par event) ?
+Decides the design: UNIVERSAL coefficients (one baked model, zero seed) or
+PER-CATALOG (common slope + warmth bias, 3-5 seeds per event)?
 
-Fit Temp ~ a*r/g + b*b/g + c sur chaque catalogue, puis predit les AUTRES.
-Si predire-hors-catalogue ~ aussi bon que in-sample -> universel.
-Si pente stable mais intercept varie -> seeds calibrent l'intercept (chaleur).
+Fit Temp ~ a*r/g + b*b/g + c on each catalog, then predict the OTHERS.
+If predicting-out-of-catalog is ~ as good as in-sample -> universal.
+If slope is stable but intercept varies -> seeds calibrate the intercept (warmth).
 
-Usage : python -m app.tools.cross_catalog_wb
+Usage: python -m app.tools.cross_catalog_wb
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def rmse(coef, data):
 
 
 def fit_slope_only(data):
-    """Pente commune supposee ; retourne (a,b) moyens via fit, intercept libre."""
+    """Common slope assumed; returns (a,b) averages via fit, intercept free."""
     return fit(data)
 
 
@@ -121,10 +121,10 @@ def main():
         sets["Yggdrasil(1142)"] = load_yggdrasil(p)
 
     names = list(sets)
-    print("Datasets :", {k: len(v) for k, v in sets.items()})
+    print("Datasets:", {k: len(v) for k, v in sets.items()})
     print()
 
-    # coefficients par dataset
+    # coefficients per dataset
     print("=== Coefficients Temp = a*(r/g) + b*(b/g) + c ===")
     coefs = {}
     for n in names:
@@ -136,9 +136,9 @@ def main():
         print(f"  {n:<20} a={c[0]:8.0f}  b={c[1]:8.0f}  c={c[2]:8.0f}   "
               f"in-sample RMSE={rmse(c, sets[n]):6.0f}K  (Temp sigma {temps.std():.0f}K)")
 
-    # generalisation croisee : fit sur X, predire Y
-    print("\n=== GENERALISATION CROISEE (RMSE K) : ligne=fit sur, colonne=predit ===")
-    big = [n for n in names if len(sets[n]) >= 50]  # modeles fiables
+    # cross generalization: fit on X, predict Y
+    print("\n=== CROSS GENERALIZATION (RMSE K): row=fit on, column=predict ===")
+    big = [n for n in names if len(sets[n]) >= 50]  # reliable models
     hdr = "  fit\\pred         " + "".join(f"{n[:12]:>14}" for n in names)
     print(hdr)
     for fn in (big or names):
@@ -152,15 +152,15 @@ def main():
             row += f"{rmse(coefs[fn], sets[pn]):>14.0f}"
         print(row)
 
-    # baseline : predire par la mediane Temp du dataset cible (pas de modele)
-    print("\n=== Baseline (mediane Temp cible, aucun modele) ===")
+    # baseline: predict via the target dataset's median Temp (no model)
+    print("\n=== Baseline (target Temp median, no model) ===")
     for pn in names:
         temps = np.array([d["temp"] for d in sets[pn]])
         base = float(np.sqrt(((temps - np.median(temps)) ** 2).mean()))
         print(f"  {pn:<20} baseline RMSE={base:6.0f}K")
 
-    # intercept stability : meme pente, intercept libre ?
-    print("\n=== Pente stable ? (a,b normalises) ===")
+    # intercept stability: same slope, free intercept?
+    print("\n=== Stable slope? (a,b normalized) ===")
     for n in coefs:
         c = coefs[n]
         print(f"  {n:<20} a/b ratio={c[0]/c[1]:6.2f}")

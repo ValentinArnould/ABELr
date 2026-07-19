@@ -1,17 +1,16 @@
-"""Audit/validation de l'exposition en **espace rendu** sur un catalogue fini.
+"""Audit/validation of exposure in **rendered space** on a finished catalog.
 
-Mesure la clarté CIE L* (`render_metrics.tone_stats`) sur l'**aperçu rendu**
-(Previews.lrdata — déjà rendu par Lr avec les réglages du photographe, donc hors-ligne,
-sans Lr ouvert). Sur une série finie et bien équilibrée, la clarté rendue doit être
-**resserrée** : ça valide que la médiane L* est une cible d'event pertinente (chemin
-primaire de `core.exposure`), et ça liste les photos les plus éloignées (celles qu'un
-rééquilibrage toucherait).
+Measures CIE L* lightness (`render_metrics.tone_stats`) on the **rendered preview**
+(Previews.lrdata — already rendered by Lr with the photographer's settings, so offline,
+without Lr open). On a finished, well-balanced series, the rendered lightness should be
+**tight**: this validates that the median L* is a relevant event target (primary path
+of `core.exposure`), and it lists the photos furthest off (the ones a rebalance would touch).
 
-⚠️ Ce script valide la **mesure** (cible L* rendue) sur de vrais rendus. L'**inversion**
-ΔL*→ΔEV (`core.response`) se valide séparément par sondage dans Lr (job `render_probe`),
-car elle exige de re-rendre après application — impossible hors-ligne.
+⚠️ This script validates the **measurement** (rendered L* target) on real renders. The
+**inversion** ΔL*→ΔEV (`core.response`) is validated separately by probing in Lr (job
+`render_probe`), because it requires re-rendering after applying — impossible offline.
 
-Usage : python -m app.tools.validate_exposure_render "essais/essai CGC" [--limit N]
+Usage: python -m app.tools.validate_exposure_render "essais/essai CGC" [--limit N]
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from app.tools.analyze_ground_truth import parse_develop  # noqa: E402
 
 
 def load_photos(lrcat: Path) -> list[dict]:
-    """(id_global, baseName, Exposure2012) de chaque photo du catalogue."""
+    """(id_global, baseName, Exposure2012) for each photo in the catalog."""
     con = catalog.open_readonly(str(lrcat))
     rows: list[dict] = []
     try:
@@ -49,7 +48,7 @@ def load_photos(lrcat: Path) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("folder")
-    ap.add_argument("--limit", type=int, default=0, help="0 = toutes les photos")
+    ap.add_argument("--limit", type=int, default=0, help="0 = all photos")
     a = ap.parse_args()
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -80,24 +79,24 @@ def main() -> None:
             if r["exp"] is not None:
                 exps.append(float(r["exp"]))
 
-    print(f"{base.name} : {len(rows)} photos, {len(lstars)} avec aperçu rendu "
-          f"({n_no_preview} sans).\n")
+    print(f"{base.name}: {len(rows)} photos, {len(lstars)} with rendered preview "
+          f"({n_no_preview} without).\n")
     if not lstars:
-        print("Aucun aperçu rendu trouvé (Previews.lrdata absent ?).")
+        print("No rendered preview found (Previews.lrdata missing?).")
         return
 
     arr = np.array(lstars)
     target = float(np.median(arr))
-    print("=== Clarté rendue (CIE L*) ===")
-    print(f"  cible (médiane) : {target:.1f}")
-    print(f"  σ série          : {arr.std():.1f}   (resserré = bien équilibré)")
-    print(f"  étendue p05–p95  : {np.percentile(arr,5):.1f} … {np.percentile(arr,95):.1f}")
+    print("=== Rendered lightness (CIE L*) ===")
+    print(f"  target (median) : {target:.1f}")
+    print(f"  σ series          : {arr.std():.1f}   (tight = well balanced)")
+    print(f"  range p05–p95  : {np.percentile(arr,5):.1f} … {np.percentile(arr,95):.1f}")
     if exps:
-        print(f"  Exposure2012 choisi : médiane {np.median(exps):+.2f} EV, σ {np.std(exps):.2f}")
+        print(f"  Exposure2012 chosen : median {np.median(exps):+.2f} EV, σ {np.std(exps):.2f}")
 
-    # Photos les plus éloignées de la cible = candidates à rééquilibrage.
+    # Photos furthest from the target = candidates for rebalancing.
     measured.sort(key=lambda m: abs(m["l"] - target), reverse=True)
-    print("\n=== Plus éloignées de la cible (un rééquilibrage les toucherait) ===")
+    print("\n=== Furthest from target (a rebalance would touch these) ===")
     for m in measured[:10]:
         print(f"  {m['base']:<28} L*={m['l']:5.1f}  ΔL*={m['l']-target:+5.1f}  "
               f"clipHL={m['hi']:.2f} clipBL={m['lo']:.2f}")

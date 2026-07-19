@@ -1,28 +1,28 @@
-"""Calibration Smart Preview ↔ RAW — outil d'inspection (verdict déjà rendu).
+"""Smart Preview ↔ RAW calibration — inspection tool (verdict already reached).
 
-VERDICT (catalogue réel) : la Smart Preview est du raw caméra-natif (LinearRaw,
-avant WB et matrice couleur) → écart d'exposition incohérent (σ ≈ 1.3 stop) et
-ratios WB ingérables vs RAW développé. Conclusion : **analyse sur RAW seul**
-(cf. `image_source` / `previews`). Cet outil reste utile pour ré-inspecter un
-catalogue ou re-tester une éventuelle dérawmatisation SP future.
+VERDICT (real catalog): the Smart Preview is camera-native raw (LinearRaw,
+before WB and the color matrix) → inconsistent exposure offset (σ ≈ 1.3 stop)
+and unmanageable WB ratios vs. developed RAW. Conclusion: **analyze RAW only**
+(see `image_source` / `previews`). This tool remains useful for re-inspecting
+a catalog or re-testing a possible future SP de-raw-matrixing.
 
 
-Pour chaque photo possédant à la fois une Smart Preview et un RAW, décode les
-deux en **scène-linéaire** et compare les statistiques globales qui pilotent
-l'analyse : luminance moyenne (exposition) et ratios par canal (gray-world / WB).
+For each photo that has both a Smart Preview and a RAW, decode both in
+**scene-linear** space and compare the global statistics that drive the
+analysis: mean luminance (exposure) and per-channel ratios (gray-world / WB).
 
-Ce que la sortie tranche :
-- Δ luma faible et **constant** → la Smart Preview suffit ; offset applicable au
-  repli RAW pour rendre les deux sources cohérentes.
-- Δ ratios de canaux faible → primaires SP≈RAW pour la WB ; pas besoin de matrice
-  de conversion de primaires en v1.
-- Δ dispersé (grand écart-type) → sources non interchangeables ; creuser.
+What the output settles:
+- Small and **constant** Δ luma → the Smart Preview is enough; an offset can
+  be applied to the RAW fallback to make the two sources consistent.
+- Small Δ channel ratios → SP≈RAW primaries for WB; no need for a primaries
+  conversion matrix in v1.
+- Scattered Δ (large std dev) → sources are not interchangeable; dig further.
 
-Usage :
+Usage:
     python -m app.tools.calibrate_sp_vs_raw \
         "C:/photos sony/Catalogues/Last soirée Abreu/Last soirée Abreu.lrcat" [N]
 
-N = nombre max de photos (défaut : toutes celles ayant SP + RAW).
+N = max number of photos (default: all photos with both SP + RAW).
 """
 
 from __future__ import annotations
@@ -36,12 +36,12 @@ import numpy as np
 from ..core import catalog, raw
 from ..core.previews import PreviewIndex, decode_smart_preview
 
-# Poids de luminance Rec.709 (appliqués en linéaire).
+# Rec.709 luminance weights (applied in linear space).
 _LUMA = np.array([0.2126, 0.7152, 0.0722], np.float32)
 
 
 def _stats(rgb: np.ndarray) -> dict:
-    """Moyennes par canal + luma + ratios gray-world, sur du RGB float linéaire."""
+    """Per-channel means + luma + gray-world ratios, on linear float RGB."""
     flat = rgb.reshape(-1, 3).astype(np.float32)
     mean = flat.mean(0) + 1e-9  # (R, G, B)
     luma = float((flat * _LUMA).sum(1).mean())
@@ -56,7 +56,7 @@ def _stats(rgb: np.ndarray) -> dict:
 
 
 def _collect(lrcat: str, limit: int | None) -> list[tuple[str, str, str]]:
-    """(stem, id_global, raw_path) pour les photos ayant SP + RAW présent."""
+    """(stem, id_global, raw_path) for photos that have both SP + RAW present."""
     con = catalog.open_readonly(catalog.resolve_catalog(lrcat).lrcat)
     idx = PreviewIndex(lrcat)
     out: list[tuple[str, str, str]] = []
@@ -89,9 +89,9 @@ def main() -> int:
 
     photos = _collect(lrcat, limit)
     if not photos:
-        print("Aucune photo avec Smart Preview + RAW présent.")
+        print("No photo with both Smart Preview + RAW present.")
         return 1
-    print(f"{len(photos)} photo(s) — SP vs RAW (scène-linéaire)\n")
+    print(f"{len(photos)} photo(s) — SP vs RAW (scene-linear)\n")
     print(f"{'photo':<10} {'Δexpo(stops)':>12} {'Δ(g/r)%':>9} {'Δ(g/b)%':>9} "
           f"{'sp_luma':>8} {'raw_luma':>8}")
 
@@ -113,15 +113,15 @@ def main() -> int:
 
     def line(name, xs):
         a = np.array(xs)
-        print(f"  {name:<10} moy {a.mean():+.3f}  écart-type {a.std():.3f}  "
+        print(f"  {name:<10} mean {a.mean():+.3f}  std dev {a.std():.3f}  "
               f"[min {a.min():+.3f} / max {a.max():+.3f}]")
 
-    print("\nAgrégat :")
-    line("Δexpo", d_ev)   # stops ; constant ⇒ offset applicable au repli RAW
-    line("Δ(g/r)%", d_gr)  # ~0 ⇒ primaires compatibles pour la WB
+    print("\nAggregate:")
+    line("Δexpo", d_ev)   # stops; constant ⇒ offset can be applied to the RAW fallback
+    line("Δ(g/r)%", d_gr)  # ~0 ⇒ primaries compatible for WB
     line("Δ(g/b)%", d_bg)
-    print("\nLecture : écart-type faible ⇒ sources cohérentes (offset constant "
-          "corrigeable). Écart-type élevé ⇒ SP et RAW non interchangeables.")
+    print("\nReading: low std dev ⇒ sources consistent (constant offset "
+          "correctable). High std dev ⇒ SP and RAW are not interchangeable.")
     return 0
 
 

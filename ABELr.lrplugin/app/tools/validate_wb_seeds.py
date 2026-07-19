@@ -1,10 +1,10 @@
-"""Validation du modèle WB-seeds (core.wb_model + core.regime) sur un catalogue.
+"""Validation of the WB-seeds model (core.wb_model + core.regime) on a catalog.
 
-Simule le workflow réel : tire k seeds au hasard, calibre, prédit la Temperature
-des photos restantes, compare aux Temperature réellement choisies. Utilise le
-cache `_features.csv` (as-shot) + le catalogue (Temp/Tint/Exp choisis).
+Simulates the real workflow: draws k seeds at random, calibrates, predicts the
+Temperature of the remaining photos, compares against the Temperature actually
+chosen. Uses the `_features.csv` cache (as-shot) + the catalog (chosen Temp/Tint/Exp).
 
-Usage : python -m app.tools.validate_wb_seeds "essais/essai CGC" [--k 6] [--trials 300]
+Usage: python -m app.tools.validate_wb_seeds "essais/essai CGC" [--k 6] [--trials 300]
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def main():
     rows = load_rows(base)
     n = len(rows)
     slope = wb_model.slope_for_camera(a.camera)
-    print(f"{base.name} : {n} photos, pente {a.camera}={slope:.0f}K/[r/g], k={a.k} seeds, {a.trials} tirages\n")
+    print(f"{base.name}: {n} photos, slope {a.camera}={slope:.0f}K/[r/g], k={a.k} seeds, {a.trials} draws\n")
 
     temp_all = np.array([r["temp"] for r in rows])
     tint_all = np.array([r["tint"] for r in rows])
@@ -88,7 +88,7 @@ def main():
         rep = regime.detect(cal)
         regimes[rep.regime.value] += 1
         residuals.append(cal.residual_k)
-        # prédire les autres
+        # predict the others
         pred, true_t, true_tint = [], [], []
         for i, r in enumerate(rows):
             if i in seed_set:
@@ -101,14 +101,14 @@ def main():
         tint_errs.append(np.sqrt(((cal.tint - np.array(true_tint)) ** 2).mean()))
 
     errs = np.array(errs); tint_errs = np.array(tint_errs); residuals = np.array(residuals)
-    print(f"=== Temperature (cible σ {temp_all.std():.0f}K) ===")
-    print(f"  baseline (médiane)      : {base_rmse:.0f}K")
-    print(f"  modèle seeds (pente fixe): {errs.mean():.0f}K  (±{errs.std():.0f}, "
+    print(f"=== Temperature (target σ {temp_all.std():.0f}K) ===")
+    print(f"  baseline (median)      : {base_rmse:.0f}K")
+    print(f"  seed model (fixed slope): {errs.mean():.0f}K  (±{errs.std():.0f}, "
           f"p90 {np.percentile(errs,90):.0f})")
-    print(f"  gain : {(1 - errs.mean()/base_rmse)*100:.0f}% vs ne rien savoir")
-    print(f"\n=== Tint (cible σ {tint_all.std():.1f}) ===")
-    print(f"  médiane seeds RMSE : {tint_errs.mean():.1f}")
-    print(f"\n=== Régime détecté (résidu seed médian {np.median(residuals):.0f}K) ===")
+    print(f"  gain: {(1 - errs.mean()/base_rmse)*100:.0f}% vs knowing nothing")
+    print(f"\n=== Tint (target σ {tint_all.std():.1f}) ===")
+    print(f"  seed median RMSE: {tint_errs.mean():.1f}")
+    print(f"\n=== Detected regime (median seed residual {np.median(residuals):.0f}K) ===")
     for k, v in regimes.items():
         print(f"  {k:<10} : {v*100//a.trials}%")
 

@@ -1,10 +1,10 @@
-"""Chaleur/coherence WB des JPEG finals (rendu voulu par le photographe).
+"""Warmth/coherence of final JPEG WB (the rendering intended by the photographer).
 
-Mesure gray-world g/r, g/b sur un echantillon de finals. Une WB "coherente neutre"
-a g/r et g/b proches de 1 (gris moyen neutre). Trop chaud = exces de rouge
-(g/r < 1) et/ou manque de bleu (g/b > 1). On regarde la mediane et la dispersion.
+Measures gray-world g/r, g/b on a sample of finals. A "neutral coherent" WB
+has g/r and g/b close to 1 (neutral mid-gray). Too warm = excess red
+(g/r < 1) and/or lack of blue (g/b > 1). Looks at the median and the dispersion.
 
-Usage : python -m app.tools.finals_warmth "essais/essai CGC" [--sample 250]
+Usage: python -m app.tools.finals_warmth "essais/essai CGC" [--sample 250]
 """
 from __future__ import annotations
 import argparse, sys
@@ -50,17 +50,17 @@ def main():
     with ProcessPoolExecutor(max_workers=10) as ex:
         res = [r for r in ex.map(_w, [str(p) for p in jpg]) if r]
     gr = np.array([r["gr"] for r in res]); gb = np.array([r["gb"] for r in res])
-    print(f"\nGray-world final (n={len(res)}) :")
+    print(f"\nFinal gray-world (n={len(res)}):")
     print(f"  g/r : med {np.median(gr):.3f}  sigma {gr.std():.3f}  [{np.percentile(gr,10):.2f}, {np.percentile(gr,90):.2f}]")
     print(f"  g/b : med {np.median(gb):.3f}  sigma {gb.std():.3f}  [{np.percentile(gb,10):.2f}, {np.percentile(gb,90):.2f}]")
     # interpretation
-    warm = np.mean(gr < 0.9) * 100  # exces rouge
-    print(f"\n  Photos g/r<0.9 (chaudes/rouges) : {warm:.0f}%")
+    warm = np.mean(gr < 0.9) * 100  # excess red
+    print(f"\n  Photos g/r<0.9 (warm/red): {warm:.0f}%")
     if abs(np.median(gr) - 1) < 0.12 and abs(np.median(gb) - 1) < 0.15:
-        print("  -> WB finale globalement COHERENTE (proche neutre)")
+        print("  -> final WB globally COHERENT (close to neutral)")
     else:
-        bias = "chaude (rouge)" if np.median(gr) < 1 else "froide"
-        print(f"  -> biais median {bias} ; dispersion {'serree' if gr.std()<0.12 else 'large'}")
+        bias = "warm (red)" if np.median(gr) < 1 else "cool"
+        print(f"  -> median bias {bias}; dispersion {'tight' if gr.std()<0.12 else 'wide'}")
 
 
 if __name__ == "__main__":

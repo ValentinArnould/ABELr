@@ -1,13 +1,13 @@
-"""Re-validation : pipeline RAW **GPU** vs **LibRaw** (CPU) — parité des scalaires.
+"""Re-validation: **GPU** RAW pipeline vs **LibRaw** (CPU) -- scalar parity.
 
-Le passage du décodage RAW sur GPU (`core.gpu_raw`) remplace LibRaw (`core.raw.load_linear`
-+ `core.analysis`). Comme le demosaic et la conversion couleur diffèrent, ce script mesure
-l'écart sur les scalaires qui pilotent les corrections : exposition (Y moyen/médian),
-gray-world (g/r, g/b), WB as-shot. Si l'écart dépasse la tolérance, ajuster la matrice
-couleur / l'adaptation dans `gpu_raw._cam_to_prophoto` avant de faire confiance au GPU.
+Moving RAW decoding to GPU (`core.gpu_raw`) replaces LibRaw (`core.raw.load_linear`
++ `core.analysis`). Since demosaic and color conversion differ, this script measures
+the gap on the scalars that drive the corrections: exposure (mean/median Y),
+gray-world (g/r, g/b), as-shot WB. If the gap exceeds the tolerance, adjust the
+color matrix / adaptation in `gpu_raw._cam_to_prophoto` before trusting the GPU.
 
-Usage :
-    python -m app.tools.validate_gpu_vs_libraw <dossier_ou_fichiers...> [--n 8]
+Usage:
+    python -m app.tools.validate_gpu_vs_libraw <folder_or_files...> [--n 8]
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _libraw_scalars(path: str) -> dict[str, float]:
 def _gpu_scalars(path: str) -> dict[str, float]:
     res = gpu_raw.analyze_raw_gpu(path)
     if res is None:
-        raise RuntimeError(f"GPU decode échoué : {path}")
+        raise RuntimeError(f"GPU decode failed: {path}")
     return {
         "mean_luma": res.exposure.mean_luma, "median_luma": res.exposure.median_luma,
         "gw_rg": res.grayworld_rg, "gw_bg": res.grayworld_bg,
@@ -56,13 +56,13 @@ def _collect_paths(args: list[str], n: int) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("paths", nargs="+", help="dossier(s) ou fichier(s) ARW")
-    ap.add_argument("--n", type=int, default=8, help="nb de RAW à échantillonner")
+    ap.add_argument("paths", nargs="+", help="folder(s) or ARW file(s)")
+    ap.add_argument("--n", type=int, default=8, help="number of RAW files to sample")
     args = ap.parse_args()
 
     paths = _collect_paths(args.paths, args.n)
     if not paths:
-        print("Aucun ARW trouvé.")
+        print("No ARW found.")
         return 1
 
     keys = ["mean_luma", "median_luma", "gw_rg", "gw_bg", "asshot_rg", "asshot_bg"]
@@ -85,7 +85,7 @@ def main() -> int:
             gpu_vals[k].append(gp[k])
             print(f"  {k:12s} lib={lib[k]:8.4f}  gpu={gp[k]:8.4f}  d={d:+.4f}")
 
-    print("\n=== Résumé (écart absolu moyen + corrélation) ===")
+    print("\n=== Summary (mean absolute deviation + correlation) ===")
     for k in keys:
         if not diffs[k]:
             continue

@@ -54,7 +54,7 @@ def analyze_jpeg(path: Path, k: int) -> dict | None:
     if mask.sum() < MIN_PIXELS:
         return None
 
-    # --- Zone nette pixels ---
+    # --- Sharp zone pixels ---
     lin = lin_full
     zone_pix = lin[mask]  # (N, 3) float32
 
@@ -176,38 +176,38 @@ def main():
     print()
     print("LUMINANCE sigma (stops) :")
     print(f"  Global     : {_sigma_stops(g_luma):.3f}")
-    print(f"  Zone nette (mean) : {_sigma_stops(zm_luma):.3f}")
-    print(f"  Cluster neutre    : {_sigma_stops(n_luma):.3f}  <-- cible")
-    print(f"  (cluster neutre = {n_pct.mean()*100:.1f}% des pixels de zone nette en moyenne)")
+    print(f"  Sharp zone (mean) : {_sigma_stops(zm_luma):.3f}")
+    print(f"  Neutral cluster    : {_sigma_stops(n_luma):.3f}  <-- target")
+    print(f"  (neutral cluster = {n_pct.mean()*100:.1f}% of sharp-zone pixels on average)")
     print()
     print("WB g/r sigma :")
     print(f"  Global     : {g_gr.std():.4f}  med={np.median(g_gr):.3f}")
-    print(f"  Zone nette : {zm_gr.std():.4f}  med={np.median(zm_gr):.3f}")
-    print(f"  Cluster neutre : {n_gr.std():.4f}  med={np.median(n_gr):.3f}")
+    print(f"  Sharp zone : {zm_gr.std():.4f}  med={np.median(zm_gr):.3f}")
+    print(f"  Neutral cluster : {n_gr.std():.4f}  med={np.median(n_gr):.3f}")
     print()
     print("WB g/b sigma :")
     print(f"  Global     : {g_gb.std():.4f}  med={np.median(g_gb):.3f}")
-    print(f"  Zone nette : {zm_gb.std():.4f}  med={np.median(zm_gb):.3f}")
-    print(f"  Cluster neutre : {n_gb.std():.4f}  med={np.median(n_gb):.3f}")
+    print(f"  Sharp zone : {zm_gb.std():.4f}  med={np.median(zm_gb):.3f}")
+    print(f"  Neutral cluster : {n_gb.std():.4f}  med={np.median(n_gb):.3f}")
     print()
-    print("Chroma cluster neutre (min=plus gris) :")
+    print("Neutral cluster chroma (min=grayest) :")
     n_chroma = arr("n_chroma")
     print(f"  med={np.median(n_chroma):.4f}  sigma={n_chroma.std():.4f}")
     print()
     # Summary
-    print("=== SYNTHESE ===")
+    print("=== SUMMARY ===")
     sig_g  = _sigma_stops(g_luma)
     sig_zm = _sigma_stops(zm_luma)
     sig_n  = _sigma_stops(n_luma)
-    print(f"Ratio zone-nette/global  : {sig_zm/sig_g:.2f}x")
-    print(f"Ratio neutre/global      : {sig_n/sig_g:.2f}x")
+    print(f"Ratio sharp-zone/global  : {sig_zm/sig_g:.2f}x")
+    print(f"Ratio neutral/global      : {sig_n/sig_g:.2f}x")
     if sig_n < sig_zm:
-        print(f"Clustering AIDE (+{(sig_zm-sig_n)/sig_zm*100:.0f}% vs zone-mean)")
+        print(f"Clustering HELPS (+{(sig_zm-sig_n)/sig_zm*100:.0f}% vs zone-mean)")
     else:
-        print("Clustering n'aide PAS vs zone-mean")
+        print("Clustering does NOT help vs zone-mean")
     gr_ratio = n_gr.std() / g_gr.std()
     gb_ratio = n_gb.std() / g_gb.std()
-    print(f"WB g/r: neutre/global = {gr_ratio:.2f}x  g/b: {gb_ratio:.2f}x")
+    print(f"WB g/r: neutral/global = {gr_ratio:.2f}x  g/b: {gb_ratio:.2f}x")
 
 
 if __name__ == "__main__":

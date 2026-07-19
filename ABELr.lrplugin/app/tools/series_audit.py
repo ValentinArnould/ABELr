@@ -1,23 +1,23 @@
 """
-Audit d'une serie evenementielle : determiner si expo/WB sont PREDICTIBLES
-par photo, et dans quel REGIME de WB se situe la serie.
+Audit of an event series: determine whether exposure/WB are PREDICTABLE
+per photo, and which WB REGIME the series falls under.
 
-Question centrale : la serie SUIT-elle l'AWB boitier (regime ou Temp ~ as-shot
-fonctionne) ou IMPOSE-t-elle une teinte/expo arbitraire
-(regime Yggdrasil ou tout echoue) ? Le 2e est l'exception (look artistique 2 mois) ;
-le 1er devrait etre la norme des events retouches.
+Central question: does the series FOLLOW the camera's AWB (a regime where
+Temp ~ as-shot works) or does it IMPOSE an arbitrary tint/exposure
+(the Yggdrasil regime, where everything fails)? The 2nd is the exception (a
+2-month artistic look); the 1st should be the norm for retouched events.
 
-Pour chaque RAW (parallele) :
-  - decode ProPhoto lineaire -> ymean global, gray-world g/r g/b
+For each RAW (in parallel):
+  - decode linear ProPhoto -> global ymean, gray-world g/r g/b
   - as-shot WB (rawpy camera_whitebalance) -> r/g, b/g
-Catalogue : Exposure2012, Temperature, Tint par photo (baseName).
+Catalog: Exposure2012, Temperature, Tint per photo (baseName).
 
-Sorties :
-  - regressions expo (~log2 ymean) et WB (Temp/Tint ~ as-shot), R2 + LOO-RMSE
-  - coherence WB : dispersion Temp/Tint choisis ; correlation as-shot<->choisi
-  - chaleur : Temp median + part de photos "chaudes" (Temp > seuil)
+Outputs:
+  - exposure regressions (~log2 ymean) and WB (Temp/Tint ~ as-shot), R2 + LOO-RMSE
+  - WB coherence: dispersion of chosen Temp/Tint; as-shot<->chosen correlation
+  - warmth: median Temp + share of "warm" photos (Temp > threshold)
 
-Usage :
+Usage:
     python -m app.tools.series_audit "essais/essai CGC" [--workers 10] [--cache]
 """
 
@@ -103,10 +103,10 @@ def regress(x, y):
 
 def line(name, res, unit):
     if res is None:
-        print(f"  {name:<26} (trop peu)")
+        print(f"  {name:<26} (too few)")
         return
     r2, loo, base, n, _ = res
-    flag = "  <== AIDE" if loo < base * 0.9 else ""
+    flag = "  <== HELPS" if loo < base * 0.9 else ""
     print(f"  {name:<26} R2={r2:5.3f}  LOO={loo:8.3f}{unit}  base={base:7.3f}  n={n}{flag}")
 
 
@@ -123,14 +123,14 @@ def main():
 
     base = Path(args.folder).resolve()
     lrcat = next(base.glob("**/*.lrcat"))
-    print(f"Catalogue : {lrcat.name}")
+    print(f"Catalog: {lrcat.name}")
     dev = read_catalog(lrcat)
-    print(f"  {len(dev)} photos dans le catalogue")
+    print(f"  {len(dev)} photos in the catalog")
 
     cache = base / "_features.csv"
     feats = {}
     if cache.is_file():
-        print(f"Cache RAW : {cache}")
+        print(f"RAW cache: {cache}")
         with cache.open(encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 feats[row["photo"]] = {k: float(v) for k, v in row.items()
@@ -139,7 +139,7 @@ def main():
         raws = sorted((base / "RAW").rglob("*.ARW"))
         if args.limit:
             raws = raws[: args.limit]
-        print(f"Decodage {len(raws)} RAW ({args.workers} workers)...")
+        print(f"Decoding {len(raws)} RAW files ({args.workers} workers)...")
         with ProcessPoolExecutor(max_workers=args.workers) as ex:
             for i, m in enumerate(ex.map(_worker, [str(r) for r in raws])):
                 if m:
@@ -151,7 +151,7 @@ def main():
             w.writeheader()
             for v in feats.values():
                 w.writerow(v)
-        print(f"Ecrit {cache}")
+        print(f"Wrote {cache}")
 
     # merge
     rows = []
@@ -161,9 +161,9 @@ def main():
             continue
         rows.append({**f, **d})
     n = len(rows)
-    print(f"\nMerge : {n} photos\n")
+    print(f"\nMerge: {n} photos\n")
     if n < 50:
-        print("Trop peu.")
+        print("Too few.")
         return
 
     def col(k):
@@ -173,7 +173,7 @@ def main():
     ymean = col("ymean")
     a_rg, a_bg = col("asshot_rg"), col("asshot_bg")
 
-    print("=== CIBLES (ce que le photographe a choisi) ===")
+    print("=== TARGETS (what the photographer chose) ===")
     print(f"  Exposure2012 : med {np.nanmedian(exp):+.2f}  sigma {np.nanstd(exp):.3f}EV  "
           f"[{np.nanmin(exp):+.2f}, {np.nanmax(exp):+.2f}]")
     print(f"  Temperature  : med {np.nanmedian(temp):.0f}K  sigma {np.nanstd(temp):.0f}K  "
@@ -186,13 +186,13 @@ def main():
         modes[r.get("wbmode")] = modes.get(r.get("wbmode"), 0) + 1
     print(f"  WB mode      : {modes}")
 
-    print("\n=== EXPOSITION : Exposure2012 ~ log2(ymean global) ===")
+    print("\n=== EXPOSURE: Exposure2012 ~ log2(global ymean) ===")
     line("log2(ymean)", regress(np.log2(np.clip(ymean, 1e-6, None)), exp), "EV")
 
-    print("\n=== WB TEMPERATURE : regime AWB-suivable ? ===")
+    print("\n=== WB TEMPERATURE: AWB-followable regime? ===")
     line("as-shot r/g",          regress(a_rg, temp), "K")
     line("as-shot b/g",          regress(a_bg, temp), "K")
-    # modele 2D poole : Temp ~ a*r/g + b*b/g + c
+    # pooled 2D model: Temp ~ a*r/g + b*b/g + c
     m = np.isfinite(a_rg) & np.isfinite(a_bg) & np.isfinite(temp)
     if m.sum() > 30:
         A = np.vstack([a_rg[m], a_bg[m], np.ones(m.sum())]).T
@@ -202,28 +202,28 @@ def main():
         H = (A @ np.linalg.pinv(A.T @ A) @ A.T).diagonal()
         loo = float(np.sqrt((((temp[m]-pred)/np.clip(1-H,1e-6,None))**2).mean()))
         base = float(np.sqrt(((temp[m]-temp[m].mean())**2).mean()))
-        flag = "  <== AIDE" if loo < base*0.9 else ""
+        flag = "  <== HELPS" if loo < base*0.9 else ""
         print(f"  {'2D as-shot (r/g,b/g)':<26} R2={r2:5.3f}  LOO={loo:8.1f}K  base={base:7.1f}  n={m.sum()}{flag}")
 
     print("\n=== WB TINT ~ as-shot ===")
     line("as-shot r/g", regress(a_rg, tint), "")
     line("as-shot b/g", regress(a_bg, tint), "")
 
-    print("\n=== COHERENCE / CHALEUR WB ===")
-    # gray-world final non dispo ici (pas de finals decodes) ; on juge sur Temp choisi
+    print("\n=== WB COHERENCE / WARMTH ===")
+    # final gray-world not available here (no finals decoded); judge based on chosen Temp
     warm = np.nanmean(temp > 5500) * 100
     cool = np.nanmean(temp < 4500) * 100
-    print(f"  Temp > 5500K (chaud) : {warm:.0f}%   Temp < 4500K (froid) : {cool:.0f}%")
-    # coherence : si Temp tres concentre -> serie homogene ; si suit as-shot -> per-photo physique
+    print(f"  Temp > 5500K (warm): {warm:.0f}%   Temp < 4500K (cool): {cool:.0f}%")
+    # coherence: if Temp is tightly clustered -> homogeneous series; if it follows as-shot -> per-photo physical
     res = regress(a_rg, temp)
     if res:
         r2 = res[0]
         if r2 > 0.4:
-            print(f"  -> REGIME AWB-SUIVABLE (Temp ~ as-shot R2={r2:.2f}) : WB predictible physiquement")
+            print(f"  -> AWB-FOLLOWABLE REGIME (Temp ~ as-shot R2={r2:.2f}): WB is physically predictable")
         elif np.nanstd(temp) < 250:
-            print(f"  -> REGIME SERIE-CONSTANTE (Temp sigma {np.nanstd(temp):.0f}K, as-shot ignore)")
+            print(f"  -> CONSTANT-SERIES REGIME (Temp sigma {np.nanstd(temp):.0f}K, as-shot ignored)")
         else:
-            print(f"  -> REGIME MIXTE/ARTISTIQUE (Temp varie {np.nanstd(temp):.0f}K mais R2 as-shot {r2:.2f} faible)")
+            print(f"  -> MIXED/ARTISTIC REGIME (Temp varies {np.nanstd(temp):.0f}K but as-shot R2 {r2:.2f} is low)")
 
 
 if __name__ == "__main__":
