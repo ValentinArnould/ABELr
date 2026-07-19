@@ -86,3 +86,61 @@ def test_calib_develop_dict_writes_present_fields_clamped_and_rounded():
     # Champs absents chez la cible (RedSaturation/BlueHue/BlueSaturation) omis.
     assert "RedSaturation" not in dev
     assert "BlueHue" not in dev
+
+
+# --------------------------------------------------------------------------- #
+# H1 (PLAN) — la garde `raw_oversat` est câblée depuis le RAW zone nette de la
+# photo cible (pas des seeds) dans les deux constructeurs de BandTarget.
+# --------------------------------------------------------------------------- #
+def _raw_band(name="Red", sat_clip_frac=0.0, frac=0.5):
+    from app.core.render_metrics import BandStats
+
+    return BandStats(
+        name=name, frac=frac, median_hue=0.0, median_chroma=40.0,
+        median_sat=0.5, sat_clip_frac=sat_clip_frac, median_l=50.0,
+    )
+
+
+def test_embedded_band_targets_wires_raw_oversat_from_target_photo_raw():
+    from app.core.pipeline import RenderAnalysis
+    from app.core.render_metrics import BandStats
+
+    t = RenderAnalysis(
+        tone=None, neutral=None,
+        bands=[BandStats("Red", 0.5, 0.0, 40.0, 0.5, 0.0, 50.0)],
+    )
+    bias = ac.ProfileBias(n=8)
+
+    # RAW confirme (sat_clip_frac dur) → raw_oversat=True.
+    raw_bands = [_raw_band(sat_clip_frac=0.10)]
+    tgs = ac._embedded_band_targets(t, bias, ignore_bias=True, raw_bands=raw_bands)
+    assert tgs["Red"].raw_oversat is True
+
+    # RAW infirme (pas de clip dur) → raw_oversat=False.
+    raw_bands = [_raw_band(sat_clip_frac=0.0)]
+    tgs = ac._embedded_band_targets(t, bias, ignore_bias=True, raw_bands=raw_bands)
+    assert tgs["Red"].raw_oversat is False
+
+    # Pas d'info RAW → raw_oversat=None (comportement historique, pas de blocage).
+    tgs = ac._embedded_band_targets(t, bias, ignore_bias=True, raw_bands=None)
+    assert tgs["Red"].raw_oversat is None
+
+
+def test_band_targets_from_seed_match_wires_raw_oversat_from_target_photo_raw():
+    from app.core.seed_match import SeedTarget
+    from app.core.render_metrics import BandStats
+
+    t = SeedTarget(
+        temperature=None, tint=None, tone=None,
+        bands=[BandStats("Red", 0.5, 0.0, 40.0, 0.5, 0.0, 50.0)],
+        shadow_tint=None, red_hue=None, red_saturation=None,
+        green_hue=None, green_saturation=None, blue_hue=None, blue_saturation=None,
+        n_matched=1, seed_ids=["s"],
+    )
+
+    raw_bands = [_raw_band(sat_clip_frac=0.10)]
+    tgs = ac._band_targets_from_seed_match(t, raw_bands=raw_bands)
+    assert tgs["Red"].raw_oversat is True
+
+    tgs = ac._band_targets_from_seed_match(t, raw_bands=None)
+    assert tgs["Red"].raw_oversat is None

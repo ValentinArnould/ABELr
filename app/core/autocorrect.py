@@ -82,6 +82,7 @@ class PhotoMeasure:
     analysis: RenderAnalysis | None = None   # rendu courant (zone nette) — mode seeds
     is_seed: bool = False                    # marquage explicite (cache.is_seed)
     raw_tone: ToneStats | None = None        # RAW source, zone nette — clé du matching k-NN
+    raw_bands: list[BandStats] | None = None  # RAW source, zone nette — garde HSL raw_oversat
     embedded_sharp: RenderAnalysis | None = None   # T : JPEG boîtier (zone nette)
     embedded_global: RenderAnalysis | None = None  # T : JPEG boîtier (global)
     neutral_sharp: RenderAnalysis | None = None    # N : rendu neutre (zone nette)
@@ -168,8 +169,19 @@ def _pair_for(
     return None, None, variant
 
 
+def _raw_oversat_by_name(raw_bands: list[BandStats] | None) -> dict[str, bool | None]:
+    """Nom de bande → `raw_oversat` (garde HSL), depuis les bandes RAW zone nette
+    de la photo cible (`PhotoMeasure.raw_bands` — RAW de la photo qu'on corrige,
+    pas des seeds : c'est sa propre capture qui doit confirmer la sursaturation)."""
+    return {b.name: _hsl.raw_confirms_oversat(b) for b in (raw_bands or [])}
+
+
 def _embedded_band_targets(
-    t: RenderAnalysis, bias: ProfileBias, *, ignore_bias: bool = False
+    t: RenderAnalysis,
+    bias: ProfileBias,
+    *,
+    ignore_bias: bool = False,
+    raw_bands: list[BandStats] | None = None,
 ) -> dict[str, BandTarget]:
     """Cibles HSL embedded = bandes du JPEG boîtier.
 
@@ -179,6 +191,7 @@ def _embedded_band_targets(
     vise que la déviation par rapport à la norme du couple profil × style, et les
     bandes sans norme de biais sont sautées.
     """
+    raw_by_name = _raw_oversat_by_name(raw_bands)
     out: dict[str, BandTarget] = {}
     for b in t.bands or []:
         if not band_is_reliable(b):
@@ -189,6 +202,7 @@ def _embedded_band_targets(
                 chroma=b.median_chroma,
                 lstar=b.median_l,
                 hue=b.median_hue,
+                raw_oversat=raw_by_name.get(b.name),
             )
             continue
         b_bias = bias.bands.get(b.name)
@@ -200,18 +214,29 @@ def _embedded_band_targets(
             chroma=b.median_chroma - dchroma,
             lstar=b.median_l - dl,
             hue=b.median_hue - dhue,
+            raw_oversat=raw_by_name.get(b.name),
         )
     return out
 
 
-def _band_targets_from_seed_match(t: SeedTarget | None) -> dict[str, BandTarget]:
-    """Cibles HSL = bandes agrégées des seeds les plus proches (déjà pondérées)."""
+def _band_targets_from_seed_match(
+    t: SeedTarget | None, raw_bands: list[BandStats] | None = None
+) -> dict[str, BandTarget]:
+    """Cibles HSL = bandes agrégées des seeds les plus proches (déjà pondérées).
+
+    `raw_bands` : RAW zone nette de la photo **cible** (celle qu'on corrige, pas les
+    seeds) — sert uniquement de garde `raw_oversat` (cf. `_raw_oversat_by_name`)."""
     out: dict[str, BandTarget] = {}
     if t is None or not t.bands:
         return out
+    raw_by_name = _raw_oversat_by_name(raw_bands)
     for b in t.bands:
         out[b.name] = BandTarget(
-            name=b.name, chroma=b.median_chroma, lstar=b.median_l, hue=b.median_hue
+            name=b.name,
+            chroma=b.median_chroma,
+            lstar=b.median_l,
+            hue=b.median_hue,
+            raw_oversat=raw_by_name.get(b.name),
         )
     return out
 
@@ -394,7 +419,7 @@ def _plan_embedded(
     if "hsl" in axes:
         n_written = 0
         for m, _variant, t, n, bias in resolved:
-            tgs = _embedded_band_targets(t, bias, ignore_bias=True)
+            tgs = _embedded_band_targets(t, bias, ignore_bias=True, raw_bands=m.raw_bands)
             deltas, _corrs = _hsl.plan_hsl(n.bands or [], tgs, model)
             wrote = False
             for key, d in deltas.items():
@@ -517,7 +542,7 @@ def _plan_seeds(
     if "hsl" in axes:
         n_hsl = 0
         for m in usable:
-            tgs = _band_targets_from_seed_match(_match(m))
+            tgs = _band_targets_from_seed_match(_match(m), raw_bands=m.raw_bands)
             deltas, _corrs = _hsl.plan_hsl(m.analysis.bands, tgs, model)
             for key, d in deltas.items():
                 cur = _f(m.current_develop, key, 0.0)

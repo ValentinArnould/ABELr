@@ -38,12 +38,20 @@ intelligente. Cœur : **exposition / HSL / Calibration / White Balance par photo
 - Chemins Windows via `LrPathUtils` — jamais concaténer `/`.
 - Modules SDK : `import 'LrXxx'` ; modules du plugin : `require`.
 - Pas de lib JSON native → `Json.lua` embarqué (`Json.array(t)` force un tableau JSON).
+- `Collections.lua`, `Metadata.lua`, `PhotoLookup.lua`, `Presets.lua` (Phase 2, câblés dans
+  `PollingLoop.lua`) contiennent des méthodes SDK marquées ⚠️ non vérifiées en Lr live dans leur
+  propre en-tête — même règle que `lr15_sdk_api_reference.md` : confirmer avant d'étendre/copier
+  leur usage.
 
 **App Python :**
-- **GPU-strict** : aucun repli CPU de calcul. `gpu.require_cuda()` lève `GpuUnavailable` si CUDA
-  absent → le worker échoue avec un message clair. Ne pas ajouter de fallback CPU silencieux.
-- **Cache obligatoire** : les workers consultent `cache` (SQLite, 5 tables) d'abord. `ANALYSIS_VERSION`
-  salée dans les hash → changer l'algo de mesure = bumper la version (rebuild complet, pas de migration).
+- **GPU-strict** : aucun repli CPU de calcul. `app/core/gpu.py` : `require_cuda()` lève
+  `GpuUnavailable` si CUDA absent → le worker échoue avec un message clair. Ne pas ajouter de
+  fallback CPU silencieux.
+- **Cache obligatoire** : les workers consultent `cache` (SQLite, `app/core/cache.py`, 5 tables —
+  `LightroomPicture`, `SourceRAW`, `InCameraJPEG`, `PreviewJPEG`, `NeutralPreviewJPEG`) d'abord.
+  `ANALYSIS_VERSION` salée dans les hash → changer l'algo de mesure = bumper la constante
+  (rebuild complet, pas de migration ; ne pas graver sa valeur ici, elle bouge à chaque bump —
+  lire `cache.py` si besoin de la valeur courante).
 - **`python -m app.main` tourne sans Lightroom** : le serveur démarre seul, le pont reste juste
   « déconnecté ». Le décodage RAW n'exige que le `.ARW` sur disque, jamais le catalogue ni Lr.
 
@@ -53,21 +61,31 @@ intelligente. Cœur : **exposition / HSL / Calibration / White Balance par photo
 
 ---
 
-## Communication (détail : ARCHITECTURE.md §2)
+## Communication (détail : ARCHITECTURE.md §2 — ⚠️ ce §2 est en retard sur cette section, se fier à celle-ci)
 
 **Plugin = TOUJOURS client HTTP. App = TOUJOURS serveur (`127.0.0.1:5000`).** L'App ne pousse
 jamais : elle dépose un job dans `job_queue`, le plugin le récupère en pollant (`GET /jobs/pending`,
-300 ms) et renvoie via `POST /jobs/{id}/result`. Les ajustements passent aussi par la queue (job
-`apply_adjustments`).
+300 ms) et renvoie via `POST /jobs/{id}/result`.
 
-Jobs : `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`,
-`apply_adjustments`.
+Jobs (14 — source de vérité : `JobType` enum `app/server/models.py` + `dispatch()`
+`PollingLoop.lua`, garder synchrones à tout ajout) :
+- Base : `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`, `apply_adjustments`
+- Métadonnées : `set_rating`, `set_flag_color`, `set_keywords`
+- Collections : `list_collections`, `create_collection`, `add_to_collection`
+- Presets : `list_develop_presets`, `apply_develop_preset`
 
 ```json
 { "job_id": "uuid", "type": "apply_adjustments",
   "payload": { "adjustments": [ { "photo_id": "...", "develop": {
       "WhiteBalance": "Custom", "Temperature": 5650, "Tint": -5, "Exposure2012": 0.35 } } ] } }
 ```
+
+**Second canal — MCP (`app/mcp/server.py` + `tools.py`, monté sur `/mcp` dans `app/server/api.py`)** :
+expose le `job_queue` ci-dessus comme 15 tools MCP pour Claude Code lui-même (introspection,
+lecture, écriture, métadonnées/collections/presets), enregistré dans [`.mcp.json`](.mcp.json)
+(serveur `lr-automation`, `http://127.0.0.1:5000/mcp`). Sert à piloter Lr live pendant le dev sans
+écrire de script. Requiert `python -m app.main` lancé ; tools dépendants du bridge timeout
+proprement si le plugin Lr n'est pas connecté (pas de crash).
 
 ---
 
@@ -79,7 +97,8 @@ externes* > Recharger → tester via *Bibliothèque > Modules externes* → logs
 
 **App Python :** `python -m app.main` depuis la racine (ou `launch_app.ps1`). Venv attendu en
 `app/.venv`. Endpoints : `curl http://127.0.0.1:5000/health`. Mock sans Lr :
-`python -m app.tools.mock_plugin`.
+`python -m app.tools.mock_plugin`. Piloter Lr live sans écrire de script : tools MCP
+`lr-automation` (cf. § Communication) — app lancée requise.
 
 **Tests unitaires (fonctions pures, sans GPU ni RAW) :**
 ```

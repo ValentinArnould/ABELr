@@ -65,6 +65,22 @@ class BandTarget:
     raw_oversat: bool | None = None
 
 
+def raw_confirms_oversat(raw_band: BandStats | None, min_frac: float = _MIN_FRAC) -> bool | None:
+    """Le RAW (zone nette) confirme-t-il qu'une bande est réellement chargée à la
+    capture ? Peuple `BandTarget.raw_oversat` (garde anti-sur-correction : ne pas
+    réduire une saturation que le rendu montre mais que le RAW dément).
+
+    None : pas de mesure RAW pour cette bande, ou population RAW insuffisante
+    (`min_frac`) → aucune info, on ne bloque pas (comportement historique).
+    True/False sinon, sur le même seuil de sursaturation dure (`_SAT_CLIP_TRIGGER`,
+    pixels quasi-saturés S≥0.97) que celui utilisé sur le rendu — évidence directe
+    du capteur, pas un seuil de chroma inventé.
+    """
+    if raw_band is None or raw_band.frac < min_frac:
+        return None
+    return raw_band.sat_clip_frac >= _SAT_CLIP_TRIGGER
+
+
 @dataclass
 class HslCorrection:
     """Delta de curseurs HSL décidé pour une bande (diagnostic + application)."""

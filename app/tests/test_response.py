@@ -52,6 +52,35 @@ def test_wb_singular_jacobian_returns_zero():
     assert wb.solve(2.0, 3.0) == (0.0, 0.0)
 
 
+# --- Sondage HSL : fit de pente (H2) ----------------------------------------- #
+def test_fit_linear_response_recovers_known_slope():
+    # Delta curseur connu → pente attendue : mesuré = 0.6*delta + décalage constant
+    # (décalage absorbé par l'ordonnée libre, seule la pente doit être retrouvée).
+    deltas = [-15.0, -8.0, 0.0, 8.0, 15.0]
+    measured = [5.0 + 0.6 * d for d in deltas]
+    assert rsp.fit_linear_response(deltas, measured) == pytest.approx(0.6, abs=1e-9)
+
+
+def test_fit_linear_response_negative_slope():
+    deltas = [-10.0, -5.0, 5.0, 10.0]
+    measured = [-0.35 * d for d in deltas]
+    assert rsp.fit_linear_response(deltas, measured) == pytest.approx(-0.35, abs=1e-9)
+
+
+def test_fit_linear_response_needs_at_least_two_samples():
+    assert rsp.fit_linear_response([5.0], [3.0]) == 0.0
+    assert rsp.fit_linear_response([], []) == 0.0
+
+
+def test_fit_linear_response_zero_when_deltas_not_dispersed():
+    # Tous les deltas sondés identiques → pente non identifiable.
+    assert rsp.fit_linear_response([8.0, 8.0, 8.0], [1.0, 2.0, 3.0]) == 0.0
+
+
+def test_fit_linear_response_mismatched_lengths_returns_zero():
+    assert rsp.fit_linear_response([1.0, 2.0], [1.0]) == 0.0
+
+
 # --- Modèle complet + clés de cache ----------------------------------------- #
 def test_band_fallback_is_default_response():
     m = rsp.ResponseModel(camera="ILCE-7M4", profile="Adobe Color")

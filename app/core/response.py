@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -126,6 +127,28 @@ class WBResponse:
         dtemp100 = (ta * self.db_dtint - self.da_dtint * tb) / det
         dtint = (self.da_dtemp * tb - ta * self.db_dtemp) / det
         return dtemp100 * 100.0, dtint
+
+
+def fit_linear_response(deltas: Sequence[float], measured: Sequence[float]) -> float:
+    """Pente ∂mesuré/∂delta_curseur — régression linéaire (moindres carrés, ordonnée
+    libre) sur des échantillons de sondage (delta de curseur connu, mesure rendue).
+
+    Ordonnée libre (pas de passage forcé par l'origine) : absorbe un décalage de
+    mesure constant entre échantillons (bruit de rendu), seule la PENTE nous
+    intéresse (`BandResponse.dchroma_dsat` etc. — cf. `core.hsl`).
+    Retourne 0.0 si <2 échantillons ou deltas non dispersés (pente non identifiable,
+    ex. tous les deltas sondés identiques) — le caller retombe sur le prior nominal.
+    """
+    n = len(deltas)
+    if n != len(measured) or n < 2:
+        return 0.0
+    mean_x = sum(deltas) / n
+    mean_y = sum(measured) / n
+    var_x = sum((x - mean_x) ** 2 for x in deltas)
+    if var_x < 1e-9:
+        return 0.0
+    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(deltas, measured))
+    return cov_xy / var_x
 
 
 @dataclass
