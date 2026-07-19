@@ -1,8 +1,11 @@
 --[[
     AppLauncher.lua — démarre / relance l'App Python depuis le plugin.
 
-    Démarrage : lance `python -m app.main` (process détaché) avec la racine projet
-    comme dossier courant, puis attend que /health réponde.
+    Démarrage : lance `launch.ps1` (process détaché), dossier courant = le plugin
+    (auto-suffisant, embarque `app/`), puis attend que /health réponde. Au tout
+    premier lancement (pas de `.venv` sous le plugin), `launch.ps1` chaîne d'abord
+    `bootstrap.ps1` (crée le venv + installe les dépendances, ~250 Mo à 2,5 Go selon
+    GPU/CPU) — le timeout d'attente est donc bien plus long dans ce cas.
     Relance : POST /shutdown à l'App existante, attend son extinction, puis redémarre.
 
     Toutes les fonctions supposent tourner dans une tâche async (sleep + HTTP).
@@ -10,18 +13,31 @@
 
 local LrTasks     = import 'LrTasks'
 local LrPathUtils = import 'LrPathUtils'
+local LrFileUtils = import 'LrFileUtils'
 
 local HttpClient = require 'HttpClient'
 local Utils      = require 'Utils'
 
 local AppLauncher = {}
 
+-- Timeouts d'attente de /health (secondes) : lancement normal vs 1er run (bootstrap
+-- télécharge les dépendances — torch CUDA/CPU ~250 Mo-2,5 Go, peut prendre plusieurs
+-- minutes selon la connexion).
+local HEALTH_TIMEOUT_NORMAL     = 12
+local HEALTH_TIMEOUT_FIRST_RUN  = 900
+
+-- True si le venv n'a pas encore été construit sous le plugin (1er lancement).
+local function isFirstRun()
+    local venvPython = LrPathUtils.child(
+        LrPathUtils.child(LrPathUtils.child(Utils.appDir(), '.venv'), 'Scripts'),
+        'python.exe')
+    return not LrFileUtils.exists(venvPython)
+end
+
 -- Construit la commande PowerShell de lancement (Windows).
--- Lance launch_app.ps1 dans une fenêtre PowerShell détachée.
+-- Lance launch.ps1 (dans le plugin) dans une fenêtre PowerShell détachée.
 local function buildLaunchCommand()
-    -- _PLUGIN.path = .../Lr_automation/LrAutomation.lrplugin → parent = racine projet
-    local projectRoot = LrPathUtils.parent(_PLUGIN.path)
-    local script      = LrPathUtils.child(projectRoot, 'launch_app.ps1')
+    local script = LrPathUtils.child(Utils.projectRoot(), 'launch.ps1')
     return string.format(
         'cmd /c start "Lr Automation" powershell -ExecutionPolicy Bypass -File "%s"',
         script)
@@ -46,11 +62,19 @@ function AppLauncher.start()
     if HttpClient.isAlive() then
         return true, 'Application déjà démarrée.'
     end
+    local firstRun = isFirstRun()
     local cmd = buildLaunchCommand()
-    Utils.logf('Lancement App : %s', cmd)
+    Utils.logf('Lancement App : %s (1er run = %s)', cmd, tostring(firstRun))
     LrTasks.execute(cmd)   -- détaché, rend la main aussitôt
-    if waitForHealth(true, 12) then
+    local timeout = firstRun and HEALTH_TIMEOUT_FIRST_RUN or HEALTH_TIMEOUT_NORMAL
+    if waitForHealth(true, timeout) then
         return true, 'Application démarrée et connectée.'
+    end
+    if firstRun then
+        return false,
+            "Installation initiale en cours (venv + dépendances) — voir la fenêtre " ..
+            "PowerShell ouverte. Relancez « Démarrer » une fois l'installation terminée " ..
+            "si /health ne répond toujours pas."
     end
     return false, 'Lancement effectué mais /health ne répond pas (voir console Python).'
 end

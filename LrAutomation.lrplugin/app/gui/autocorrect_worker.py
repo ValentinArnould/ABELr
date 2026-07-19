@@ -17,7 +17,9 @@ Pipeline **GPU + cache** (hors thread GUI) :
 5. Sinon : pool de seeds → `autocorrect.plan(...)` (le biais de profil embedded a
    été supprimé — décision « biais ignoré », revue Fable 5 DB-06).
 
-Politique **GPU-strict** : sans CUDA utilisable, le worker échoue avec un message clair.
+Politique **GPU prioritaire, fallback CPU** : si aucun CUDA n'est utilisable, le
+calcul continue sur CPU (plus lent) — un avertissement est émis via `progress`
+plutôt que d'échouer (cf. `core/gpu.py`).
 """
 
 from __future__ import annotations
@@ -152,12 +154,11 @@ class AutoCorrectWorker(QThread):
                 self.failed.emit("Aucune photo sélectionnée.")
                 return
 
-            # Politique GPU-strict : pas de repli CPU. Échec clair si CUDA absent.
-            try:
-                gpu.require_cuda()
-            except Exception as exc:
-                self.failed.emit(str(exc))
-                return
+            # GPU prioritaire, fallback CPU (pas d'échec bloquant — cf. core/gpu.py).
+            if not gpu.is_available():
+                self.progress.emit(
+                    f"GPU absent — analyse sur {gpu.device_name()} (plus lent)."
+                )
 
             catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
             if catalog_path:

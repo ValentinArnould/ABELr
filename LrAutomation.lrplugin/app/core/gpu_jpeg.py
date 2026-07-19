@@ -1,13 +1,16 @@
-"""Décodage JPEG **sur GPU** (nvJPEG via torchvision) + analyse rendu.
+"""Décodage JPEG (nvJPEG GPU si dispo, sinon libjpeg CPU via torchvision) + analyse rendu.
 
-Remplace `cv2.imdecode` (CPU) partout où on lit un JPEG pour l'analyse : aperçu rendu
-Lr (`Previews.lrdata` / miniature plugin) et JPEG boîtier embarqué. `decode_jpeg(...,
-device='cuda')` délègue à nvJPEG ; on décode **par lot** (une liste de buffers) pour
-amortir les lancements kernel = "multithread GPU".
+Remplace `cv2.imdecode` (CPU pur) partout où on lit un JPEG pour l'analyse : aperçu
+rendu Lr (`Previews.lrdata` / miniature plugin) et JPEG boîtier embarqué. Le device
+suit `gpu.device()` (GPU prioritaire, repli CPU si aucun CUDA — cf. `core/gpu.py`) :
+`decode_jpeg(..., device='cuda')` délègue à nvJPEG et décode **par lot** (une liste de
+buffers) pour amortir les lancements kernel = "multithread GPU" ; en CPU, torchvision
+décode via libjpeg-turbo (pas de batching réel, mais même API/contrat de sortie).
 
-Sortie : tenseurs **uint8 CHW RGB sur CUDA**, prêts pour `render_metrics_gpu` (aucun
-retour CPU entre décodage et mesure). Un JPEG illisible par nvJPEG renvoie `None` à sa
-position (jamais d'exception qui tue le lot) — le caller le compte comme « sans rendu ».
+Sortie : tenseurs **uint8 CHW RGB sur le device courant**, prêts pour
+`render_metrics_gpu` (aucun aller-retour CPU superflu entre décodage et mesure quand
+GPU). Un JPEG illisible renvoie `None` à sa position (jamais d'exception qui tue le
+lot) — le caller le compte comme « sans rendu ».
 """
 
 from __future__ import annotations
@@ -48,24 +51,24 @@ def _to_uint8_1d(blob: bytes) -> torch.Tensor:
 
 
 def decode_blobs(blobs: list[bytes]) -> list[Optional[torch.Tensor]]:
-    """Décode une liste de buffers JPEG sur GPU (nvJPEG, batché).
+    """Décode une liste de buffers JPEG sur le device courant (nvJPEG batché si GPU).
 
-    Retourne des tenseurs uint8 (3,H,W) CUDA, alignés sur l'entrée. En cas d'échec du
-    lot (un buffer non supporté par nvJPEG), repli **par élément** : les bons passent,
-    les mauvais deviennent `None`.
+    Retourne des tenseurs uint8 (3,H,W) sur `gpu.device()`, alignés sur l'entrée. En
+    cas d'échec du lot (un buffer non supporté), repli **par élément** : les bons
+    passent, les mauvais deviennent `None`.
     """
-    gpu.require_cuda()
     if not blobs:
         return []
+    dev = gpu.device()
     tensors = [_to_uint8_1d(b) for b in blobs]
     try:
-        out = decode_jpeg(tensors, device="cuda", mode=ImageReadMode.RGB)
+        out = decode_jpeg(tensors, device=dev, mode=ImageReadMode.RGB)
         return list(out)
     except Exception:
         result: list[Optional[torch.Tensor]] = []
         for t in tensors:
             try:
-                result.append(decode_jpeg(t, device="cuda", mode=ImageReadMode.RGB))
+                result.append(decode_jpeg(t, device=dev, mode=ImageReadMode.RGB))
             except Exception:
                 result.append(None)
         return result

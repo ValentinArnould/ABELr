@@ -257,11 +257,11 @@ class NeutralPreviewWorker(QThread):
             if not photos:
                 self.failed.emit("Aucune photo sélectionnée.")
                 return
-            try:
-                gpu.require_cuda()
-            except Exception as exc:
-                self.failed.emit(str(exc))
-                return
+            # GPU prioritaire, fallback CPU (pas d'échec bloquant — cf. core/gpu.py).
+            if not gpu.is_available():
+                self.progress.emit(
+                    f"GPU absent — analyse sur {gpu.device_name()} (plus lent)."
+                )
 
             catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
             conn = cachemod.open_cache(catalog_path) if catalog_path else None

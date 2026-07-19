@@ -15,9 +15,13 @@ Politique : décodage pixel **sur GPU**, unpack/I-O conteneur sur CPU **borné**
   vagues nvJPEG passent de 3-5 à 30-60 images. `empty_cache` n'est plus systématique
   (sync + flush allocateur par vague) : réactif sur OOM + hygiène périodique.
 
-Aucun repli CPU de **calcul** (GPU-strict) : si CUDA manque, `gpu.require_cuda` lève.
-Parité mesures inchangée (mêmes kernels, seul l'ordonnancement change) — à revalider
-par `tools/validate_gpu_vs_libraw` après tout changement ici.
+Le calcul pixel bascule automatiquement sur CPU si aucun GPU CUDA n'est utilisable
+(`gpu.device()` — cf. `core/gpu.py`, politique GPU prioritaire + fallback CPU) : ce
+scheduler ne fait aucune hypothèse sur le device, il dimensionne juste les vagues via
+`gpu.vram_budget_bytes()` (VRAM réelle si GPU, plafond RAM fixe si CPU). Parité
+mesures inchangée à device égal (mêmes kernels, seul l'ordonnancement change) — à
+revalider par `tools/validate_gpu_vs_libraw` après tout changement ici (ce script
+reste GPU-only, cf. son en-tête).
 """
 
 from __future__ import annotations
@@ -128,7 +132,6 @@ def process_combined_batch(
     aux listes demandées. `progress` compte une unité par analyse produite
     (len(raw_paths) + len(embedded_paths) au total).
     """
-    gpu.require_cuda()
     raw_out: dict[str, Optional[RawGpuResult]] = {}
     emb_out: dict[str, RawReference] = {}
     need_raw = set(raw_paths)
@@ -241,7 +244,6 @@ def analyze_render_blobs(
 
     Retourne la paire global + zone nette (le caller utilise `.sharp` pour la mesure
     d'état courant et stocke la paire complète dans le cache)."""
-    gpu.require_cuda()
     out: dict[str, Optional[RenderAnalysisDual]] = {}
     if not items:
         return out

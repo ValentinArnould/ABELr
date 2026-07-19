@@ -18,14 +18,17 @@ rawpy
 numpy
 opencv-python
 
-# GPU (décodage RAW/JPEG sur GPU — politique GPU-strict, cf. core/gpu*.py)
-# Paire CUDA compatible (cu124, wheels cp313). torch fournit le runtime CUDA
-# (nvcc non requis) ; torchvision fournit nvJPEG (decode_jpeg device='cuda').
-# Installer impérativement depuis l'index PyTorch CUDA, sinon pip prend la build CPU :
-#   pip install torch==2.6.0 torchvision==0.21.0 \
-#       --index-url https://download.pytorch.org/whl/cu124
-torch==2.6.0
-torchvision==0.21.0
+# GPU prioritaire, fallback CPU (cf. core/gpu.py) — torch fournit le runtime CUDA
+# (nvcc non requis) et nvJPEG (decode_jpeg device='cuda') si un GPU NVIDIA est détecté,
+# sinon torchvision décode via libjpeg-turbo (CPU). Versions + index corrects (cu124 GPU
+# ou PyPI CPU, détection nvidia-smi) installés par **bootstrap.ps1** AVANT ce fichier —
+# ne pas décommenter torch/torchvision ici : `pip install -r requirements.txt`
+# réinstallerait depuis PyPI (build CPU) et écraserait un éventuel build CUDA déjà en
+# place. Install manuelle (hors bootstrap) :
+#   GPU : pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+#   CPU : pip install torch==2.6.0 torchvision==0.21.0
+# torch==2.6.0            (installé par bootstrap.ps1, pas ici)
+# torchvision==0.21.0     (installé par bootstrap.ps1, pas ici)
 # Smart Previews Lr = DNG JPEG XL (compression 52546) — rawpy/LibRaw ne sait pas
 # les lire ; tifffile + imagecodecs (libjxl) décodent les tuiles JXL 16-bit.
 tifffile

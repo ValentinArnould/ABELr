@@ -1,10 +1,12 @@
-"""Métriques en espace rendu — **portage GPU** de `render_metrics` (torch CUDA).
+"""Métriques en espace rendu — **portage torch** de `render_metrics` (GPU ou CPU).
 
 Mêmes mesures que `render_metrics` (tone L*, neutres a*/b*, bandes HSL) et **mêmes
 dataclasses** (`ToneStats`, `NeutralStats`, `BandStats`), mais tout le calcul tourne
-sur tenseurs CUDA. L'entrée est un tenseur **uint8 CHW RGB sur GPU** tel que le rend
-nvJPEG (`torchvision.io.decode_jpeg(device='cuda')`) → aucun aller-retour vers le CPU
-entre le décodage et la mesure.
+en tenseurs torch plutôt qu'en numpy. Le device suit `gpu.device()` (GPU prioritaire,
+repli CPU si aucun CUDA utilisable — cf. `core/gpu.py`). Sur GPU, l'entrée est un
+tenseur **uint8 CHW RGB déjà sur device** tel que le rend nvJPEG
+(`torchvision.io.decode_jpeg(device='cuda')`) → aucun aller-retour CPU entre le
+décodage et la mesure ; sur CPU, même chemin, tenseurs CPU.
 
 Les constantes colorimétriques (sRGB→XYZ→CIELAB, seuils) sont **importées** de
 `render_metrics` pour rester l'unique source de vérité ; le portage doit reproduire
@@ -15,15 +17,19 @@ from __future__ import annotations
 
 import torch
 
+from . import gpu
 from . import render_metrics as rm
 from .pipeline import RenderAnalysis, RenderAnalysisDual
 from .render_metrics import BandStats, NeutralStats, ToneStats
 
-_DEV = "cuda"
+# Résolu une fois : GPU si disponible, sinon CPU (gpu.device() ne lève jamais).
+# Les modules amont (gpu_jpeg, gpu_schedule) décodent déjà sur ce même device via
+# gpu.device() — cohérent, jamais de tenseur CUDA mélangé à un calcul CPU.
+_DEV = gpu.device()
 
 
 def _const(arr) -> torch.Tensor:
-    """Constante numpy → tenseur float32 CUDA."""
+    """Constante numpy → tenseur float32 sur le device courant (GPU ou CPU)."""
     return torch.as_tensor(arr, dtype=torch.float32, device=_DEV)
 
 
@@ -47,8 +53,8 @@ _BAND_NAMES = rm.BAND_NAMES
 # Helpers
 # --------------------------------------------------------------------------- #
 def _to_hwc_u8(chw_u8: torch.Tensor) -> torch.Tensor:
-    """nvJPEG sort du CHW uint8 ; on travaille en HWC. Force RGB 3 canaux sur CUDA."""
-    if chw_u8.device.type != "cuda":
+    """nvJPEG/CPU sort du CHW uint8 ; on travaille en HWC. Force RGB 3 canaux sur le device courant."""
+    if chw_u8.device != _DEV:
         chw_u8 = chw_u8.to(_DEV)
     if chw_u8.dim() == 3 and chw_u8.shape[0] in (1, 3):
         hwc = chw_u8.permute(1, 2, 0)

@@ -1,24 +1,37 @@
-# App externe — Lr_automation
+# App externe — Lr Automation
 
 Serveur HTTP (FastAPI, localhost:5000) + GUI (PySide6). Le plugin Lr est client :
 il interroge l'App en polling.
 
+Ce dossier (`app/`) vit **dans** `LrAutomation.lrplugin/` — le plugin est auto-suffisant, il
+embarque tout le code Python. Toutes les commandes ci-dessous se lancent depuis
+`LrAutomation.lrplugin/` (le dossier du plugin), pas depuis la racine du repo.
+
 ## Install
 
+**Automatique (recommandé)** : le plugin construit son venv tout seul au 1er lancement
+(`launch.ps1` → `bootstrap.ps1`, déclenché par le menu Lr *Démarrer/connecter l'application*).
+Détecte un GPU NVIDIA (`nvidia-smi`) et installe torch CUDA (cu124) si présent, sinon torch CPU.
+Nécessite Python 3.11+ sur le PATH + internet (1ère installation seulement).
+
+**Manuelle** (dev) :
 ```bash
-cd app
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-pip install -r requirements.txt
+cd LrAutomation.lrplugin
+python -m venv app\.venv
+app\.venv\Scripts\activate        # Windows
+pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124  # GPU
+# ou : pip install torch==2.6.0 torchvision==0.21.0                                                # CPU
+pip install -r app\requirements.txt
 ```
 
 ## Lancer
 
 ```bash
-python -m app.main            # depuis Lr_automation/
+python -m app.main            # depuis LrAutomation.lrplugin/
 ```
 
-Démarre le serveur FastAPI (thread daemon) + la fenêtre GUI.
+Démarre le serveur FastAPI (thread daemon) + la fenêtre GUI. Le device (GPU si CUDA
+utilisable, sinon CPU) est décidé automatiquement par `core/gpu.py` — aucun réglage requis.
 
 ## Tester sans Lightroom
 

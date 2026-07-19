@@ -17,22 +17,23 @@ function Utils.logf(fmt, ...)
     log:trace(string.format(fmt, ...))
 end
 
--- Racine du projet = dossier parent du .lrplugin (le plugin est chargé
--- directement depuis la racine du projet).
---   _PLUGIN.path = .../Lr_automation/LrAutomation.lrplugin
---   parent       = .../Lr_automation
+-- Racine du projet = le plugin lui-même : depuis la refonte "plugin auto-suffisant",
+-- LrAutomation.lrplugin/ embarque tout (app/, launch.ps1, bootstrap.ps1) — plus besoin
+-- d'un dossier parent avec le projet complet. Copier ce seul dossier .lrplugin suffit
+-- à installer sur une autre machine.
+--   _PLUGIN.path = .../LrAutomation.lrplugin
 -- (doit rester cohérent avec AppLauncher.buildLaunchCommand, qui calcule
 --  la racine de la même façon.)
 function Utils.projectRoot()
-    return LrPathUtils.parent(_PLUGIN.path)
+    return _PLUGIN.path
 end
 
--- Dossier de l'app Python (.../Lr_automation/app).
+-- Dossier de l'app Python (.../LrAutomation.lrplugin/app).
 function Utils.appDir()
     return LrPathUtils.child(Utils.projectRoot(), 'app')
 end
 
--- Répertoire des miniatures temporaires (.../Lr_automation/tmp_thumbs).
+-- Répertoire des miniatures temporaires (.../LrAutomation.lrplugin/tmp_thumbs).
 function Utils.thumbsDir()
     return LrPathUtils.child(Utils.projectRoot(), 'tmp_thumbs')
 end
