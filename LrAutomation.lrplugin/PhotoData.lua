@@ -37,6 +37,10 @@ local DEVELOP_KEYS = {
     'LuminanceAdjustmentRed', 'LuminanceAdjustmentOrange', 'LuminanceAdjustmentYellow',
     'LuminanceAdjustmentGreen', 'LuminanceAdjustmentAqua', 'LuminanceAdjustmentBlue',
     'LuminanceAdjustmentPurple', 'LuminanceAdjustmentMagenta',
+    -- Étalonnage caméra : transplanté k-NN depuis les seeds (core.autocorrect axe
+    -- "calib") — non neutralisé par le probe, entre dans hash_style côté App.
+    'EnableCalibration', 'ShadowTint',
+    'RedHue', 'RedSaturation', 'GreenHue', 'GreenSaturation', 'BlueHue', 'BlueSaturation',
     -- Style non neutralisé par le probe : entre dans hash_style côté App
     -- (revue Fable 5 DB-01). Noms hybrides Color Grading : ombres/HL Hue+Sat =
     -- SplitToning*, le reste ColorGrade* (cf. lr15_sdk_api_reference §Color Grading).

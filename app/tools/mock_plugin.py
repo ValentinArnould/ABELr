@@ -51,6 +51,32 @@ FAKE_PHOTOS = [
 # WB As Shot factice renvoyée par render_probe (comme le plugin après l'apply).
 FAKE_ASSHOT = {"temp": 5300.0, "tint": 4.0}
 
+# Arbre de collections factice (jobs Phase 2 list_collections).
+FAKE_COLLECTIONS = {
+    "collections": [
+        {"name": "Best of 2025", "id": "col-1", "kind": "collection", "photo_count": 12,
+         "children": []},
+        {"name": "Voyages", "id": "set-1", "kind": "set", "children": [
+            {"name": "Japon", "id": "col-2", "kind": "collection", "photo_count": 40,
+             "children": []},
+        ]},
+    ]
+}
+
+# Presets develop factices (jobs Phase 2 list_develop_presets).
+FAKE_PRESETS = {
+    "presets": [
+        {"name": "Sony Portrait", "uuid": "preset-aaa", "folder": "User Presets"},
+        {"name": "B&W Contrast", "uuid": "preset-bbb", "folder": "User Presets"},
+    ]
+}
+
+
+def _batch_ok(job_id: str, applied: int, total: int) -> dict:
+    """Résultat standard d'un job batch Phase 2 (set_rating/keywords/preset…)."""
+    return {"job_id": job_id, "status": "ok", "photos": [],
+            "applied": applied, "total": total}
+
 
 def _write_gray_jpeg(photo_id: str, level: int) -> str:
     """Écrit un JPEG gris uni (miniature factice) et retourne son chemin absolu."""
@@ -111,6 +137,23 @@ def handle(job: dict) -> dict:
             "job_id": job_id, "status": "ok", "photos": [],
             "applied": n, "matched": n, "total": n,
         }
+    # --- Phase 2 ---
+    if job_type in ("set_rating", "set_flag_color", "set_keywords",
+                    "add_to_collection", "apply_develop_preset"):
+        ids = payload.get("photo_ids") or []
+        print(f"  [mock] {job_type}: {len(ids)} photo(s) | {payload}")
+        return _batch_ok(job_id, applied=len(ids), total=len(ids))
+    if job_type == "list_collections":
+        print("  [mock] list_collections")
+        return {"job_id": job_id, "status": "ok", "photos": [], "data": FAKE_COLLECTIONS}
+    if job_type == "create_collection":
+        name = payload.get("name")
+        print(f"  [mock] create_collection: {name} (parent={payload.get('parent')})")
+        return {"job_id": job_id, "status": "ok", "photos": [],
+                "data": {"name": name, "id": "col-new", "created": True}}
+    if job_type == "list_develop_presets":
+        print("  [mock] list_develop_presets")
+        return {"job_id": job_id, "status": "ok", "photos": [], "data": FAKE_PRESETS}
     return {"job_id": job_id, "status": "error", "error": f"type inconnu: {job_type}"}
 
 

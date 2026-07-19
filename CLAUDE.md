@@ -1,7 +1,7 @@
 # Lr_automation — Plugin Lightroom Classic
 
 Plugin Lightroom Classic (Lua + SDK Lr) + application Python externe pour retouche batch
-intelligente. Cœur : **balance des blancs / exposition / HSL par photo**, calibrée sur des
+intelligente. Cœur : **exposition / HSL / Calibration / White Balance par photo**, calibrée sur des
 **seeds** (photos repères marquées à la main) via matching k-NN sur l'analyse RAW zone nette.
 
 ## Où lire quoi

@@ -26,6 +26,19 @@ from .render_metrics import BandStats, ToneStats, band_is_reliable
 K_MAX = 3
 
 
+# Étalonnage caméra (panneau "Calibration caméra") : 7 réglages plats, transplantés
+# tels quels depuis les seeds (comme Temperature/Tint) — pas de mesure/inversion
+# possible, ce sont des réglages créatifs sans cible objective côté rendu.
+# Note : "RedHue"/"GreenHue"/"BlueHue" sont des curseurs linéaires -100..100 (pas
+# un angle de teinte) → moyenne pondérée classique, pas de moyenne circulaire.
+CALIB_FIELDS = (
+    "shadow_tint",
+    "red_hue", "red_saturation",
+    "green_hue", "green_saturation",
+    "blue_hue", "blue_saturation",
+)
+
+
 @dataclass
 class SeedVector:
     photo_id: str
@@ -38,6 +51,13 @@ class SeedVector:
     preview_bands: list[BandStats] | None   # PreviewJPEG du seed (cible HSL)
     profile_capture: str | None = None      # profil créatif boîtier (filtre de groupe)
     ev100: float | None = None              # contexte scène (non utilisé dans la distance)
+    shadow_tint: float | None = None        # Étalonnage — cf. CALIB_FIELDS
+    red_hue: float | None = None
+    red_saturation: float | None = None
+    green_hue: float | None = None
+    green_saturation: float | None = None
+    blue_hue: float | None = None
+    blue_saturation: float | None = None
 
 
 @dataclass
@@ -49,8 +69,18 @@ class SeedTarget:
     tint: float | None
     tone: ToneStats | None
     bands: list[BandStats] | None
+    shadow_tint: float | None
+    red_hue: float | None
+    red_saturation: float | None
+    green_hue: float | None
+    green_saturation: float | None
+    blue_hue: float | None
+    blue_saturation: float | None
     n_matched: int
     seed_ids: list[str]
+
+    def has_calibration(self) -> bool:
+        return any(getattr(self, f) is not None for f in CALIB_FIELDS)
 
 
 def _f(dev: dict, key: str, default: float | None = None) -> float | None:
@@ -83,6 +113,13 @@ def build_seed_vector(conn, uuid: str) -> SeedVector | None:
         preview_bands=preview.bands if preview else None,
         profile_capture=profile,
         ev100=sr.get("ev100"),
+        shadow_tint=_f(dev, "ShadowTint"),
+        red_hue=_f(dev, "RedHue"),
+        red_saturation=_f(dev, "RedSaturation"),
+        green_hue=_f(dev, "GreenHue"),
+        green_saturation=_f(dev, "GreenSaturation"),
+        blue_hue=_f(dev, "BlueHue"),
+        blue_saturation=_f(dev, "BlueSaturation"),
     )
 
 
@@ -204,6 +241,13 @@ def _weighted_bands(matches: list[tuple[SeedVector, float]]) -> list[BandStats] 
     return out
 
 
+def _weighted_field(matches: list[tuple[SeedVector, float]], field: str) -> float | None:
+    items = [
+        (getattr(m, field), 1.0 / (d + 1e-6)) for m, d in matches if getattr(m, field) is not None
+    ]
+    return _weighted(items)
+
+
 def target_from_seeds(matches: list[tuple[SeedVector, float]]) -> SeedTarget | None:
     """Agrège les seeds matchés (pondération 1/distance) en une cible unique."""
     if not matches:
@@ -215,6 +259,13 @@ def target_from_seeds(matches: list[tuple[SeedVector, float]]) -> SeedTarget | N
         tint=_weighted(tints),
         tone=_weighted_tone(matches),
         bands=_weighted_bands(matches),
+        shadow_tint=_weighted_field(matches, "shadow_tint"),
+        red_hue=_weighted_field(matches, "red_hue"),
+        red_saturation=_weighted_field(matches, "red_saturation"),
+        green_hue=_weighted_field(matches, "green_hue"),
+        green_saturation=_weighted_field(matches, "green_saturation"),
+        blue_hue=_weighted_field(matches, "blue_hue"),
+        blue_saturation=_weighted_field(matches, "blue_saturation"),
         n_matched=len(matches),
         seed_ids=[m.photo_id for m, _ in matches],
     )

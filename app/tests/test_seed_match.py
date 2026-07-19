@@ -15,11 +15,11 @@ def _tone(median_l: float) -> ToneStats:
     return ToneStats(median_l, median_l, median_l - 5, median_l + 5, 0.0, 0.0, 1.0)
 
 
-def _seed(pid, rg, bg, l, temp=5500.0, tint=0.0, tone_l=50.0, profile=None):
+def _seed(pid, rg, bg, l, temp=5500.0, tint=0.0, tone_l=50.0, profile=None, **calib):
     return sm.SeedVector(
         photo_id=pid, asshot_rg=rg, asshot_bg=bg, raw_median_l=l,
         temperature=temp, tint=tint, preview_tone=_tone(tone_l),
-        preview_bands=None, profile_capture=profile,
+        preview_bands=None, profile_capture=profile, **calib,
     )
 
 
@@ -106,6 +106,35 @@ def test_filter_by_profile_soft():
     # Cible sans profil → pool complet.
     no_prof = _seed("t2", 0.5, 0.5, 50.0, profile=None)
     assert sm._filter_by_profile(no_prof, [same, other]) == [same, other]
+
+
+def test_target_from_seeds_no_calibration_when_seeds_lack_it():
+    a = (_seed("a", 0.5, 0.5, 50.0), 1.0)
+    b = (_seed("b", 0.5, 0.5, 50.0), 1.0)
+    tgt = sm.target_from_seeds([a, b])
+    assert tgt is not None
+    assert tgt.has_calibration() is False
+
+
+def test_target_from_seeds_aggregates_calibration_weighted():
+    near = (_seed("near", 0.5, 0.5, 50.0, shadow_tint=-10.0, red_hue=20.0), 0.001)  # poids ~1000
+    far = (_seed("far", 0.9, 0.9, 90.0, shadow_tint=10.0, red_hue=-20.0), 1.0)      # poids ~1
+    tgt = sm.target_from_seeds([near, far])
+    assert tgt is not None
+    assert tgt.has_calibration() is True
+    assert tgt.shadow_tint < -9.0  # dominé par le seed proche
+    assert tgt.red_hue > 19.0
+    # Champs non seedés par personne restent None (pas de 0 imposé).
+    assert tgt.blue_hue is None
+
+
+def test_target_from_seeds_calibration_partial_across_seeds():
+    # Un seul des deux seeds porte GreenSaturation → seul lui contribue.
+    a = (_seed("a", 0.5, 0.5, 50.0, green_saturation=30.0), 1.0)
+    b = (_seed("b", 0.5, 0.5, 50.0), 1.0)
+    tgt = sm.target_from_seeds([a, b])
+    assert tgt is not None
+    assert tgt.green_saturation == pytest.approx(30.0)
 
 
 def test_weighted_bands_averages_reliable_only():

@@ -15,9 +15,11 @@ Plugin Lightroom Classic (Lua + SDK Lr) + application Python externe. Le plugin 
 **pont** vers Lightroom ; l'App fait tout le calcul (décodage RAW, analyse, planification
 des ajustements) et pilote le plugin via une queue de jobs.
 
-Fonction cœur : **balance des blancs / exposition / HSL batch par photo**, calibrée sur des
-**seeds** (photos repères retouchées à la main, marquées explicitement) via matching k-NN sur
-l'analyse RAW de la zone nette.
+Fonction cœur : **balance des blancs / exposition / HSL / étalonnage caméra batch par photo**,
+calibrée sur des **seeds** (photos repères retouchées à la main, marquées explicitement) via
+matching k-NN sur l'analyse RAW de la zone nette. L'étalonnage (ShadowTint, Hue/Saturation
+R/G/B) n'a pas de cible mesurable depuis un rendu — il est **toujours transplanté** depuis les
+seeds les plus proches (comme Temperature/Tint), dans les deux modes de référence.
 
 ```
 Utilisateur ──GUI──▶ App Python (serveur FastAPI + GUI, même process)
@@ -104,8 +106,8 @@ Venv attendu en `app/.venv` (cf. `launch_app.ps1`).
 | `render_metrics.py` | Tone L* / neutral a*b* / bandes HSL en CIELAB (numpy, source de vérité) | `tone_stats()`, `neutral_stats()`, `band_stats()` |
 | `render_metrics_gpu.py` | Portage torch CUDA de `render_metrics` (constantes importées de la version numpy) | `analyze_rendered_gpu_dual()` |
 | `sharpness.py` | Masque « zone nette » (Laplacien, top 25 %) — restreint les histogrammes au sujet | CPU+GPU |
-| `seed_match.py` | k-NN sur seeds → cible Temp/Tint/tone/bandes (pondération 1/distance) | `build_seed_pool()`, `target_from_seeds()` |
-| `autocorrect.py` | Orchestration expo+WB+HSL par photo (modes seeds/embedded) | `plan()` → `PhotoAdjustment[]` |
+| `seed_match.py` | k-NN sur seeds → cible Temp/Tint/tone/bandes/étalonnage (pondération 1/distance) | `build_seed_pool()`, `target_from_seeds()` |
+| `autocorrect.py` | Orchestration expo+WB+HSL+calib par photo (modes seeds/embedded) | `plan()` → `PhotoAdjustment[]` |
 | `exposure.py` | ΔEV depuis L* courant → L* cible | (via `autocorrect`) |
 | `hsl.py` | Deltas HSL par bande vs cible (saturation = réduction seule) | (via `autocorrect`) |
 | `response.py` | Modèle ∂rendu/∂curseur calibré (cache disque) | `load()` |
@@ -207,7 +209,8 @@ C'est le vrai gain sur les séries 500-1000, en plus du GPU.
 
 `neutral_preview_worker` fait rendre chaque photo par le plugin (job `render_probe` : WB As Shot +
 `Exposure2012=0` + 24 curseurs HSL à 0, style DCP/tons/crop intact), mesure ce rendu neutre (GPU),
-et le cache sous `hash_style` (stable si Temp/Tint/HSL bougent, change si tons/clarté changent). Le
+et le cache sous `hash_style` (stable si Temp/Tint/HSL bougent, change si tons/clarté/étalonnage
+changent — le probe ne neutralise pas l'étalonnage). Le
 delta `JPEG boîtier − rendu neutre` donne des réglages **absolus** (idempotents), sans dépendre du
 rendu courant. Garde anti-probe-périmé : `neutral_preview_worker._anchor_suspect` refuse de cacher
 une ancre suspecte.

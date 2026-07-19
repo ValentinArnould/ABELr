@@ -43,7 +43,7 @@ from .response import ResponseModel
 from .seed_match import SeedTarget, SeedVector
 from ..server.models import PhotoAdjustment
 
-DEFAULT_AXES = frozenset({"expo", "wb", "hsl"})
+DEFAULT_AXES = frozenset({"expo", "wb", "hsl", "calib"})
 
 # --------------------------------------------------------------------------- #
 # Seuils du mode embedded (ancré neutre, déviation par photo)
@@ -216,6 +216,26 @@ def _band_targets_from_seed_match(t: SeedTarget | None) -> dict[str, BandTarget]
     return out
 
 
+def _calib_develop_dict(t: SeedTarget) -> dict:
+    """Réglages Étalonnage à écrire depuis une cible k-NN — transplant direct
+    (comme Temperature/Tint), clés absentes chez la cible omises (pas de 0 imposé
+    sur un axe non seedé). `EnableCalibration` posé dès qu'un champ est écrit."""
+    keys = {
+        "shadow_tint": "ShadowTint",
+        "red_hue": "RedHue", "red_saturation": "RedSaturation",
+        "green_hue": "GreenHue", "green_saturation": "GreenSaturation",
+        "blue_hue": "BlueHue", "blue_saturation": "BlueSaturation",
+    }
+    out: dict = {}
+    for field, sdk_key in keys.items():
+        v = getattr(t, field)
+        if v is not None:
+            out[sdk_key] = int(max(-100, min(100, round(v))))
+    if out:
+        out["EnableCalibration"] = True
+    return out
+
+
 def plan(
     measures: list[PhotoMeasure],
     *,
@@ -239,7 +259,7 @@ def plan(
     if mode_embedded:
         reason = "case cochée" if forced_embedded else "aucun seed exploitable"
         diag.notes.insert(0, f"mode JPEG embarqué ancré neutre ({reason})")
-        return _plan_embedded(targets, axes, model, dev_by_id, diag)
+        return _plan_embedded(targets, axes, model, dev_by_id, diag, seed_pool)
 
     diag.notes.insert(0, f"mode seeds — pool de {len(seed_pool)} seed(s)")
     return _plan_seeds(targets, axes, model, seed_pool, dev_by_id, diag)
@@ -254,6 +274,7 @@ def _plan_embedded(
     model: ResponseModel | None,
     dev_by_id: dict[str, dict],
     diag: PlanDiagnostics,
+    seed_pool: list[SeedVector] | None = None,
 ) -> tuple[list[PhotoAdjustment], PlanDiagnostics]:
     # Cible = mesure JPEG boîtier brute → biais de profil nul (partagé, lecture
     # seule) : `bias.l`/`.cast_*`/`.bands` valent 0 dans les boucles ci-dessous.
@@ -390,6 +411,28 @@ def _plan_embedded(
             f"(clés conformes omises)"
         )
 
+    # ---- Étalonnage : transplant k-NN (pas de cible mesurable côté JPEG) ----
+    if "calib" in axes:
+        if not seed_pool:
+            diag.notes.append("calib: aucun seed exploitable — axe ignoré")
+        else:
+            n_written = 0
+            for m in targets:
+                query = SeedVector(
+                    photo_id=m.photo_id, asshot_rg=m.asshot_rg, asshot_bg=m.asshot_bg,
+                    raw_median_l=m.raw_tone.median_l if m.raw_tone else None,
+                    temperature=None, tint=None, preview_tone=None, preview_bands=None,
+                    profile_capture=m.profile_capture, ev100=m.ev100,
+                )
+                t = seed_match.match_target(query, seed_pool)
+                if t is None or not t.has_calibration():
+                    continue
+                dev_by_id[m.photo_id].update(_calib_develop_dict(t))
+                n_written += 1
+            diag.notes.append(
+                f"calib: {n_written}/{len(targets)} photo(s) transplantée(s) (k-NN seeds)"
+            )
+
     adjustments = [
         PhotoAdjustment(photo_id=pid, develop=dev) for pid, dev in dev_by_id.items() if dev
     ]
@@ -482,6 +525,17 @@ def _plan_seeds(
             if deltas:
                 n_hsl += 1
         diag.notes.append(f"hsl: {n_hsl}/{len(usable)} photo(s) ajustée(s)")
+
+    # ---- Étalonnage : transplant direct depuis la cible k-NN (comme Temp/Tint) --
+    if "calib" in axes:
+        n_calib = 0
+        for m in usable:
+            t = _match(m)
+            if t is None or not t.has_calibration():
+                continue
+            dev_by_id[m.photo_id].update(_calib_develop_dict(t))
+            n_calib += 1
+        diag.notes.append(f"calib: {n_calib}/{len(usable)} photo(s) transplantée(s) (k-NN seeds)")
 
     adjustments = [
         PhotoAdjustment(photo_id=pid, develop=dev) for pid, dev in dev_by_id.items() if dev

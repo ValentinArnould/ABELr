@@ -20,6 +20,9 @@ local HttpClient = require 'HttpClient'
 local PhotoData  = require 'PhotoData'
 local Adjustments= require 'Adjustments'
 local Thumbnails = require 'Thumbnails'
+local Metadata   = require 'Metadata'
+local Collections= require 'Collections'
+local Presets    = require 'Presets'
 local Json       = require 'Json'
 local Utils      = require 'Utils'
 
@@ -37,6 +40,40 @@ local HEARTBEAT_TIMEOUT = 5
 local function bridgeAlive()
     local hb = _G.LR_AUTOMATION_BRIDGE_HEARTBEAT or 0
     return (os.time() - hb) < HEARTBEAT_TIMEOUT
+end
+
+-- Construit la table résultat standard d'un job batch (set_rating, set_keywords,
+-- add_to_collection, apply_develop_preset…) à partir d'un rapport
+-- { applied, total, errors }. Même logique errors_summary que apply_adjustments
+-- (revue Fable 5 L-04) : un traitement PARTIEL ne perd pas les causes.
+local function batchResult(jobId, report)
+    local total   = report.total or 0
+    local applied = report.applied or 0
+    local errors  = report.errors or {}
+    local status  = (applied > 0 or total == 0) and 'ok' or 'error'
+    local errorsSummary = nil
+    if #errors > 0 then
+        local parts = {}
+        for i = 1, math.min(5, #errors) do parts[#parts + 1] = errors[i] end
+        errorsSummary = table.concat(parts, ' | ')
+        if #errors > 5 then
+            errorsSummary = errorsSummary .. string.format(' | +%d autres', #errors - 5)
+        end
+    end
+    local errMsg = nil
+    if status == 'error' then
+        errMsg = string.format('0/%d appliqué(s). %s',
+            total, errors[1] or 'aucune photo ne correspond')
+    end
+    return {
+        job_id  = jobId,
+        status  = status,
+        error   = errMsg,
+        errors_summary = errorsSummary,
+        applied = applied,
+        total   = total,
+        photos  = Json.array({}),
+    }
 end
 
 -- Exécute un job, retourne la table résultat à renvoyer à l'App.
@@ -150,6 +187,41 @@ local function dispatch(job)
             matched = report.matched,
             total   = report.total,
             photos  = Json.array({}),
+        }
+
+    -- ------------------------------------------------------------------ --
+    -- Phase 2 : notes / flags / mots-clés / collections / presets develop
+    -- ------------------------------------------------------------------ --
+    elseif jobType == 'set_rating' then
+        local p = job.payload or {}
+        return batchResult(jobId, Metadata.setRating(p.photo_ids or {}, p.rating))
+    elseif jobType == 'set_flag_color' then
+        local p = job.payload or {}
+        return batchResult(jobId, Metadata.setFlagColor(p.photo_ids or {}, p.flag, p.color))
+    elseif jobType == 'set_keywords' then
+        local p = job.payload or {}
+        return batchResult(jobId, Metadata.setKeywords(p.photo_ids or {}, p.add or {}, p.remove or {}))
+    elseif jobType == 'add_to_collection' then
+        local p = job.payload or {}
+        return batchResult(jobId, Collections.addPhotos(p.collection, p.photo_ids or {}))
+    elseif jobType == 'apply_develop_preset' then
+        local p = job.payload or {}
+        return batchResult(jobId, Presets.apply(p.photo_ids or {}, p.preset))
+    elseif jobType == 'list_collections' then
+        return {
+            job_id = jobId, status = 'ok', photos = Json.array({}),
+            data = { collections = Collections.list() },
+        }
+    elseif jobType == 'create_collection' then
+        local p = job.payload or {}
+        return {
+            job_id = jobId, status = 'ok', photos = Json.array({}),
+            data = Collections.create(p.name, p.parent),
+        }
+    elseif jobType == 'list_develop_presets' then
+        return {
+            job_id = jobId, status = 'ok', photos = Json.array({}),
+            data = { presets = Presets.list() },
         }
     end
 

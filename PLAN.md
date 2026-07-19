@@ -72,16 +72,6 @@ Règles de travail : [`CLAUDE.md`](CLAUDE.md).
   §8) et `CLAUDE.md` (ajouter la config pytest au workflow si pertinent).
   - *Test* : `test_docs_consistency` (étape 3) reste vert après édition.
 
-- [ ] **8 — (Conditionnelle) e2e piloté par MCP Lightroom.**
-  **Prérequis** : le MCP Lightroom expose des outils dans la session. Un MCP ajouté ne charge ses
-  outils qu'au **redémarrage** de Claude Code — vérifier au début (ex. via `/mcp` dans un terminal
-  `claude`). Si absent → cette étape retombe dans l'Annexe (manuelle) ; **ne pas cocher**.
-  - *Actions* : piloter Lr via le MCP — marquer des seeds → Analyser → Apply par axe → re-mesurer.
-  - *Test non-rég* : **assert convergence** — le 2ᵉ delta doit être ≈ 0 (lève le verrou
-    `requestJpegThumbnail`). Harness reproductible.
-  - *Si le 2ᵉ delta n'est pas ≈ 0* : câbler le repli `RenderChannel.EXPORT` côté plugin
-    (`Thumbnails.fetchProbeExport` + job `render_probe_export`) et re-tester jusqu'à convergence.
-
 ---
 
 ## Annexe — Validation dépendante de Lightroom (manuelle si pas de MCP)
@@ -95,6 +85,16 @@ Non automatisable sans Lr ouvert (ou sans MCP Lr exposé) — **hors cases à co
 
 ## Backlog restant (hors périmètre nettoyage)
 
+- **Étalonnage caméra (axe "calib")** — livré 2026-07-19 : transplant k-NN (ShadowTint,
+  Red/Green/Blue Hue+Saturation) depuis les seeds, comme Temperature/Tint, actif dans les
+  deux modes de référence (seeds et embedded — pas de cible mesurable depuis un JPEG,
+  donc toujours seed-source côté embedded). `ANALYSIS_VERSION` bumpée (`v6-calib-style-keys`,
+  clés ajoutées à `_STYLE_KEYS`) + `DEVELOP_KEYS` Lua (+8). Tests : `test_autocorrect_calib.py`,
+  aggregation dans `test_seed_match.py`, clamp/dict dans `test_autocorrect_helpers.py`.
+  **Non validé en Lightroom réel** (pas de Lr dans cet environnement) — à vérifier manuellement
+  (annexe ci-dessous) : `EnableCalibration` s'applique bien, les seeds actuels n'ont pas encore
+  de valeurs Étalonnage retouchées à la main (transplant restera vide tant qu'aucun seed n'a
+  été édité dans le panneau Calibration caméra).
 - Repli régime artistique : `core/regime.py` n'est plus consulté par le chemin live (k-NN). À
   revalider si le matching s'avère instable sur de petits pools de seeds.
 - `core/image_source.py` : tool-only — le retirer si les `tools/` qui l'utilisent sont archivés.

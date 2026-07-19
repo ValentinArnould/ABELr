@@ -56,7 +56,7 @@ SCHEMA_VERSION = 4
 # Salée dans les hash de fraîcheur (`raw_signature`, `style_hash`) :
 # un changement d'algorithme de mesure (nouvelles paires global/sharp, deltas…)
 # doit invalider tout le contenu caché sans migration — bump quand le calcul change.
-ANALYSIS_VERSION = "v5-style-keys-g2wb"  # bump G1 (revue Fable 5) : DB-01 clés style + C-01 garde cam_mul[G2]
+ANALYSIS_VERSION = "v6-calib-style-keys"  # bump : ajout clés Étalonnage à _STYLE_KEYS (axe "calib")
 
 # Sous-ensemble "style" des réglages develop = tout ce qui affecte le rendu NEUTRE
 # (probe `render_probe` : WB As Shot + Exposure2012=0 + **HSL 24 à zéro**, le reste
@@ -73,6 +73,10 @@ _STYLE_KEYS = (
     "Contrast2012", "Highlights2012", "Shadows2012", "Whites2012", "Blacks2012",
     "Clarity2012", "Dehaze", "Vibrance", "Saturation", "Texture",
     "CropLeft", "CropRight", "CropTop", "CropBottom", "CropAngle",
+    # Étalonnage caméra : ni WB/Expo/HSL, pas neutralisé par le probe → change le
+    # rendu neutre, doit invalider l'ancre (axe "calib", transplant k-NN).
+    "EnableCalibration", "ShadowTint",
+    "RedHue", "RedSaturation", "GreenHue", "GreenSaturation", "BlueHue", "BlueSaturation",
     # Color Grading — noms SDK hybrides (revue Fable 5 DB-01) : ombres/HL Hue+Sat
     # = SplitToning*, le reste ColorGrade*. Les anciens noms ColorGradeShadowHue…
     # n'existent pas dans le SDK et ne matchaient jamais.

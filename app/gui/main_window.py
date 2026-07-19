@@ -48,7 +48,7 @@ from .autocorrect_worker import AutoCorrectResult, AutoCorrectWorker
 from .neutral_preview_worker import NeutralPreviewWorker
 from .job_worker import JobWorker
 
-_AXIS_LABELS = {"expo": "Exposition", "wb": "WB", "hsl": "HSL"}
+_AXIS_LABELS = {"expo": "Exposition", "wb": "WB", "hsl": "HSL", "calib": "Étalonnage"}
 
 
 class MainWindow(QMainWindow):
@@ -100,6 +100,13 @@ class MainWindow(QMainWindow):
         self.cb_hsl = QCheckBox("HSL")
         for cb in (self.cb_expo, self.cb_wb, self.cb_hsl):
             cb.setChecked(True)
+        self.cb_calib = QCheckBox("Étalonnage")
+        self.cb_calib.setChecked(False)
+        self.cb_calib.setToolTip(
+            "Transplant k-NN depuis les seeds (ShadowTint, Hue/Saturation R/G/B) —\n"
+            "toujours via seeds même en mode 'Réf = JPEG embarqué' : aucune cible\n"
+            "d'étalonnage n'est mesurable depuis un rendu, seed ou seed manquant → ignoré."
+        )
         self.cb_embedded = QCheckBox("Réf = JPEG embarqué")
         self.cb_embedded.setToolTip(
             "Décoché : cible = k-NN sur les seeds dont l'analyse RAW (zone nette) est\n"
@@ -152,6 +159,7 @@ class MainWindow(QMainWindow):
         axes_row.addWidget(self.cb_expo)
         axes_row.addWidget(self.cb_wb)
         axes_row.addWidget(self.cb_hsl)
+        axes_row.addWidget(self.cb_calib)
         axes_row.addSpacing(16)
         axes_row.addWidget(self.cb_embedded)
         axes_row.addSpacing(16)
@@ -223,6 +231,8 @@ class MainWindow(QMainWindow):
             axes.add("wb")
         if self.cb_hsl.isChecked():
             axes.add("hsl")
+        if self.cb_calib.isChecked():
+            axes.add("calib")
         return frozenset(axes)
 
     def _require_bridge(self) -> bool:

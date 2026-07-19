@@ -4,6 +4,12 @@ fastapi
 uvicorn[standard]
 pydantic
 
+# Serveur MCP (Model Context Protocol) monté in-process sur FastAPI — permet à
+# Claude de piloter Lightroom via le pont existant (cf. app/mcp/). SDK officiel.
+# Tire httpx, sse-starlette, pydantic-settings, python-multipart (starlette/uvicorn
+# déjà satisfaits). Python >= 3.10 requis (3.13 ici).
+mcp
+
 # GUI
 PySide6
 

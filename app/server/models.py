@@ -22,6 +22,16 @@ class JobType(str, Enum):
     APPLY_ADJUSTMENTS = "apply_adjustments"
     TEST = "test"  # ping plugin : déclenche une popup Hello World côté Lr
 
+    # --- Phase 2 : parité avec le MCP Lightroom tiers (accès API) ---
+    SET_RATING = "set_rating"                   # note 0-5 sur des photos
+    SET_FLAG_COLOR = "set_flag_color"           # flag pick/reject/none + label couleur
+    SET_KEYWORDS = "set_keywords"               # ajoute/retire des mots-clés
+    LIST_COLLECTIONS = "list_collections"       # arbre des collections (→ data)
+    CREATE_COLLECTION = "create_collection"     # crée une collection (→ data)
+    ADD_TO_COLLECTION = "add_to_collection"     # ajoute des photos à une collection
+    LIST_DEVELOP_PRESETS = "list_develop_presets"   # presets develop disponibles (→ data)
+    APPLY_DEVELOP_PRESET = "apply_develop_preset"    # applique un preset develop
+
 
 class JobStatus(str, Enum):
     """Cycle de vie d'un job côté App."""
@@ -92,6 +102,10 @@ class JobResult(BaseModel):
     # Résumé des erreurs d'un apply PARTIEL (status='ok' mais des photos ont échoué)
     # — revue Fable 5 L-04 : les textes d'erreur ne sont plus perdus.
     errors_summary: Optional[str] = None
+    # Charge de retour générique pour les jobs Phase 2 dont la forme n'entre pas dans
+    # photos/thumbnails (ex. list_collections → arbre, list_develop_presets → liste,
+    # create_collection → info collection créée). Évite un champ par capacité.
+    data: Optional[dict[str, Any]] = None
 
 
 class PhotoAdjustment(BaseModel):
