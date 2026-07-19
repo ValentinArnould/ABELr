@@ -1,25 +1,25 @@
-"""Worker Qt — analyse (RAW + JPEG boîtier + aperçu/ancre neutre) et planification.
+"""Qt worker — analysis (RAW + in-camera JPEG + preview/neutral anchor) and planning.
 
-Pipeline **GPU + cache** (hors thread GUI) :
-1+2. **RAW source + JPEG boîtier** en un passage fusionné (revue Fable 5 G7) :
-   caches `SourceRAW`/`InCameraJPEG` (même clé = signature du RAW) ; manques →
-   `gpu_schedule.process_combined_batch` (une ouverture rawpy par photo, demosaic
-   GPU + nvJPEG, double-buffer CPU/GPU).
-3. Mesure de l'état de référence, **selon le mode** :
-   - **seeds** : aperçu rendu courant (cache `PreviewJPEG` ; en
-     `force_fresh_preview=True` le cache n'est jamais lu, seulement écrit).
-   - **embedded** : **ancre neutre** (`ensure_neutral_previews` — cache
-     `NeutralPreviewJPEG`, jobs plugin `render_probe` pour les manques). Aucune
-     mesure du rendu courant : les valeurs planifiées sont absolues (idempotentes)
-     et insensibles à la fraîcheur des aperçus Lr.
-4. Mode `analyze_only=True` ("Marquer + analyser") : s'arrête après avoir peuplé
-   le cache (RAW + JPEG boîtier + aperçu), n'appelle pas `autocorrect.plan`.
-5. Sinon : pool de seeds → `autocorrect.plan(...)` (le biais de profil embedded a
-   été supprimé — décision « biais ignoré », revue Fable 5 DB-06).
+**GPU + cache** pipeline (off the GUI thread):
+1+2. **Source RAW + in-camera JPEG** in one merged pass (Fable 5 review G7):
+   `SourceRAW`/`InCameraJPEG` caches (same key = RAW signature); misses →
+   `gpu_schedule.process_combined_batch` (one rawpy open per photo, GPU demosaic
+   + nvJPEG, CPU/GPU double buffer).
+3. Reference-state measurement, **depending on mode**:
+   - **seeds**: current rendered preview (`PreviewJPEG` cache; with
+     `force_fresh_preview=True` the cache is never read, only written).
+   - **embedded**: **neutral anchor** (`ensure_neutral_previews` — `NeutralPreviewJPEG`
+     cache, plugin `render_probe` jobs for misses). No measurement of the
+     current render: the planned values are absolute (idempotent) and
+     insensitive to Lr preview freshness.
+4. `analyze_only=True` mode ("Mark + analyze"): stops after populating the
+   cache (RAW + in-camera JPEG + preview), does not call `autocorrect.plan`.
+5. Otherwise: seed pool → `autocorrect.plan(...)` (the embedded profile bias
+   was removed — "bias ignored" decision, Fable 5 review DB-06).
 
-Politique **GPU prioritaire, fallback CPU** : si aucun CUDA n'est utilisable, le
-calcul continue sur CPU (plus lent) — un avertissement est émis via `progress`
-plutôt que d'échouer (cf. `core/gpu.py`).
+**GPU-first, CPU-fallback** policy: if no CUDA is usable, computation continues
+on CPU (slower) — a warning is emitted via `progress` rather than failing
+(see `core/gpu.py`).
 """
 
 from __future__ import annotations
@@ -45,15 +45,15 @@ class AutoCorrectResult:
     n_measured: int
     n_skipped: int
     notes: list[str] = field(default_factory=list)
-    # Seeds marqués en DB vs réellement exploitables (analyse RAW présente).
-    # marked > usable ⇒ repli embedded silencieux à signaler côté GUI.
+    # Seeds marked in DB vs actually usable (RAW analysis present).
+    # marked > usable ⇒ silent embedded fallback to flag on the GUI side.
     seeds_marked: int = 0
     seeds_usable: int = 0
 
 
 def _safe(fn) -> None:
-    """Exécute une écriture cache en ignorant les erreurs (le cache ne doit jamais
-    faire échouer l'analyse)."""
+    """Executes a cache write while ignoring errors (the cache must never
+    make the analysis fail)."""
     try:
         fn()
     except Exception:
@@ -61,15 +61,15 @@ def _safe(fn) -> None:
 
 
 def _compute_deltas(raw_dict: dict | None, jpeg_sharp) -> dict:
-    """Deltas JPEG boîtier ↔ RAW (zone nette) = transformation appliquée par le profil.
+    """Deltas in-camera JPEG vs RAW (sharp zone) = transformation applied by the profile.
 
-    - `delta_luma_median` : L* médian JPEG − L* médian RAW (rendu neutre) → lift tonal
-      du profil créatif.
-    - `delta_wb_cast_a/b` : cast a*/b* mesuré sur les neutres du JPEG (le RAW as-shot
-      sert de référence ≈ neutre) → teinte cuite par le profil.
-    - `delta_hsl` : par bande, écart chroma/sat/hue/L* JPEG − RAW.
-    Retourne un dict de kwargs prêt pour `put_in_camera_jpeg` (valeurs None si non
-    calculables)."""
+    - `delta_luma_median`: median JPEG L* − median RAW L* (neutral render) → tonal lift
+      from the creative profile.
+    - `delta_wb_cast_a/b`: a*/b* cast measured on the JPEG neutrals (the as-shot RAW
+      serves as a ≈ neutral reference) → hue baked in by the profile.
+    - `delta_hsl`: per band, chroma/sat/hue/L* delta JPEG − RAW.
+    Returns a dict of kwargs ready for `put_in_camera_jpeg` (None values when not
+    computable)."""
     out = {
         "delta_luma_median": None, "delta_wb_cast_a": None,
         "delta_wb_cast_b": None, "delta_hsl": None,
@@ -101,11 +101,11 @@ def _compute_deltas(raw_dict: dict | None, jpeg_sharp) -> dict:
 
 
 class AutoCorrectWorker(QThread):
-    """Mesure la sélection (GPU + cache) et planifie/applique la correction."""
+    """Measures the selection (GPU + cache) and plans/applies the correction."""
 
     finished_result = Signal(object)   # AutoCorrectResult
-    progress = Signal(str)             # message d'étape
-    progress_count = Signal(int, int)  # (fait, total) d'une étape → barre déterminée
+    progress = Signal(str)             # step message
+    progress_count = Signal(int, int)  # (done, total) for a step → determinate progress bar
     failed = Signal(str)
 
     def __init__(
@@ -124,21 +124,21 @@ class AutoCorrectWorker(QThread):
         self._thumbs = thumbnail_paths or {}
         self._analyze_only = analyze_only
         self._force_fresh_preview = force_fresh_preview
-        self._profile_cache: dict[str, str | None] = {}  # path → profil créatif boîtier
+        self._profile_cache: dict[str, str | None] = {}  # path → in-camera creative profile
 
     def _batch_progress(self, label: str):
-        """Callback `(done, total)` d'une étape GPU → émet le texte ET les compteurs
-        (ces derniers pilotent la barre de chargement déterminée côté GUI)."""
+        """Callback `(done, total)` for a GPU step → emits both the text AND the
+        counters (the latter drive the determinate loading bar on the GUI side)."""
         def cb(done: int, total: int) -> None:
             self.progress.emit(f"{label} {done}/{total} (GPU)…")
             self.progress_count.emit(done, total)
         return cb
 
     def _profiles(self, paths: list[str]) -> dict[str, str | None]:
-        """Profil créatif boîtier pour un lot (exiftool, batché, mémoïsé sur le worker).
+        """In-camera creative profile for a batch (exiftool, batched, memoized on the worker).
 
-        Une seule invocation exiftool par lot de chemins non encore lus ; robuste à
-        l'absence d'exiftool (valeurs None)."""
+        A single exiftool invocation per batch of not-yet-read paths; robust to
+        exiftool being absent (None values)."""
         todo = [p for p in paths if p not in self._profile_cache]
         if todo:
             got = exif_profile.read_capture_profiles(todo)
@@ -147,17 +147,17 @@ class AutoCorrectWorker(QThread):
         return {p: self._profile_cache.get(p) for p in paths}
 
     def run(self) -> None:
-        conn = None  # fermée dans le finally — y compris sur exception (revue Fable 5 B-04)
+        conn = None  # closed in the finally block — even on exception (Fable 5 review B-04)
         try:
             photos = self._photos
             if not photos:
-                self.failed.emit("Aucune photo sélectionnée.")
+                self.failed.emit("No photo selected.")
                 return
 
-            # GPU prioritaire, fallback CPU (pas d'échec bloquant — cf. core/gpu.py).
+            # GPU-first, CPU-fallback (no blocking failure — see core/gpu.py).
             if not gpu.is_available():
                 self.progress.emit(
-                    f"GPU absent — analyse sur {gpu.device_name()} (plus lent)."
+                    f"No GPU — analyzing on {gpu.device_name()} (slower)."
                 )
 
             catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
@@ -172,7 +172,7 @@ class AutoCorrectWorker(QThread):
                 raw_by_id, embedded_by_id = self._collect_raw_and_embedded(photos, conn)
 
                 if self._analyze_only:
-                    # Peuple aussi le cache d'aperçus (utile aux seeds futurs).
+                    # Also populates the preview cache (useful for future seeds).
                     self._collect_renders(photos, conn, idx)
                     n = len(raw_by_id)
                     marked = len(cachemod.list_seed_uuids(conn)) if conn else 0
@@ -181,7 +181,7 @@ class AutoCorrectWorker(QThread):
                         AutoCorrectResult(
                             adjustments=[], diagnostics=None,
                             n_measured=n, n_skipped=len(photos) - n,
-                            notes=[f"Analyse : {n}/{len(photos)} photo(s) (RAW+JPEG boîtier+aperçu)."],
+                            notes=[f"Analysis: {n}/{len(photos)} photo(s) (RAW+in-camera JPEG+preview)."],
                             seeds_marked=marked, seeds_usable=usable,
                         )
                     )
@@ -196,14 +196,14 @@ class AutoCorrectWorker(QThread):
                 measures: list[PhotoMeasure] = []
 
                 if mode_embedded:
-                    # Ancre neutre (cache hash_style, jobs render_probe pour les
-                    # manques) — AUCUNE mesure du rendu courant.
+                    # Neutral anchor (hash_style cache, render_probe jobs for
+                    # misses) — NO measurement of the current render.
                     neutral_by_id, n_refreshed = ensure_neutral_previews(
                         photos, conn, progress=self.progress.emit,
                         progress_count=self.progress_count.emit,
                     )
                     if n_refreshed:
-                        notes.append(f"{n_refreshed} ancre(s) neutre(s) recalibrée(s) via Lightroom.")
+                        notes.append(f"{n_refreshed} neutral anchor(s) recalibrated via Lightroom.")
                     for p in photos:
                         nd = neutral_by_id.get(p.photo_id)
                         emb = embedded_by_id.get(p.photo_id) or (None, None)
@@ -266,9 +266,9 @@ class AutoCorrectWorker(QThread):
             if not measures:
                 if mode_embedded:
                     self.failed.emit(
-                        f"Aucune photo mesurable sur {len(photos)} : ancre neutre ou "
-                        f"JPEG boîtier manquant(s). Vérifiez le pont plugin (jobs "
-                        f"render_probe) et que les RAW contiennent un JPEG embarqué."
+                        f"No measurable photo out of {len(photos)}: missing neutral "
+                        f"anchor or in-camera JPEG. Check the plugin bridge (render_probe "
+                        f"jobs) and that the RAW files contain an embedded JPEG."
                     )
                 else:
                     self.failed.emit(self._no_render_message(len(photos), channels, idx))
@@ -282,7 +282,7 @@ class AutoCorrectWorker(QThread):
             profile = profiles.most_common(1)[0][0] if profiles else None
             model = response.load(camera, profile)
 
-            self.progress.emit("Planification des corrections…")
+            self.progress.emit("Planning corrections…")
             adjustments, diag = autocorrect.plan(
                 measures,
                 axes=self._axes,
@@ -302,7 +302,7 @@ class AutoCorrectWorker(QThread):
                     seeds_usable=len(seed_pool),
                 )
             )
-        except Exception as exc:  # garde-fou
+        except Exception as exc:  # safety net
             self.failed.emit(str(exc))
         finally:
             if conn is not None:
@@ -312,17 +312,17 @@ class AutoCorrectWorker(QThread):
                     pass
 
     # ------------------------------------------------------------------ #
-    # Étapes 1+2 fusionnées : RAW source + JPEG boîtier (revue Fable 5 G7/P-02)
+    # Steps 1+2 merged: source RAW + in-camera JPEG (Fable 5 review G7/P-02)
     # ------------------------------------------------------------------ #
     def _collect_raw_and_embedded(self, photos, conn) -> tuple[dict[str, dict], dict[str, tuple]]:
-        """RAW (tone+bandes zone nette, asshot, expo, gray-world) + cibles JPEG
-        boîtier {uuid: (sharp, glob)} en UN passage GPU.
+        """RAW (tone+sharp-zone bands, as-shot, exposure, gray-world) + in-camera
+        JPEG targets {uuid: (sharp, glob)} in ONE GPU pass.
 
-        Les deux caches partagent la même clé de fraîcheur (`raw_signature`) : une
-        photo manquante des deux côtés n'ouvre le conteneur ARW qu'une seule fois
-        (`gpu_schedule.process_combined_batch`, unpack unifié + double-buffer).
-        Écrit `SourceRAW`/`LightroomPicture`/`InCameraJPEG` avec les **deltas
-        précalculés** vs RAW, en UNE transaction (P-07)."""
+        Both caches share the same freshness key (`raw_signature`): a photo
+        missing from both sides only opens the ARW container once
+        (`gpu_schedule.process_combined_batch`, unified unpack + double buffer).
+        Writes `SourceRAW`/`LightroomPicture`/`InCameraJPEG` with the **precomputed
+        deltas** vs RAW, in ONE transaction (P-07)."""
         raw_out: dict[str, dict] = {}
         emb_out: dict[str, tuple] = {}
         raw_misses: list[PhotoResult] = []
@@ -346,13 +346,13 @@ class AutoCorrectWorker(QThread):
             return raw_out, emb_out
 
         self.progress.emit(
-            f"Lecture RAW + JPEG boîtier (GPU) — {len(raw_misses)} RAW / "
-            f"{len(emb_misses)} JPEG manquant(s)…"
+            f"Reading RAW + in-camera JPEG (GPU) — {len(raw_misses)} RAW / "
+            f"{len(emb_misses)} missing JPEG(s)…"
         )
         got_raw, got_emb = gpu_schedule.process_combined_batch(
             [p.path for p in raw_misses],
             [p.path for p in emb_misses],
-            progress=self._batch_progress("RAW + JPEG boîtier"),
+            progress=self._batch_progress("RAW + in-camera JPEG"),
         )
         miss_paths = list(dict.fromkeys(p.path for p in raw_misses + emb_misses))
         profiles = self._profiles(miss_paths)
@@ -406,14 +406,14 @@ class AutoCorrectWorker(QThread):
                           mask_sharp_frac=r.mask_sharp_frac, profile_capture=prof,
                           commit=False, **deltas))
 
-        # Un seul commit pour tout le passage (revue Fable 5 P-07) : évite
-        # ~2-3 commits/photo (churn WAL) sur les gros lots.
+        # A single commit for the whole pass (Fable 5 review P-07): avoids
+        # ~2-3 commits/photo (WAL churn) on large batches.
         if conn is not None:
             _safe(conn.commit)
         return raw_out, emb_out
 
     # ------------------------------------------------------------------ #
-    # Étape 3 : aperçu rendu courant (tone/neutral/bandes zone nette) — cache + GPU
+    # Step 3: current rendered preview (tone/neutral/sharp-zone bands) — cache + GPU
     # ------------------------------------------------------------------ #
     def _collect_renders(self, photos, conn, idx):
         analysis_by_id: dict[str, object] = {}
@@ -450,37 +450,37 @@ class AutoCorrectWorker(QThread):
             miss_sig[p.photo_id] = psig
 
         if misses:
-            self.progress.emit(f"Aperçus rendus (GPU) — {len(misses)} photo(s)…")
+            self.progress.emit(f"Rendered previews (GPU) — {len(misses)} photo(s)…")
             decoded = gpu_schedule.analyze_render_blobs(
                 misses,
-                progress=self._batch_progress("Aperçu"),
+                progress=self._batch_progress("Preview"),
             )
             for pid, dual in decoded.items():
                 if dual is None:
                     continue
-                analysis_by_id[pid] = dual.sharp  # état courant = zone nette
+                analysis_by_id[pid] = dual.sharp  # current state = sharp zone
                 if conn is not None:
                     _safe(lambda pid=pid, dual=dual: cachemod.put_preview_jpeg(
                         conn, pid, miss_sig[pid],
                         sharp=dual.sharp, glob=dual.glob,
                         mask_sharp_frac=dual.mask_sharp_frac, commit=False))
             if conn is not None:
-                _safe(conn.commit)  # P-07 : un commit par étape
+                _safe(conn.commit)  # P-07: one commit per step
         return analysis_by_id, channels, skipped
 
     # ------------------------------------------------------------------ #
-    # Message d'échec « aucun rendu » — diagnostic précis
+    # "No render" failure message — precise diagnostic
     # ------------------------------------------------------------------ #
     def _no_render_message(self, n_photos: int, channels: Counter, idx) -> str:
         cause = (
-            "aucun catalog_path reçu du plugin → impossible de localiser Previews.lrdata"
+            "no catalog_path received from the plugin → cannot locate Previews.lrdata"
             if idx is None
-            else "aucun aperçu trouvé dans Previews.lrdata pour la sélection"
+            else "no preview found in Previews.lrdata for the selection"
         )
         return (
-            f"Aucun rendu mesurable sur {n_photos} photo(s) (canaux: {dict(channels)}). "
-            f"Cause probable : {cause}. Miniatures fournies par le plugin : "
-            f"{len(self._thumbs)} (canal non câblé côté GUI). Remède : générez les "
-            f"aperçus standard/1:1 dans Lightroom (Bibliothèque > Aperçus > Générer "
-            f"les aperçus), puis relancez."
+            f"No measurable render out of {n_photos} photo(s) (channels: {dict(channels)}). "
+            f"Likely cause: {cause}. Thumbnails provided by the plugin: "
+            f"{len(self._thumbs)} (channel not wired on the GUI side). Fix: generate "
+            f"standard/1:1 previews in Lightroom (Library > Previews > Build "
+            f"Previews), then retry."
         )

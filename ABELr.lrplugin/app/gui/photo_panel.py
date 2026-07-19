@@ -1,6 +1,6 @@
-"""Panneau sélection / aperçu photos — stub réservé.
+"""Photo selection / preview panel — reserved stub.
 
-Intégrera l'aperçu (miniatures via core.raw.load_thumbnail) et la liste détaillée.
+Will integrate the preview (thumbnails via core.raw.load_thumbnail) and the detailed list.
 """
 
 from __future__ import annotations

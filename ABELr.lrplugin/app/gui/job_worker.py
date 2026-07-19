@@ -1,7 +1,7 @@
-"""Worker Qt — soumet un job et attend son résultat hors du thread GUI.
+"""Qt worker — submits a job and waits for its result off the GUI thread.
 
-wait_result() bloque : il ne doit JAMAIS tourner sur le thread Qt principal,
-sinon la fenêtre gèle. On l'exécute donc dans un QThread.
+wait_result() blocks: it must NEVER run on the main Qt thread, or the
+window freezes. So it runs inside a QThread.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from ..server.models import JobResult, JobType
 
 
 class JobWorker(QThread):
-    """Soumet un job, attend le résultat, émet `finished_result`."""
+    """Submits a job, waits for the result, emits `finished_result`."""
 
     finished_result = Signal(object)  # JobResult | None
     failed = Signal(str)
@@ -31,14 +31,14 @@ class JobWorker(QThread):
         self._payload = payload
         self._timeout = timeout
 
-    def run(self) -> None:  # exécuté dans le thread du worker
+    def run(self) -> None:  # runs on the worker thread
         try:
             job_id = job_queue.submit(self._job_type, self._payload)
             result: Optional[JobResult] = job_queue.wait_result(job_id, self._timeout)
-        except Exception as exc:  # remonter proprement vers le GUI
+        except Exception as exc:  # propagate cleanly to the GUI
             self.failed.emit(str(exc))
             return
         if result is None:
-            self.failed.emit("Timeout — aucune réponse du plugin Lr.")
+            self.failed.emit("Timeout — no response from the Lr plugin.")
             return
         self.finished_result.emit(result)

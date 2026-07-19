@@ -1,6 +1,6 @@
-"""Panneau analyse — histogrammes, carte de prédiction — stub réservé.
+"""Analysis panel — histograms, prediction map — reserved stub.
 
-Visualisera les sorties de core.analysis / core.prediction.
+Will visualize the outputs of core.analysis / core.prediction.
 """
 
 from __future__ import annotations

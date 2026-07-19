@@ -1,31 +1,33 @@
-"""Rendus neutres d'ancrage (« Neutral Preview ») — worker Qt + fonction réutilisable.
+"""Neutral anchor renders ("Neutral Preview") — Qt worker + reusable function.
 
-Rend chaque photo dans son **style courant** (profil DCP + tons + Color Grading)
-mais avec **WB As Shot**, **Exposure2012=0** et **les 24 curseurs HSL à zéro**,
-puis mesure ce rendu neutre (GPU, dual global+sharp) et le cache dans
-`NeutralPreviewJPEG`. Les HSL sont neutralisés pour que l'ancre soit indépendante
-des corrections HSL appliquées ensuite (sinon chaque Apply HSL invaliderait
-`hash_style` → re-probe complet à chaque cycle).
+Renders each photo in its **current style** (DCP profile + tone + Color Grading)
+but with **As Shot WB**, **Exposure2012=0** and **all 24 HSL sliders at zero**,
+then measures this neutral render (GPU, dual global+sharp) and caches it in
+`NeutralPreviewJPEG`. HSL is neutralized so the anchor stays independent of
+HSL corrections applied afterward (otherwise every HSL Apply would invalidate
+`hash_style` → a full re-probe on every cycle).
 
-But : ancre déterministe du mode embedded — le delta JPEG boîtier − rendu neutre
-donne des réglages **absolus** (idempotents), sans dépendre du rendu courant.
+Purpose: deterministic anchor for embedded mode — the delta between in-camera
+JPEG and neutral render yields **absolute** (idempotent) settings, independent
+of the current render.
 
-Mécanisme : job plugin `render_probe` (`Thumbnails.fetchProbe` : apply → render →
-**restore**), soumis **par lots** (`chunk_size`) pour garder le heartbeat du pont
-vivant et borner la fenêtre où les photos sont en état neutre. Clé de fraîcheur :
-`hash_style` (cf. `cache.style_hash`) — recalcul seulement si le style change,
-pas si Temp/Exposure/HSL bougent.
+Mechanism: plugin job `render_probe` (`Thumbnails.fetchProbe`: apply → render →
+**restore**), submitted **in batches** (`chunk_size`) to keep the bridge
+heartbeat alive and bound the window during which photos sit in a neutral
+state. Freshness key: `hash_style` (see `cache.style_hash`) — recomputed only
+when the style changes, not when Temp/Exposure/HSL move.
 
-Garde anti-probe-périmé : si une photo a un `Exposure2012` courant marqué (≥ 0.3)
-mais que son ancre « neutre » mesure la même clarté que son dernier aperçu rendu
-connu, le probe a probablement servi un aperçu en cache (pas re-rendu) → retry
-unique avec un settle long, puis **échec explicite** (une ancre suspecte n'est
-JAMAIS cachée — elle empoisonnerait tous les calculs jusqu'au changement de style).
+Stale-probe guard: if a photo has a current `Exposure2012` marked as non-zero
+(>= 0.3) but its "neutral" anchor measures the same lightness as its last
+known rendered preview, the probe likely served a cached preview (not a fresh
+render) → single retry with a long settle, then **explicit failure** (a
+suspect anchor is NEVER cached — it would poison every calculation until the
+style changes).
 
-Le probe relit Temperature/Tint APRÈS l'apply de `WhiteBalance='As Shot'` :
-c'est la valeur numérique de l'As Shot (cachée en `wb_asshot_temp/tint`), base
-d'une correction WB absolue. Cette lecture vérifie de facto l'hypothèse
-« applyDevelopSettings{WhiteBalance='As Shot'} réinitialise Temp/Tint ».
+The probe re-reads Temperature/Tint AFTER applying `WhiteBalance='As Shot'`:
+that is the numeric As Shot value (cached as `wb_asshot_temp/tint`), the basis
+for an absolute WB correction. This read effectively verifies the assumption
+"applyDevelopSettings{WhiteBalance='As Shot'} resets Temp/Tint".
 """
 
 from __future__ import annotations
@@ -41,8 +43,8 @@ from ..server.models import JobType, PhotoResult, ThumbnailResult
 
 _log = logging.getLogger("abelr.neutral_preview")
 
-# Réglages du rendu neutre : WB boîtier + exposition à plat + HSL neutralisés,
-# le reste du style (profil DCP, tons, Color Grading, crop) intact.
+# Neutral render settings: as-shot WB + flat exposure + neutralized HSL,
+# the rest of the style (DCP profile, tone, Color Grading, crop) untouched.
 _NEUTRAL_DEVELOP: dict[str, object] = {
     "WhiteBalance": "As Shot",
     "Exposure2012": 0.0,
@@ -53,19 +55,20 @@ _NEUTRAL_DEVELOP: dict[str, object] = {
     },
 }
 
-# Budget temps par photo (apply + settle + render + restore côté plugin).
+# Time budget per photo (apply + settle + render + restore on the plugin side).
 _SECONDS_PER_PHOTO = 4.0
 _MIN_TIMEOUT = 30.0
-# Taille des lots render_probe : le dispatch plugin est synchrone dans pollOnce,
-# un gros lot bloquerait le heartbeat plusieurs minutes et élargirait la fenêtre
-# où les photos restent en état neutre en cas de crash Lr.
+# render_probe batch size: the plugin dispatch is synchronous inside pollOnce,
+# a large batch would block the heartbeat for several minutes and widen the
+# window during which photos stay in a neutral state if Lr crashes.
 _CHUNK_SIZE = 16
-# Délai laissé à Lr pour régénérer l'aperçu après l'apply du probe (secondes) ;
-# settle long utilisé au retry si l'ancre semble périmée.
+# Delay given to Lr to regenerate the preview after the probe's apply (seconds);
+# long settle used on retry if the anchor looks stale.
 DEFAULT_SETTLE = 0.6
 _RETRY_SETTLE = 2.0
-# Garde anti-probe-périmé : |Exposure2012| courant à partir duquel l'ancre DOIT
-# différer du dernier aperçu connu, et écart L* en dessous duquel elle est suspecte.
+# Stale-probe guard: current |Exposure2012| threshold above which the anchor
+# MUST differ from the last known preview, and the L* gap below which it is
+# considered suspect.
 _SUSPECT_MIN_EXPO = 0.3
 _SUSPECT_MAX_DELTA_L = 2.0
 
@@ -73,10 +76,10 @@ _SUSPECT_MAX_DELTA_L = 2.0
 def _probe_chunk(
     chunk: list[PhotoResult], settle: float, timeout: float
 ) -> dict[str, tuple[ThumbnailResult, object]]:
-    """Soumet un job render_probe pour `chunk`, décode+mesure les miniatures (GPU).
+    """Submits a render_probe job for `chunk`, decodes+measures the thumbnails (GPU).
 
-    Retourne {photo_id: (ThumbnailResult, RenderAnalysisDual)} — photos sans
-    miniature exploitables absentes. Lève RuntimeError si le plugin ne répond pas.
+    Returns {photo_id: (ThumbnailResult, RenderAnalysisDual)} — photos without a
+    usable thumbnail are absent. Raises RuntimeError if the plugin doesn't respond.
     """
     adjustments = [
         {"photo_id": p.photo_id, "develop": dict(_NEUTRAL_DEVELOP)} for p in chunk
@@ -87,8 +90,8 @@ def _probe_chunk(
     result = job_queue.wait_result(job_id, timeout)
     if result is None:
         raise RuntimeError(
-            "Timeout — le plugin Lr n'a pas renvoyé les rendus neutres "
-            "(Lightroom ouvert et pont connecté ?)."
+            "Timeout — the Lr plugin did not return the neutral renders "
+            "(is Lightroom open and the bridge connected?)."
         )
     out: dict[str, tuple[ThumbnailResult, object]] = {}
     for t in result.thumbnails:
@@ -102,8 +105,8 @@ def _probe_chunk(
 
 
 def _anchor_suspect(p: PhotoResult, dual, conn) -> bool:
-    """True si l'ancre « neutre » ressemble au dernier aperçu rendu connu alors que
-    l'Exposure2012 courant est loin de 0 → le probe a probablement rendu du périmé."""
+    """True if the "neutral" anchor looks like the last known rendered preview while
+    the current Exposure2012 is far from 0 → the probe likely rendered something stale."""
     try:
         expo = abs(float((p.current_develop or {}).get("Exposure2012") or 0.0))
     except (TypeError, ValueError):
@@ -115,10 +118,10 @@ def _anchor_suspect(p: PhotoResult, dual, conn) -> bool:
     try:
         prev = cachemod.get_preview_jpeg_latest(conn, p.photo_id)
     except Exception:
-        # Ne PAS avaler : sans lecture cache on ne peut pas innocenter l'ancre,
-        # et une ancre suspecte cachée empoisonne le mode embedded jusqu'au
-        # changement de style (revue Fable 5 B-03) → traiter comme suspecte.
-        _log.exception("lecture cache impossible pendant _anchor_suspect (%s)", p.photo_id)
+        # Do NOT swallow: without a cache read we can't clear the anchor, and a
+        # cached suspect anchor poisons embedded mode until the style changes
+        # (Fable 5 review B-03) → treat as suspect.
+        _log.exception("cache read failed during _anchor_suspect (%s)", p.photo_id)
         return True
     if prev is None or prev.tone is None:
         return False
@@ -134,16 +137,18 @@ def ensure_neutral_previews(
     chunk_size: int = _CHUNK_SIZE,
     settle: float = DEFAULT_SETTLE,
 ) -> tuple[dict[str, dict], int]:
-    """Garantit un rendu neutre à jour (cache `NeutralPreviewJPEG`) pour chaque photo.
+    """Ensures an up-to-date neutral render (`NeutralPreviewJPEG` cache) for each photo.
 
-    Hits cache (`hash_style` à jour) servis sans I/O ; les manques déclenchent des
-    jobs plugin `render_probe` par lots, décodés et mesurés sur GPU. Retourne
-    `(by_id, n_refreshed)` : `by_id[uuid]` = dict `cache.get_neutral_preview`
-    (sharp/glob/asshot_temp/asshot_tint/mask_sharp_frac), photos sans miniature
-    absentes du dict ; `n_refreshed` = nombre d'ancres recalculées via le plugin.
+    Cache hits (`hash_style` up to date) are served without I/O; misses trigger
+    plugin `render_probe` jobs in batches, decoded and measured on GPU. Returns
+    `(by_id, n_refreshed)`: `by_id[uuid]` = `cache.get_neutral_preview` dict
+    (sharp/glob/asshot_temp/asshot_tint/mask_sharp_frac), photos without a
+    thumbnail are absent from the dict; `n_refreshed` = number of anchors
+    recomputed via the plugin.
 
-    Lève RuntimeError si le plugin ne répond pas ou si une ancre reste suspecte
-    (probe périmé) après retry — dans ce cas rien n'est caché pour ces photos.
+    Raises RuntimeError if the plugin doesn't respond or if an anchor stays
+    suspect (stale probe) after retry — in that case nothing is cached for
+    those photos.
     """
     say = progress or (lambda _msg: None)
     tick = progress_count or (lambda _done, _total: None)
@@ -164,25 +169,25 @@ def ensure_neutral_previews(
     for start in range(0, len(todo), step):
         chunk = todo[start:start + step]
         say(
-            f"Rendu neutre {min(start + len(chunk), len(todo))}/{len(todo)} "
-            f"photo(s) dans Lightroom…"
+            f"Neutral render {min(start + len(chunk), len(todo))}/{len(todo)} "
+            f"photo(s) in Lightroom…"
         )
         tick(start, len(todo))
         timeout = max(_MIN_TIMEOUT, _SECONDS_PER_PHOTO * len(chunk))
         got = _probe_chunk(chunk, settle, timeout)
 
-        # Restore échoué côté plugin (revue Fable 5 L-03) : la photo est restée en
-        # état NEUTRE dans Lightroom — signal fort, à afficher, jamais silencieux.
+        # Restore failed on the plugin side (Fable 5 review L-03): the photo stayed
+        # in a NEUTRAL state in Lightroom — strong signal, must be shown, never silent.
         restore_failed = [t.photo_id[:8] for (t, _d) in got.values() if t.restore_error]
         if restore_failed:
             msg = (
-                f"ATTENTION : restore échoué pour {len(restore_failed)} photo(s) — "
-                f"laissées en état neutre dans Lr : {', '.join(restore_failed)}"
+                f"WARNING: restore failed for {len(restore_failed)} photo(s) — "
+                f"left in a neutral state in Lr: {', '.join(restore_failed)}"
             )
             _log.error(msg)
             say(msg)
 
-        # Garde anti-probe-périmé : retry unique avec settle long, puis échec dur.
+        # Stale-probe guard: single retry with a long settle, then hard failure.
         by_id = {p.photo_id: p for p in chunk}
         suspects = [
             by_id[pid] for pid, (_t, dual) in got.items()
@@ -190,8 +195,8 @@ def ensure_neutral_previews(
         ]
         if suspects:
             say(
-                f"Ancre(s) suspecte(s) ({len(suspects)}) — nouveau rendu avec délai "
-                f"long ({_RETRY_SETTLE:g}s)…"
+                f"Suspect anchor(s) ({len(suspects)}) — re-rendering with a long "
+                f"delay ({_RETRY_SETTLE:g}s)…"
             )
             retry_timeout = max(_MIN_TIMEOUT, (_SECONDS_PER_PHOTO + _RETRY_SETTLE) * len(suspects))
             got.update(_probe_chunk(suspects, _RETRY_SETTLE, retry_timeout))
@@ -201,9 +206,10 @@ def ensure_neutral_previews(
             ]
             if still:
                 raise RuntimeError(
-                    "Rendu neutre périmé malgré le retry (requestJpegThumbnail sert un "
-                    f"cache) pour : {', '.join(still)}. Rien n'a été caché — repli "
-                    "LrExportSession à câbler côté plugin si cela persiste."
+                    "Neutral render still stale after retry (requestJpegThumbnail is "
+                    f"serving a cache) for: {', '.join(still)}. Nothing was cached — "
+                    "an LrExportSession fallback needs wiring on the plugin side if "
+                    "this persists."
                 )
 
         for p in chunk:
@@ -222,7 +228,7 @@ def ensure_neutral_previews(
                         commit=False,
                     )
                 except Exception:
-                    _log.exception("put_neutral_preview a échoué (%s)", p.photo_id)
+                    _log.exception("put_neutral_preview failed (%s)", p.photo_id)
             out[p.photo_id] = {
                 "sharp": dual.sharp, "glob": dual.glob,
                 "asshot_temp": t.asshot_temp, "asshot_tint": t.asshot_tint,
@@ -231,19 +237,19 @@ def ensure_neutral_previews(
             n_refreshed += 1
         if conn is not None:
             try:
-                conn.commit()  # P-07 : un commit par lot, pas par photo
+                conn.commit()  # P-07: one commit per batch, not per photo
             except Exception:
-                _log.exception("commit du lot neutral impossible")
+                _log.exception("neutral batch commit failed")
         tick(min(start + len(chunk), len(todo)), len(todo))
     return out, n_refreshed
 
 
 class NeutralPreviewWorker(QThread):
-    """Génère/rafraîchit les rendus neutres d'ancrage pour la sélection (pré-chauffage)."""
+    """Generates/refreshes the neutral anchor renders for the selection (warm-up)."""
 
-    finished_result = Signal(str)   # message de résumé
+    finished_result = Signal(str)   # summary message
     progress = Signal(str)
-    progress_count = Signal(int, int)  # (fait, total) → barre de chargement déterminée
+    progress_count = Signal(int, int)  # (done, total) -> determinate progress bar
     failed = Signal(str)
 
     def __init__(self, photos: list[PhotoResult]) -> None:
@@ -255,12 +261,12 @@ class NeutralPreviewWorker(QThread):
         try:
             photos = self._photos
             if not photos:
-                self.failed.emit("Aucune photo sélectionnée.")
+                self.failed.emit("No photo selected.")
                 return
-            # GPU prioritaire, fallback CPU (pas d'échec bloquant — cf. core/gpu.py).
+            # GPU first, fallback to CPU (never a blocking failure — see core/gpu.py).
             if not gpu.is_available():
                 self.progress.emit(
-                    f"GPU absent — analyse sur {gpu.device_name()} (plus lent)."
+                    f"No GPU — analyzing on {gpu.device_name()} (slower)."
                 )
 
             catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
@@ -273,15 +279,15 @@ class NeutralPreviewWorker(QThread):
             n_missing = len(photos) - len(by_id)
             if n_refreshed == 0 and n_missing == 0:
                 self.finished_result.emit(
-                    f"Rendus neutres déjà à jour ({len(photos)} photo(s), cache)."
+                    f"Neutral renders already up to date ({len(photos)} photo(s), cache)."
                 )
             else:
                 self.finished_result.emit(
-                    f"Rendus neutres calibrés : {n_refreshed} recalculé(s), "
-                    f"{len(by_id)}/{len(photos)} disponible(s)"
-                    + (f" ({n_missing} sans miniature)." if n_missing else ".")
+                    f"Neutral renders calibrated: {n_refreshed} recomputed, "
+                    f"{len(by_id)}/{len(photos)} available"
+                    + (f" ({n_missing} without a thumbnail)." if n_missing else ".")
                 )
-        except Exception as exc:  # garde-fou
+        except Exception as exc:  # safety net
             self.failed.emit(str(exc))
         finally:
             if conn is not None:

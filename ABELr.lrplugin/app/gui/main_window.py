@@ -1,29 +1,31 @@
-"""Fenêtre principale PySide6 — références (seeds) + correction auto par axe.
+"""Main PySide6 window — references (seeds) + per-axis auto correction.
 
-Flux de refonte (cf. CLAUDE.md / diagramme workflow) :
+Refactor flow (see CLAUDE.md / workflow diagram):
 
-- **Analyse Catalogue** : index métadonnées (EXIF + develop) de toutes les photos.
-- **Marquer + analyser références** : marque la sélection `is_seed` en DB ET la
-  mesure (RAW GPU zone nette + JPEG boîtier + **rendu frais** via le plugin) →
-  le seed est immédiatement exploitable par le matching k-NN (plus de « marqué
-  mais inutilisable » silencieux).
-- **Retirer des références** : démarque `is_seed` (pas de mesure).
-- Cases **[Exposition] [WB] [HSL]** : axes à corriger.
-- Case **[Réf = JPEG embarqué]** : force le JPEG boîtier comme cible (sinon : k-NN
-  sur les seeds les plus proches en analyse RAW).
-- **Aperçu** : mesure (rendu frais) + planifie, **affiche les deltas sans appliquer**.
-- **Appliquer** : applique le plan d'Aperçu s'il existe pour la sélection courante,
-  sinon mesure + planifie + applique en une passe.
+- **Analyze Catalog**: index metadata (EXIF + develop) for all photos.
+- **Mark + analyze references**: flags the selection `is_seed` in DB AND
+  measures it (sharp-area GPU RAW + camera JPEG + **fresh render** via the
+  plugin) → the seed is immediately usable by the k-NN matching (no more
+  silent "marked but unusable").
+- **Remove from references**: unflags `is_seed` (no measurement).
+- **[Exposure] [WB] [HSL]** checkboxes: axes to correct.
+- **[Ref = embedded JPEG]** checkbox: forces the camera JPEG as target
+  (otherwise: k-NN over the closest seeds by RAW analysis).
+- **Preview**: measures (fresh render) + plans, **shows the deltas without
+  applying**.
+- **Apply**: applies the Preview plan if one exists for the current
+  selection, otherwise measures + plans + applies in one pass.
 
-Point clé de correctness : **toute mesure de l'état courant part d'un rendu frais
-demandé au plugin** (`get_thumbnails` → JPEG écrit par Lightroom), et non plus du
-fichier `Previews.lrdata` passif (potentiellement périmé). Si le plugin ne fournit
-aucune miniature (aperçus absents), on retombe sur le canal passif (dégradé, non
-bloquant).
+Key correctness point: **any measurement of the current state starts from a
+fresh render requested from the plugin** (`get_thumbnails` → JPEG written by
+Lightroom), no longer from the passive `Previews.lrdata` file (potentially
+stale). If the plugin provides no thumbnail (previews missing), it falls
+back to the passive channel (degraded, non-blocking).
 
-⚠️ Hypothèse à valider en vrai (verrou) : `requestJpegThumbnail` reflète bien l'état
-develop courant et non un cache périmé. Sinon → replier sur `LrExportSession` côté
-plugin (cf. `core.measure`).
+Caution — hypothesis not yet validated live (open item): `requestJpegThumbnail`
+is assumed to reflect the current develop state and not a stale cache.
+Otherwise → fall back to `LrExportSession` on the plugin side (see
+`core.measure`).
 """
 
 from __future__ import annotations
@@ -48,13 +50,13 @@ from .autocorrect_worker import AutoCorrectResult, AutoCorrectWorker
 from .neutral_preview_worker import NeutralPreviewWorker
 from .job_worker import JobWorker
 
-_AXIS_LABELS = {"expo": "Exposition", "wb": "WB", "hsl": "HSL", "calib": "Étalonnage"}
+_AXIS_LABELS = {"expo": "Exposure", "wb": "WB", "hsl": "HSL", "calib": "Calibration"}
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ABELr — correction auto")
+        self.setWindowTitle("ABELr — auto correction")
         self.resize(760, 600)
 
         self._worker: JobWorker | None = None
@@ -65,65 +67,67 @@ class MainWindow(QMainWindow):
         self._apply_worker: JobWorker | None = None
         self._seed_worker: JobWorker | None = None
 
-        # Machine à états minimale : l'op en cours, la sélection et le rendu frais
-        # sont conservés entre les sauts (sélection → rendu → mesure).
+        # Minimal state machine: the current op, the selection and the fresh
+        # render are kept between hops (selection → render → measurement).
         self._op: str | None = None                 # "ref"|"preview"|"apply"|"seed_remove"|"neutral"
-        self._photos: list = []                     # PhotoResult de la sélection courante
-        self._thumb_paths: dict[str, str] = {}       # uuid → JPEG rendu frais (plugin)
-        # Plan d'Aperçu réutilisable par Appliquer (même sélection).
+        self._photos: list = []                     # PhotoResult of the current selection
+        self._thumb_paths: dict[str, str] = {}       # uuid → fresh rendered JPEG (plugin)
+        # Preview plan reusable by Apply (same selection).
         self._pending_adjustments: list | None = None
         self._pending_ids: frozenset[str] = frozenset()
 
         self.bridge_label = QLabel()
-        self.status_label = QLabel("Prêt. Sélectionnez des photos dans Lightroom.")
+        self.status_label = QLabel("Ready. Select photos in Lightroom.")
         self.plan_summary_label = QLabel("")
         self.plan_summary_label.setStyleSheet("font-weight: bold;")
 
-        # Barre de chargement des opérations d'analyse / mesure d'images. Cachée au
-        # repos ; déterminée quand un worker fournit (fait, total), animée (busy) sinon.
+        # Progress bar for image analysis / measurement operations. Hidden at
+        # rest; determinate when a worker provides (done, total), busy (animated)
+        # otherwise.
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setVisible(False)
 
-        # Diagnostic.
-        self.test_btn = QPushButton("Test pont")
-        self.analyze_catalog_btn = QPushButton("Analyse Catalogue")
+        # Diagnostics.
+        self.test_btn = QPushButton("Test bridge")
+        self.analyze_catalog_btn = QPushButton("Analyze Catalog")
 
-        # Références (seeds).
-        self.mark_refs_btn = QPushButton("Marquer + analyser références")
-        self.unmark_refs_btn = QPushButton("Retirer des références")
+        # References (seeds).
+        self.mark_refs_btn = QPushButton("Mark + analyze references")
+        self.unmark_refs_btn = QPushButton("Remove from references")
         self.calibrate_neutral_btn = QPushButton("Calibrate Neutral Previews")
 
-        # Axes + référence.
-        self.cb_expo = QCheckBox("Exposition")
+        # Axes + reference.
+        self.cb_expo = QCheckBox("Exposure")
         self.cb_wb = QCheckBox("WB")
         self.cb_hsl = QCheckBox("HSL")
         for cb in (self.cb_expo, self.cb_wb, self.cb_hsl):
             cb.setChecked(True)
-        self.cb_calib = QCheckBox("Étalonnage")
+        self.cb_calib = QCheckBox("Calibration")
         self.cb_calib.setChecked(False)
         self.cb_calib.setToolTip(
-            "Transplant k-NN depuis les seeds (ShadowTint, Hue/Saturation R/G/B) —\n"
-            "toujours via seeds même en mode 'Réf = JPEG embarqué' : aucune cible\n"
-            "d'étalonnage n'est mesurable depuis un rendu, seed ou seed manquant → ignoré."
+            "k-NN transplant from the seeds (ShadowTint, Hue/Saturation R/G/B) —\n"
+            "always via seeds even in 'Ref = embedded JPEG' mode: no calibration\n"
+            "target is measurable from a render, missing seed → ignored."
         )
-        self.cb_embedded = QCheckBox("Réf = JPEG embarqué")
+        self.cb_embedded = QCheckBox("Ref = embedded JPEG")
         self.cb_embedded.setToolTip(
-            "Décoché : cible = k-NN sur les seeds dont l'analyse RAW (zone nette) est\n"
-            "la plus proche (utilise leur aperçu déjà retouché comme référence de style).\n"
-            "Coché : cible = JPEG boîtier, ancré sur le rendu neutre (WB As Shot,\n"
-            "Expo 0, HSL 0) — corrige seulement la déviation PAR PHOTO après\n"
-            "soustraction du biais de profil ; valeurs absolues, idempotentes.\n"
-            "Le 1ᵉʳ Aperçu après un changement de style recalcule les ancres dans\n"
-            "Lightroom (render_probe, ~1-4 s/photo, ensuite servi par le cache)."
+            "Unchecked: target = k-NN over the seeds whose RAW analysis (sharp\n"
+            "area) is closest (uses their already-edited preview as the style\n"
+            "reference).\n"
+            "Checked: target = camera JPEG, anchored on the neutral render (WB As\n"
+            "Shot, Exposure 0, HSL 0) — corrects only the PER-PHOTO deviation after\n"
+            "subtracting the profile bias; absolute values, idempotent.\n"
+            "The 1st Preview after a style change recomputes the anchors in\n"
+            "Lightroom (render_probe, ~1-4 s/photo, then served from cache)."
         )
 
         # Correction.
-        self.preview_btn = QPushButton("Aperçu")
-        self.preview_btn.setToolTip("Mesure + planifie, affiche les deltas SANS appliquer.")
-        self.apply_btn = QPushButton("Appliquer")
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.setToolTip("Measures + plans, shows the deltas WITHOUT applying.")
+        self.apply_btn = QPushButton("Apply")
         self.apply_btn.setToolTip(
-            "Applique le plan d'Aperçu s'il existe, sinon mesure + planifie + applique."
+            "Applies the Preview plan if one exists, otherwise measures + plans + applies."
         )
 
         self.photo_list = QListWidget()
@@ -155,7 +159,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(refs_row)
 
         axes_row = QHBoxLayout()
-        axes_row.addWidget(QLabel("Axes :"))
+        axes_row.addWidget(QLabel("Axes:"))
         axes_row.addWidget(self.cb_expo)
         axes_row.addWidget(self.cb_wb)
         axes_row.addWidget(self.cb_hsl)
@@ -185,12 +189,12 @@ class MainWindow(QMainWindow):
         if job_queue.bridge_connected():
             since = job_queue.seconds_since_poll() or 0.0
             self.bridge_label.setText(
-                f"Pont plugin : ● actif (dernier poll il y a {since:.1f}s)"
+                f"Plugin bridge: ● active (last poll {since:.1f}s ago)"
             )
         else:
             self.bridge_label.setText(
-                "Pont plugin : ○ inactif — dans Lightroom : "
-                "Modules externes > Démarrer / connecter l'application"
+                "Plugin bridge: ○ inactive — in Lightroom: "
+                "Library > Plug-in Extras > Start / connect the application"
             )
 
     def _set_actions_enabled(self, enabled: bool) -> None:
@@ -201,15 +205,15 @@ class MainWindow(QMainWindow):
             btn.setEnabled(enabled)
 
     # ------------------------------------------------------------------ #
-    # Barre de chargement (analyse / mesure d'images)
+    # Progress bar (image analysis / measurement)
     # ------------------------------------------------------------------ #
     def _progress_busy(self) -> None:
-        """Affiche la barre en mode indéterminé (animation) — étape sans compteur."""
+        """Shows the bar in indeterminate mode (animated) — step with no counter."""
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(True)
 
     def _on_progress_count(self, done: int, total: int) -> None:
-        """Passe la barre en mode déterminé `done/total` (émis par les workers GPU)."""
+        """Switches the bar to determinate `done/total` mode (emitted by GPU workers)."""
         if total <= 0:
             self._progress_busy()
             return
@@ -218,7 +222,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
 
     def _progress_done(self) -> None:
-        """Masque et réinitialise la barre (fin ou échec de l'opération)."""
+        """Hides and resets the bar (operation finished or failed)."""
         self.progress_bar.reset()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setVisible(False)
@@ -237,18 +241,18 @@ class MainWindow(QMainWindow):
 
     def _require_bridge(self) -> bool:
         if not job_queue.bridge_connected():
-            self.status_label.setText("Pont inactif — démarrez l'application depuis Lightroom.")
+            self.status_label.setText("Bridge inactive — start the application from Lightroom.")
             return False
         return True
 
     # ------------------------------------------------------------------ #
-    # Test pont
+    # Test bridge
     # ------------------------------------------------------------------ #
     def _on_check(self) -> None:
         if not self._require_bridge():
             return
         self.test_btn.setEnabled(False)
-        self.status_label.setText("Check plugin — attente du plugin Lr…")
+        self.status_label.setText("Checking plugin — waiting for the Lr plugin…")
         self._check_worker = JobWorker(JobType.TEST, timeout=10.0)
         self._check_worker.finished_result.connect(self._on_check_result)
         self._check_worker.failed.connect(self._on_check_failed)
@@ -257,16 +261,16 @@ class MainWindow(QMainWindow):
     def _on_check_result(self, result: JobResult) -> None:
         self.test_btn.setEnabled(True)
         if result.status == "ok":
-            self.status_label.setText("Plugin OK — popup affichée dans Lightroom.")
+            self.status_label.setText("Plugin OK — popup shown in Lightroom.")
         else:
-            self.status_label.setText(f"Plugin a répondu une erreur : {result.error}")
+            self.status_label.setText(f"Plugin returned an error: {result.error}")
 
     def _on_check_failed(self, message: str) -> None:
         self.test_btn.setEnabled(True)
-        self.status_label.setText(f"Check plugin échoué : {message}")
+        self.status_label.setText(f"Plugin check failed: {message}")
 
     # ------------------------------------------------------------------ #
-    # Analyse Catalogue — index métadonnées (pas de pixels)
+    # Analyze Catalog — metadata index (no pixels)
     # ------------------------------------------------------------------ #
     def _on_analyze_catalog(self) -> None:
         if not self._require_bridge():
@@ -274,7 +278,7 @@ class MainWindow(QMainWindow):
         self.analyze_catalog_btn.setEnabled(False)
         self._progress_busy()
         self.photo_list.clear()
-        self.status_label.setText("Récupération du catalogue (toutes les photos)…")
+        self.status_label.setText("Fetching the catalog (all photos)…")
         self._worker = JobWorker(JobType.GET_CATALOG_PHOTOS, timeout=120.0)
         self._worker.finished_result.connect(self._on_catalog_result)
         self._worker.failed.connect(self._on_catalog_failed)
@@ -285,7 +289,7 @@ class MainWindow(QMainWindow):
         self._progress_done()
         photos = result.photos
         if not photos:
-            self.status_label.setText("Catalogue vide ou aucune photo retournée.")
+            self.status_label.setText("Empty catalog or no photo returned.")
             return
         catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
         n_seeds = 0
@@ -302,31 +306,31 @@ class MainWindow(QMainWindow):
             cameras[cam] = cameras.get(cam, 0) + 1
         self.photo_list.clear()
         self.photo_list.addItem(
-            f"Catalogue : {len(photos)} photo(s) — {n_seeds} référence(s) marquée(s)."
+            f"Catalog: {len(photos)} photo(s) — {n_seeds} reference(s) marked."
         )
         for cam, n in sorted(cameras.items(), key=lambda kv: -kv[1]):
-            self.photo_list.addItem(f"  {cam} : {n} photo(s)")
-        self.status_label.setText(f"Catalogue indexé — {len(photos)} photo(s).")
+            self.photo_list.addItem(f"  {cam}: {n} photo(s)")
+        self.status_label.setText(f"Catalog indexed — {len(photos)} photo(s).")
 
     def _on_catalog_failed(self, message: str) -> None:
         self.analyze_catalog_btn.setEnabled(True)
         self._progress_done()
-        self.status_label.setText(f"Analyse Catalogue échouée : {message}")
+        self.status_label.setText(f"Analyze Catalog failed: {message}")
 
     # ------------------------------------------------------------------ #
-    # Étape 1 : récupérer la sélection Lr (commune à toutes les opérations)
+    # Step 1: fetch the Lr selection (common to all operations)
     # ------------------------------------------------------------------ #
     def _begin(self, op: str) -> None:
         if not self._require_bridge():
             return
         self._op = op
-        # Toute nouvelle opération invalide un plan d'Aperçu antérieur.
+        # Any new operation invalidates a previous Preview plan.
         self._pending_adjustments = None
         self._pending_ids = frozenset()
         self._set_actions_enabled(False)
         self._progress_busy()
         self.plan_summary_label.setText("")
-        self.status_label.setText("Récupération de la sélection…")
+        self.status_label.setText("Fetching the selection…")
         self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
         self._worker.finished_result.connect(self._on_selection)
         self._worker.failed.connect(self._on_auto_failed)
@@ -336,7 +340,7 @@ class MainWindow(QMainWindow):
         if not result.photos:
             self._set_actions_enabled(True)
             self._progress_done()
-            self.status_label.setText("Aucune photo sélectionnée dans Lightroom.")
+            self.status_label.setText("No photo selected in Lightroom.")
             return
         self._photos = result.photos
         op = self._op
@@ -344,13 +348,13 @@ class MainWindow(QMainWindow):
         if op == "seed_remove":
             self._apply_seed_flag(result.photos, False)
             self._set_actions_enabled(True)
-            self._progress_done()  # marquage DB seul, pas de mesure d'images
+            self._progress_done()  # DB flag only, no image measurement
             return
 
         if op == "neutral":
             n = len(result.photos)
             self.status_label.setText(
-                f"{n} photo(s) — rendu neutre de calibration (écriture + rendu Lr, lourd)…"
+                f"{n} photo(s) — neutral calibration render (write + Lr render, heavy)…"
             )
             self._neutral_worker = NeutralPreviewWorker(result.photos)
             self._neutral_worker.progress.connect(self.status_label.setText)
@@ -360,17 +364,18 @@ class MainWindow(QMainWindow):
             self._neutral_worker.start()
             return
 
-        # ref | preview | apply : marquer d'abord (ref), puis rendu frais + mesure.
+        # ref | preview | apply: mark first (ref), then fresh render + measurement.
         if op == "ref":
             self._apply_seed_flag(result.photos, True)
 
         if op in ("preview", "apply") and not self._checked_axes():
             self._set_actions_enabled(True)
-            self.status_label.setText("Cochez au moins un axe (Exposition, WB ou HSL).")
+            self.status_label.setText("Check at least one axis (Exposure, WB or HSL).")
             return
 
-        # Mode embedded (ancré neutre) : aucune mesure du rendu courant → pas de
-        # rendu frais à demander au plugin (l'ancre vient du cache/render_probe).
+        # Embedded mode (neutral anchor): no measurement of the current render →
+        # no fresh render to request from the plugin (the anchor comes from the
+        # cache/render_probe).
         if op in ("preview", "apply") and self.cb_embedded.isChecked():
             self._thumb_paths = {}
             self._launch_measure(result.photos)
@@ -379,11 +384,11 @@ class MainWindow(QMainWindow):
         self._fetch_fresh_render(result.photos)
 
     # ------------------------------------------------------------------ #
-    # Étape 2 : rendu frais via le plugin (get_thumbnails) — état courant fiable
+    # Step 2: fresh render via the plugin (get_thumbnails) — reliable current state
     # ------------------------------------------------------------------ #
     def _fetch_fresh_render(self, photos: list) -> None:
         n = len(photos)
-        self.status_label.setText(f"Rendu frais de {n} photo(s) via Lightroom…")
+        self.status_label.setText(f"Fresh render of {n} photo(s) via Lightroom…")
         timeout = max(30.0, n * 0.6)
         payload = {"photo_ids": [p.photo_id for p in photos]}
         self._render_worker = JobWorker(JobType.GET_THUMBNAILS, payload, timeout=timeout)
@@ -392,9 +397,9 @@ class MainWindow(QMainWindow):
         self._render_worker.start()
 
     def _on_render_failed(self, message: str) -> None:
-        # Le rendu frais a échoué : on continue quand même (repli passif
-        # Previews.lrdata dans le worker), en signalant la dégradation.
-        self.status_label.setText(f"Rendu frais indisponible ({message}) — repli aperçu passif.")
+        # The fresh render failed: continue anyway (passive Previews.lrdata
+        # fallback in the worker), flagging the degradation.
+        self.status_label.setText(f"Fresh render unavailable ({message}) — falling back to passive preview.")
         self._thumb_paths = {}
         self._launch_measure(self._photos)
 
@@ -407,8 +412,8 @@ class MainWindow(QMainWindow):
         got = len(self._thumb_paths)
         if got == 0:
             self.status_label.setText(
-                "Aucun rendu frais fourni par le plugin — repli aperçu passif "
-                "(Previews.lrdata). Générez les aperçus si la mesure échoue."
+                "No fresh render provided by the plugin — falling back to passive "
+                "preview (Previews.lrdata). Generate previews if the measurement fails."
             )
         self._launch_measure(self._photos)
 
@@ -416,7 +421,7 @@ class MainWindow(QMainWindow):
         op = self._op
         if op == "ref":
             self.status_label.setText(
-                f"{len(photos)} référence(s) — analyse RAW + JPEG boîtier + rendu…"
+                f"{len(photos)} reference(s) — RAW analysis + camera JPEG + render…"
             )
             self._auto_worker = AutoCorrectWorker(
                 photos, analyze_only=True, thumbnail_paths=self._thumb_paths,
@@ -431,16 +436,17 @@ class MainWindow(QMainWindow):
         # preview | apply
         axes = self._checked_axes()
         self.status_label.setText(
-            f"{len(photos)} photo(s) — mesure {'/'.join(_AXIS_LABELS[a] for a in sorted(axes))}…"
+            f"{len(photos)} photo(s) — measuring {'/'.join(_AXIS_LABELS[a] for a in sorted(axes))}…"
         )
         self._auto_worker = AutoCorrectWorker(
             photos,
             axes=axes,
             forced_embedded=self.cb_embedded.isChecked(),
             thumbnail_paths=self._thumb_paths,
-            # Apply (mode seeds) : mesure toujours redécodée pour ne pas recalculer
-            # un delta sur un rendu périmé. Aperçu : le cache PreviewJPEG suffit.
-            # Mode embedded : sans effet (aucune mesure du rendu courant).
+            # Apply (seeds mode): measurement always re-decoded so as not to
+            # recompute a delta on a stale render. Preview: the PreviewJPEG
+            # cache is enough. Embedded mode: no effect (no measurement of the
+            # current render).
             force_fresh_preview=(op == "apply"),
         )
         self._auto_worker.progress.connect(self.status_label.setText)
@@ -450,17 +456,17 @@ class MainWindow(QMainWindow):
         self._auto_worker.start()
 
     # ------------------------------------------------------------------ #
-    # Marquage seed en DB (commun à ref / retrait)
+    # Seed flagging in DB (common to ref / removal)
     # ------------------------------------------------------------------ #
     def _apply_seed_flag(self, photos: list, value: bool) -> None:
         catalog_path = next((p.catalog_path for p in photos if p.catalog_path), None)
         if not catalog_path:
-            self.status_label.setText("Aucun catalog_path reçu — impossible de localiser le cache.")
+            self.status_label.setText("No catalog_path received — cannot locate the cache.")
             return
         try:
             conn = cachemod.open_cache(catalog_path)
-            # Transaction UNIQUE (revue Fable 5 DB-03) : 2 commits/photo sur le
-            # thread Qt gelaient le GUI plusieurs secondes à 300+ photos.
+            # SINGLE transaction (Fable 5 review DB-03): 2 commits/photo on the
+            # Qt thread froze the GUI for several seconds at 300+ photos.
             for p in photos:
                 cachemod.put_picture(
                     conn, p.photo_id, path=p.path, catalog_path=p.catalog_path,
@@ -472,13 +478,13 @@ class MainWindow(QMainWindow):
             conn.commit()
             conn.close()
         except Exception as exc:
-            self.status_label.setText(f"Marquage référence échoué : {exc}")
+            self.status_label.setText(f"Reference flagging failed: {exc}")
             return
         if not value:
-            self.status_label.setText(f"{len(photos)} photo(s) retirée(s) des références.")
+            self.status_label.setText(f"{len(photos)} photo(s) removed from references.")
 
     # ------------------------------------------------------------------ #
-    # Résultats
+    # Results
     # ------------------------------------------------------------------ #
     def _on_analyze_done(self, res: AutoCorrectResult) -> None:
         self._set_actions_enabled(True)
@@ -487,8 +493,8 @@ class MainWindow(QMainWindow):
         for note in res.notes:
             self.photo_list.addItem(note)
         self.status_label.setText(
-            f"Références marquées + analysées — {res.n_measured} mesurée(s), "
-            f"{res.n_skipped} sans rendu · pool exploitable : {res.seeds_usable}/{res.seeds_marked}."
+            f"References marked + analyzed — {res.n_measured} measured, "
+            f"{res.n_skipped} without render · usable pool: {res.seeds_usable}/{res.seeds_marked}."
         )
 
     def _on_neutral_done(self, message: str) -> None:
@@ -497,8 +503,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
 
     def _format_adjustment(self, adj) -> str:
-        """Ligne d'aperçu « clé: courant → cible (Δ) » — les valeurs embedded sont
-        absolues, l'écart avec le réglage courant est donc l'info utile."""
+        """Preview line "key: current → target (delta)" — embedded values are
+        absolute, so the gap vs the current setting is the useful info."""
         current = next(
             (p.current_develop or {} for p in self._photos if p.photo_id == adj.photo_id), {}
         )
@@ -517,18 +523,18 @@ class MainWindow(QMainWindow):
         diag = res.diagnostics
         self.photo_list.clear()
         if diag is not None:
-            mode_label = "embedded (ancré neutre)" if diag.mode == "embedded" else diag.mode
+            mode_label = "embedded (neutral anchor)" if diag.mode == "embedded" else diag.mode
             self.plan_summary_label.setText(
-                f"Mode {mode_label} — {diag.n_seeds} seed(s), {diag.n_targets} cible(s), "
-                f"{res.n_measured} mesurée(s), {res.n_skipped} non mesurable(s)."
+                f"Mode {mode_label} — {diag.n_seeds} seed(s), {diag.n_targets} target(s), "
+                f"{res.n_measured} measured, {res.n_skipped} not measurable."
             )
             for note in res.notes:
                 self.photo_list.addItem(f"  • {note}")
             for note in diag.notes:
                 self.photo_list.addItem(f"  • {note}")
 
-        # Repli embedded silencieux : des seeds sont marqués mais inexploitables
-        # (analyse RAW absente) → l'utilisateur croit corriger « au style seeds ».
+        # Silent embedded fallback: seeds are marked but unusable (missing RAW
+        # analysis) → the user thinks they're correcting "to seed style".
         if (
             diag is not None and diag.mode == "embedded"
             and not self.cb_embedded.isChecked()
@@ -536,9 +542,9 @@ class MainWindow(QMainWindow):
         ):
             self.photo_list.insertItem(
                 0,
-                f"⚠ {res.seeds_marked - res.seeds_usable} référence(s) marquée(s) "
-                f"mais non analysée(s) → repli JPEG boîtier. Lancez « Marquer + "
-                f"analyser références » sur vos repères d'abord.",
+                f"⚠ {res.seeds_marked - res.seeds_usable} reference(s) marked "
+                f"but not analyzed → falling back to camera JPEG. Run "
+                f"\"Mark + analyze references\" on your reference shots first.",
             )
 
         for adj in res.adjustments[:10]:
@@ -550,8 +556,8 @@ class MainWindow(QMainWindow):
             self._set_actions_enabled(True)
             self._progress_done()
             self.status_label.setText(
-                "Aucune correction nécessaire — photos conformes au profil "
-                "(ou aucune cible exploitable, cf. notes)."
+                "No correction needed — photos already match the profile "
+                "(or no usable target, see notes)."
             )
             return
 
@@ -561,28 +567,29 @@ class MainWindow(QMainWindow):
             self._set_actions_enabled(True)
             self._progress_done()
             self.status_label.setText(
-                f"Aperçu prêt — {len(res.adjustments)} correction(s). "
-                f"Cliquez « Appliquer » pour valider."
+                f"Preview ready — {len(res.adjustments)} correction(s). "
+                f"Click \"Apply\" to confirm."
             )
             return
 
-        # op == "apply" : appliquer directement le plan qu'on vient de calculer
-        # (la barre reste affichée jusqu'à la fin de l'application par le plugin).
+        # op == "apply": apply directly the plan just computed (the bar stays
+        # shown until the plugin finishes applying it).
         self._submit_apply(res.adjustments)
 
     # ------------------------------------------------------------------ #
-    # Appliquer — plan d'Aperçu réutilisé, sinon mesure+plan+apply
+    # Apply — reuses the Preview plan, otherwise measure+plan+apply
     # ------------------------------------------------------------------ #
     def _on_apply_click(self) -> None:
         if not self._require_bridge():
             return
         if self._pending_adjustments is not None:
-            # Revue Fable 5 B-01 : ne pas rejouer un plan d'Aperçu si la sélection
-            # Lr a changé entre-temps (apply partiel/incohérent sinon). On re-fetch
-            # la sélection et on compare à `_pending_ids` avant de soumettre.
+            # Fable 5 review B-01: do not replay a Preview plan if the Lr
+            # selection changed in the meantime (partial/inconsistent apply
+            # otherwise). Re-fetch the selection and compare against
+            # `_pending_ids` before submitting.
             self._set_actions_enabled(False)
             self._progress_busy()
-            self.status_label.setText("Vérification de la sélection avant application…")
+            self.status_label.setText("Checking the selection before applying…")
             self._worker = JobWorker(JobType.GET_SELECTED_PHOTOS)
             self._worker.finished_result.connect(self._on_apply_selection_check)
             self._worker.failed.connect(self._on_auto_failed)
@@ -595,15 +602,15 @@ class MainWindow(QMainWindow):
         pending_ids = self._pending_ids
         self._pending_adjustments = None
         self._pending_ids = frozenset()
-        if adjustments is None:  # défensif : plan consommé entre-temps
+        if adjustments is None:  # defensive: plan consumed in the meantime
             self._set_actions_enabled(True)
             self._progress_done()
-            self.status_label.setText("Plan d'Aperçu introuvable — relancez Aperçu.")
+            self.status_label.setText("Preview plan not found — rerun Preview.")
             return
         current_ids = frozenset(p.photo_id for p in result.photos)
         if current_ids != pending_ids:
             self.status_label.setText(
-                "Sélection modifiée depuis l'Aperçu — nouvelle mesure + planification…"
+                "Selection changed since the Preview — new measurement + planning…"
             )
             self._begin("apply")
             return
@@ -613,15 +620,16 @@ class MainWindow(QMainWindow):
         if not adjustments:
             self._set_actions_enabled(True)
             self._progress_done()
-            self.status_label.setText("Rien à appliquer.")
+            self.status_label.setText("Nothing to apply.")
             return
         self._progress_busy()
         self.status_label.setText(
-            f"Application — {len(adjustments)} photo(s) dans Lightroom…"
+            f"Applying — {len(adjustments)} photo(s) in Lightroom…"
         )
         payload = {"adjustments": [a.model_dump() for a in adjustments]}
-        # Timeout ∝ n (revue Fable 5 B-05) : le plugin applique par lots de 50 avec
-        # heartbeat, mais une grosse sélection dépasse largement 180 s au total.
+        # Timeout proportional to n (Fable 5 review B-05): the plugin applies in
+        # batches of 50 with a heartbeat, but a large selection easily exceeds
+        # 180s total.
         timeout = max(180.0, len(adjustments) * 2.0)
         self._apply_worker = JobWorker(JobType.APPLY_ADJUSTMENTS, payload, timeout=timeout)
         self._apply_worker.finished_result.connect(self._on_apply_done)
@@ -634,16 +642,16 @@ class MainWindow(QMainWindow):
         applied = result.applied if result.applied is not None else "?"
         total = result.total if result.total is not None else "?"
         if result.status == "ok":
-            msg = f"Appliqué : {applied}/{total} photo(s) — vérifiez le rendu dans Lightroom."
+            msg = f"Applied: {applied}/{total} photo(s) — check the result in Lightroom."
             if result.errors_summary:
-                # Apply partiel (revue Fable 5 L-04) : causes d'échec affichées.
-                msg += f" Échecs : {result.errors_summary}"
-                self.photo_list.insertItem(0, f"⚠ Apply partiel — {result.errors_summary}")
+                # Partial apply (Fable 5 review L-04): failure causes shown.
+                msg += f" Failures: {result.errors_summary}"
+                self.photo_list.insertItem(0, f"⚠ Partial apply — {result.errors_summary}")
             self.status_label.setText(msg)
         else:
-            self.status_label.setText(f"Application : {applied}/{total} — {result.error}")
+            self.status_label.setText(f"Apply: {applied}/{total} — {result.error}")
 
     def _on_auto_failed(self, message: str) -> None:
         self._set_actions_enabled(True)
         self._progress_done()
-        self.status_label.setText(f"Erreur : {message}")
+        self.status_label.setText(f"Error: {message}")
