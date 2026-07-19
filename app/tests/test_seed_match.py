@@ -137,6 +137,27 @@ def test_target_from_seeds_calibration_partial_across_seeds():
     assert tgt.green_saturation == pytest.approx(30.0)
 
 
+def test_target_from_seeds_calibration_spread_guard_falls_back_to_nearest():
+    # RedHue diverge fortement entre les 2 seeds matchés (+30 vs -20, spread 50 >
+    # _CALIB_SPREAD_MAX=25) : moyenne pondérée interdite (ne correspondrait à
+    # aucun seed réel) → repli sur la valeur exacte du seed le plus proche.
+    near = (_seed("near", 0.5, 0.5, 50.0, red_hue=30.0), 0.1)
+    far = (_seed("far", 0.9, 0.9, 90.0, red_hue=-20.0), 1.0)
+    tgt = sm.target_from_seeds([near, far])
+    assert tgt is not None
+    assert tgt.red_hue == pytest.approx(30.0)  # valeur du seed proche, pas une moyenne (5.4)
+
+
+def test_target_from_seeds_calibration_spread_guard_allows_close_values():
+    # Divergence faible (spread 2 < _CALIB_SPREAD_MAX) : seeds cohérents → moyenne
+    # pondérée normale inchangée, pas de repli 1-seed.
+    near = (_seed("near", 0.5, 0.5, 50.0, red_hue=10.0), 0.001)
+    far = (_seed("far", 0.9, 0.9, 90.0, red_hue=12.0), 1.0)
+    tgt = sm.target_from_seeds([near, far])
+    assert tgt is not None
+    assert 10.0 < tgt.red_hue < 12.0
+
+
 def test_weighted_bands_averages_reliable_only():
     def band(name, frac, hue, chroma):
         return BandStats(name, frac, hue, chroma, 0.3, 0.0, 50.0)

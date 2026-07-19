@@ -82,3 +82,40 @@ def test_raw_confirms_oversat_true_on_hard_clip():
 def test_raw_confirms_oversat_false_without_hard_clip():
     band = _band(frac=0.5, sat_clip_frac=0.0)
     assert raw_confirms_oversat(band) is False
+
+
+# --------------------------------------------------------------------------- #
+# H3 (PLAN) — transplant embedded (`BandTarget.embedded_raw=True`) plafonne plus
+# strictement les deltas de luminance/teinte (pas de garde "réduction seule"
+# possible sur ces axes comme pour la saturation).
+# --------------------------------------------------------------------------- #
+def test_plan_band_embedded_raw_caps_luminance_delta_tighter():
+    # Cible JPEG boîtier très décalée en L* (+80) : sans le plafond dédié, le delta
+    # de luminance grimperait à _MAX_LUM (20). Avec embedded_raw=True, il doit
+    # rester au plafond strict (_MAX_LUM_EMBEDDED_RAW = 10).
+    stats = _band(median_l=20.0, median_chroma=20.0)
+    target_loose = BandTarget(name="Red", lstar=100.0, embedded_raw=False)
+    target_strict = BandTarget(name="Red", lstar=100.0, embedded_raw=True)
+    corr_loose = plan_band(stats, target_loose, BandResponse())
+    corr_strict = plan_band(stats, target_strict, BandResponse())
+    assert corr_loose.d_luminance == 20
+    assert corr_strict.d_luminance == 10
+
+
+def test_plan_band_embedded_raw_caps_hue_delta_tighter():
+    stats = _band(median_hue=0.0, median_chroma=20.0)
+    target_loose = BandTarget(name="Red", hue=170.0, embedded_raw=False)
+    target_strict = BandTarget(name="Red", hue=170.0, embedded_raw=True)
+    corr_loose = plan_band(stats, target_loose, BandResponse())
+    corr_strict = plan_band(stats, target_strict, BandResponse())
+    assert corr_loose.d_hue == 15
+    assert corr_strict.d_hue == 8
+
+
+def test_plan_band_embedded_raw_default_false_unchanged_behavior():
+    # Comportement historique préservé : `embedded_raw` par défaut à False, plafond
+    # nominal inchangé (pas de régression sur les cibles non-embedded/seed-match).
+    stats = _band(median_l=20.0, median_chroma=20.0)
+    target = BandTarget(name="Red", lstar=100.0)
+    corr = plan_band(stats, target, BandResponse())
+    assert corr.d_luminance == 20

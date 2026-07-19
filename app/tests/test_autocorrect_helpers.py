@@ -144,3 +144,41 @@ def test_band_targets_from_seed_match_wires_raw_oversat_from_target_photo_raw():
 
     tgs = ac._band_targets_from_seed_match(t, raw_bands=None)
     assert tgs["Red"].raw_oversat is None
+
+
+# --------------------------------------------------------------------------- #
+# H3 (PLAN) — `embedded_raw` marque les cibles transplant brut JPEG boîtier
+# (mode `ignore_bias=True`), pour le plafond L*/teinte strict côté `hsl.plan_band`.
+# --------------------------------------------------------------------------- #
+def test_embedded_band_targets_marks_embedded_raw_only_when_ignore_bias():
+    from app.core.pipeline import RenderAnalysis
+    from app.core.render_metrics import BandStats
+
+    t = RenderAnalysis(
+        tone=None, neutral=None,
+        bands=[BandStats("Red", 0.5, 0.0, 40.0, 0.5, 0.0, 50.0)],
+    )
+    bias = ac.ProfileBias(n=8)
+    bias.bands["Red"] = (0.0, 0.0, 0.0)
+
+    tgs = ac._embedded_band_targets(t, bias, ignore_bias=True)
+    assert tgs["Red"].embedded_raw is True
+
+    # Mode historique (delta vs norme de biais) : pas de transplant brut → False.
+    tgs = ac._embedded_band_targets(t, bias, ignore_bias=False)
+    assert tgs["Red"].embedded_raw is False
+
+
+def test_band_targets_from_seed_match_does_not_mark_embedded_raw():
+    from app.core.seed_match import SeedTarget
+    from app.core.render_metrics import BandStats
+
+    t = SeedTarget(
+        temperature=None, tint=None, tone=None,
+        bands=[BandStats("Red", 0.5, 0.0, 40.0, 0.5, 0.0, 50.0)],
+        shadow_tint=None, red_hue=None, red_saturation=None,
+        green_hue=None, green_saturation=None, blue_hue=None, blue_saturation=None,
+        n_matched=1, seed_ids=["s"],
+    )
+    tgs = ac._band_targets_from_seed_match(t)
+    assert tgs["Red"].embedded_raw is False

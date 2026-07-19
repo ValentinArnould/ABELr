@@ -241,11 +241,29 @@ def _weighted_bands(matches: list[tuple[SeedVector, float]]) -> list[BandStats] 
     return out
 
 
-def _weighted_field(matches: list[tuple[SeedVector, float]], field: str) -> float | None:
-    items = [
-        (getattr(m, field), 1.0 / (d + 1e-6)) for m, d in matches if getattr(m, field) is not None
-    ]
-    return _weighted(items)
+# Divergence max tolérée (points curseur, échelle -100..100) entre les k seeds
+# matchés sur un même champ Étalonnage avant de refuser la moyenne pondérée et
+# de replier sur le seed le plus proche (cf. PLAN.md C2 — un `RedHue` +30 chez un
+# seed et -20 chez un autre ne doit pas produire une moyenne qui ne correspond à
+# aucun seed réel). Valeur provisoire choisie dans le même ordre de grandeur que
+# les gardes de correction existantes (`hsl._MAX_SAT=25`) faute de données seeds
+# réelles conflictuelles pour la trancher (cf. C3, non tranché).
+_CALIB_SPREAD_MAX = 25.0
+
+
+def _weighted_calib_field(matches: list[tuple[SeedVector, float]], field: str) -> float | None:
+    """Moyenne pondérée d'un champ Étalonnage — sauf si les seeds matchés
+    divergent trop sur ce champ (`_CALIB_SPREAD_MAX`), auquel cas on replie sur
+    la valeur du seed le plus proche en distance plutôt que de moyenner à
+    l'aveugle (cf. PLAN.md C2)."""
+    items = [(m, d) for m, d in matches if getattr(m, field) is not None]
+    if not items:
+        return None
+    values = [getattr(m, field) for m, _ in items]
+    if len(values) > 1 and (max(values) - min(values)) > _CALIB_SPREAD_MAX:
+        nearest, _ = min(items, key=lambda t: t[1])
+        return getattr(nearest, field)
+    return _weighted([(getattr(m, field), 1.0 / (d + 1e-6)) for m, d in items])
 
 
 def target_from_seeds(matches: list[tuple[SeedVector, float]]) -> SeedTarget | None:
@@ -259,13 +277,13 @@ def target_from_seeds(matches: list[tuple[SeedVector, float]]) -> SeedTarget | N
         tint=_weighted(tints),
         tone=_weighted_tone(matches),
         bands=_weighted_bands(matches),
-        shadow_tint=_weighted_field(matches, "shadow_tint"),
-        red_hue=_weighted_field(matches, "red_hue"),
-        red_saturation=_weighted_field(matches, "red_saturation"),
-        green_hue=_weighted_field(matches, "green_hue"),
-        green_saturation=_weighted_field(matches, "green_saturation"),
-        blue_hue=_weighted_field(matches, "blue_hue"),
-        blue_saturation=_weighted_field(matches, "blue_saturation"),
+        shadow_tint=_weighted_calib_field(matches, "shadow_tint"),
+        red_hue=_weighted_calib_field(matches, "red_hue"),
+        red_saturation=_weighted_calib_field(matches, "red_saturation"),
+        green_hue=_weighted_calib_field(matches, "green_hue"),
+        green_saturation=_weighted_calib_field(matches, "green_saturation"),
+        blue_hue=_weighted_calib_field(matches, "blue_hue"),
+        blue_saturation=_weighted_calib_field(matches, "blue_saturation"),
         n_matched=len(matches),
         seed_ids=[m.photo_id for m, _ in matches],
     )

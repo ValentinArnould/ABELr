@@ -37,6 +37,13 @@ _DEADBAND_HUE = 6.0      # degrés
 _MAX_SAT = 25
 _MAX_LUM = 20
 _MAX_HUE = 15
+# Plafonds dédiés, plus stricts, quand la cible est un transplant brut du JPEG
+# boîtier (`BandTarget.embedded_raw=True`, mode `ignore_bias=True`) : le JPEG a sa
+# propre science couleur (profil créatif) sur L*/teinte, on ne veut pas la copier
+# intégralement (« corriger, pas copier ») — seule la saturation a déjà sa garde
+# réduction-seule, L*/teinte n'en avaient aucune avant H3.
+_MAX_LUM_EMBEDDED_RAW = 10
+_MAX_HUE_EMBEDDED_RAW = 8
 # Fraction de pixels quasi-saturés (S≥0.97) déclenchant une réduction même sans
 # référence de chroma (sursaturation « dure »).
 _SAT_CLIP_TRIGGER = 0.05
@@ -56,6 +63,11 @@ class BandTarget:
     raw_oversat : si False, le RAW NE confirme PAS la charge de cette bande → on
     s'interdit d'en réduire la saturation (évite de corriger un effet de profil).
     None = pas d'info RAW (on ne bloque pas).
+
+    embedded_raw : True si `chroma`/`lstar`/`hue` sont un transplant brut du JPEG
+    boîtier (mode `ignore_bias=True`, pas de norme de biais soustraite) → plafonds
+    L*/teinte plus stricts (`_MAX_LUM_EMBEDDED_RAW`/`_MAX_HUE_EMBEDDED_RAW`) pour ne
+    jamais recopier intégralement la science couleur du profil créatif.
     """
 
     name: str
@@ -63,6 +75,7 @@ class BandTarget:
     lstar: float | None = None
     hue: float | None = None
     raw_oversat: bool | None = None
+    embedded_raw: bool = False
 
 
 def raw_confirms_oversat(raw_band: BandStats | None, min_frac: float = _MIN_FRAC) -> bool | None:
@@ -137,11 +150,13 @@ def plan_band(
             reasons.append(f"ΔC*={excess:+.1f}→sat{d_sat:+d}")
 
     # --- Luminance : rapprocher de la clarté de référence --------------------
+    strict = target is not None and target.embedded_raw
     if target and target.lstar is not None:
         dl = target.lstar - stats.median_l
         if abs(dl) >= _DEADBAND_L:
             gain = resp.dl_dlum if abs(resp.dl_dlum) > 1e-9 else _NOM_DL_DLUM
-            d_lum = _clamp(dl / gain, -_MAX_LUM, _MAX_LUM)
+            max_lum = _MAX_LUM_EMBEDDED_RAW if strict else _MAX_LUM
+            d_lum = _clamp(dl / gain, -max_lum, max_lum)
             if d_lum:
                 reasons.append(f"ΔL*={dl:+.1f}→lum{d_lum:+d}")
 
@@ -150,7 +165,8 @@ def plan_band(
         dh = _hue_diff(target.hue, stats.median_hue)  # ce qu'il faut ajouter à la teinte
         if abs(dh) >= _DEADBAND_HUE:
             gain = resp.dhue_dhue if abs(resp.dhue_dhue) > 1e-9 else _NOM_DHUE_DHUE
-            d_hue = _clamp(dh / gain, -_MAX_HUE, _MAX_HUE)
+            max_hue = _MAX_HUE_EMBEDDED_RAW if strict else _MAX_HUE
+            d_hue = _clamp(dh / gain, -max_hue, max_hue)
             if d_hue:
                 reasons.append(f"Δhue={dh:+.1f}°→hue{d_hue:+d}")
 

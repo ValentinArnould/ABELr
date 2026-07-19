@@ -203,6 +203,7 @@ def _embedded_band_targets(
                 lstar=b.median_l,
                 hue=b.median_hue,
                 raw_oversat=raw_by_name.get(b.name),
+                embedded_raw=True,
             )
             continue
         b_bias = bias.bands.get(b.name)
