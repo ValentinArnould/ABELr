@@ -1,11 +1,11 @@
-# Lr_automation — Plugin Lightroom Classic
+# ABELr — Plugin Lightroom Classic
 
 Plugin Lightroom Classic (Lua + SDK Lr) + application Python externe pour retouche batch
 intelligente. Cœur : **exposition / HSL / Calibration / White Balance par photo**, calibrée sur des
 **seeds** (photos repères marquées à la main) via matching k-NN sur l'analyse RAW zone nette.
 
-**Plugin auto-suffisant** : `LrAutomation.lrplugin/` embarque tout — le code Lua *et* le package
-Python complet (`LrAutomation.lrplugin/app/`), plus `launch.ps1`/`bootstrap.ps1`. Copier ce seul
+**Plugin auto-suffisant** : `ABELr.lrplugin/` embarque tout — le code Lua *et* le package
+Python complet (`ABELr.lrplugin/app/`), plus `launch.ps1`/`bootstrap.ps1`. Copier ce seul
 dossier sur une autre machine suffit à installer le plugin (Python 3.11+ + internet requis au
 1er lancement — `bootstrap.ps1` construit le venv et installe les dépendances, GPU CUDA détecté
 automatiquement sinon repli CPU). Le reste du repo (`documentation/`, `PLAN.md`…) est le
@@ -19,7 +19,7 @@ dépôt de dev, pas une dépendance runtime du plugin.
 | [`PLAN.md`](PLAN.md) | **Roadmap / statut** : étapes en cours, tests de non-régression, backlog |
 | [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md) | **Tout code Lua** : imports, APIs SDK, paramètres Camera Raw 18, patterns, limitations. Méthodes ⚠️ = non vérifiées, confirmer avant usage |
 | [`documentation/project_overview.md`](documentation/project_overview.md) | Vision globale, décisions historiques |
-| [`LrAutomation.lrplugin/app/README.md`](LrAutomation.lrplugin/app/README.md) | Install / lancement / structure `core/` |
+| [`ABELr.lrplugin/app/README.md`](ABELr.lrplugin/app/README.md) | Install / lancement / structure `core/` |
 
 > Avant d'écrire du Lua ou de chercher un nom de paramètre develop : `lr15_sdk_api_reference.md`.
 > Avant d'affirmer qu'un module est utilisé : la carte de statut d'ARCHITECTURE.md (§3) —
@@ -96,7 +96,7 @@ Jobs (14 — source de vérité : `JobType` enum `app/server/models.py` + `dispa
 **Second canal — MCP (`app/mcp/server.py` + `tools.py`, monté sur `/mcp` dans `app/server/api.py`)** :
 expose le `job_queue` ci-dessus comme 15 tools MCP pour Claude Code lui-même (introspection,
 lecture, écriture, métadonnées/collections/presets), enregistré dans [`.mcp.json`](.mcp.json)
-(serveur `lr-automation`, `http://127.0.0.1:5000/mcp`). Sert à piloter Lr live pendant le dev sans
+(serveur `abelr`, `http://127.0.0.1:5000/mcp`). Sert à piloter Lr live pendant le dev sans
 écrire de script. Requiert `python -m app.main` lancé ; tools dépendants du bridge timeout
 proprement si le plugin Lr n'est pas connecté (pas de crash).
 
@@ -104,19 +104,19 @@ proprement si le plugin Lr n'est pas connecté (pas de crash).
 
 ## Workflow de développement
 
-**Plugin Lua :** éditer dans `LrAutomation.lrplugin/` → Lr : *Fichier > Gestionnaire des modules
+**Plugin Lua :** éditer dans `ABELr.lrplugin/` → Lr : *Fichier > Gestionnaire des modules
 externes* > Recharger → tester via *Bibliothèque > Modules externes* → logs `Utils.logf` dans
 *Aide > Console Lua*.
 
-**App Python :** toutes les commandes se lancent depuis `LrAutomation.lrplugin/` (le plugin est la
+**App Python :** toutes les commandes se lancent depuis `ABELr.lrplugin/` (le plugin est la
 racine du package Python depuis la refonte auto-suffisante — `app/` n'est plus à la racine du
 repo). `python -m app.main` (ou `launch.ps1`, qui chaîne `bootstrap.ps1` tout seul si `app/.venv`
-est absent — 1er lancement). Venv attendu en `app/.venv` (relatif à `LrAutomation.lrplugin/`).
+est absent — 1er lancement). Venv attendu en `app/.venv` (relatif à `ABELr.lrplugin/`).
 Endpoints : `curl http://127.0.0.1:5000/health`. Mock sans Lr : `python -m app.tools.mock_plugin`.
-Piloter Lr live sans écrire de script : tools MCP `lr-automation` (cf. § Communication) — app
+Piloter Lr live sans écrire de script : tools MCP `abelr` (cf. § Communication) — app
 lancée requise.
 
-**Tests unitaires (fonctions pures, sans GPU ni RAW) — depuis `LrAutomation.lrplugin/` :**
+**Tests unitaires (fonctions pures, sans GPU ni RAW) — depuis `ABELr.lrplugin/` :**
 ```
 python -m pytest app/tests -q            # tout
 python -m pytest app/tests -q -m "not gpu"   # exclut la parité GPU (skippée si CUDA absent)
@@ -126,12 +126,12 @@ python -m pytest app/tests -q -m "not gpu"   # exclut la parité GPU (skippée s
 (`raw.load_linear`, `analysis.gray_world_wb`, `gpu_raw.analyze_raw_gpu`, `seed_match.k_nearest`)
 sans passer par le serveur ni le GUI — cf. `tools/`.
 
-**Installer sur une autre machine :** copier uniquement le dossier `LrAutomation.lrplugin/`
+**Installer sur une autre machine :** copier uniquement le dossier `ABELr.lrplugin/`
 (pas besoin du reste du repo) → l'installer comme module externe Lr → menu *Démarrer/connecter
 l'application* déclenche `bootstrap.ps1` au 1er lancement (Python 3.11+ doit être sur le PATH,
 connexion internet requise le temps du téléchargement — torch CUDA ~2,5 Go si GPU NVIDIA détecté
 via `nvidia-smi`, sinon build CPU ~250 Mo). `exiftool` reste à part (binaire externe, PATH système
-ou `LrAutomation.lrplugin/bin/exiftool.exe` si bundlé manuellement — absence non bloquante).
+ou `ABELr.lrplugin/bin/exiftool.exe` si bundlé manuellement — absence non bloquante).
 
 ---
 

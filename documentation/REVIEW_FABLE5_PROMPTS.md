@@ -19,7 +19,7 @@ Rappels valables pour TOUTES les passes (déjà dans CLAUDE.md, mais faux positi
 ## PASSE 0 — Vérité terrain (archi / doc)
 
 ```
-Revue projet Lr_automation, PASSE 0 sur 4 : vérité terrain architecture/doc. Objectif =
+Revue projet ABELr, PASSE 0 sur 4 : vérité terrain architecture/doc. Objectif =
 figer le périmètre vivant/mort AVANT toute chasse aux bugs. Ne corrige rien, ne propose aucun
 fix de code : cette passe est purement descriptive.
 
@@ -27,7 +27,7 @@ Lis d'abord : CLAUDE.md, documentation/ARCHITECTURE.md (surtout §3 carte des mo
 
 Tâches :
 1. Pour CHAQUE module de app/core/ (24 fichiers), app/server/ (3), app/gui/ (7) et les 14
-   fichiers Lua de LrAutomation.lrplugin/ : déterminer le statut réel (live / tool-only / mort)
+   fichiers Lua de ABELr.lrplugin/ : déterminer le statut réel (live / tool-only / mort)
    en cherchant les références entrantes (imports, require, appels). Un module sans importeur
    hors app/tests/ et hors app/tools/ est candidat "mort" ou "tool-only".
 2. Comparer ce statut réel au statut annoncé dans ARCHITECTURE.md §3. Lister les écarts.
@@ -48,7 +48,7 @@ ligne Passe 0 du Journal.
 ## PASSE 1 — Bugs par sous-système
 
 ```
-Revue projet Lr_automation, PASSE 1 sur 4 : chasse aux bugs (correctness). Ne traite QUE les
+Revue projet ABELr, PASSE 1 sur 4 : chasse aux bugs (correctness). Ne traite QUE les
 modules marqués "live" en Passe 0 (section Passe 0 de documentation/REVIEW_FABLE5.md). Ignore
 le code mort/tool-only côté bugs.
 
@@ -56,7 +56,7 @@ Lis d'abord : CLAUDE.md, documentation/ARCHITECTURE.md, la section Passe 0 de RE
 Pour tout code Lua ou tout nom de paramètre develop : documentation/lr15_sdk_api_reference.md.
 
 Balaie sous-système par sous-système, dans cet ordre, un à la fois :
-  (a) Plugin Lua — LrAutomation.lrplugin/ (14 fichiers). Vérifier : écritures catalog/develop
+  (a) Plugin Lua — ABELr.lrplugin/ (14 fichiers). Vérifier : écritures catalog/develop
       dans catalog:withWriteAccessDo ; I/O bloquant dans LrTasks.startAsyncTask ; LrHttp.post
       dans postAsyncTaskWithContext ; chemins via LrPathUtils (jamais de concat "/") ;
       import 'LrXxx' vs require ; usage correct de Json.array. Signaler tout PV2012 manquant
@@ -89,7 +89,7 @@ Rien sans file:line. N'applique aucun patch. Puis renseigne la ligne Passe 1 du 
 ## PASSE 2 — Performance
 
 ```
-Revue projet Lr_automation, PASSE 2 sur 4 : performance, zones chaudes UNIQUEMENT. Pas de
+Revue projet ABELr, PASSE 2 sur 4 : performance, zones chaudes UNIQUEMENT. Pas de
 micro-optimisation généraliste, pas de réécriture cosmétique.
 
 Lis d'abord : CLAUDE.md, documentation/ARCHITECTURE.md (§4 pipeline image, §5 cache), la section
@@ -116,7 +116,7 @@ Puis renseigne la ligne Passe 2 du Journal.
 ## PASSE 3 — Consolidation / backlog
 
 ```
-Revue projet Lr_automation, PASSE 3 sur 4 : consolidation. Aucune nouvelle analyse de code —
+Revue projet ABELr, PASSE 3 sur 4 : consolidation. Aucune nouvelle analyse de code —
 uniquement synthèse des passes 0 à 2.
 
 Lis documentation/REVIEW_FABLE5.md en entier (sections Passe 0, 1, 2).

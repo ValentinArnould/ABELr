@@ -1,4 +1,4 @@
-# Architecture — Lr_automation
+# Architecture — ABELr
 
 Comment le système fonctionne. Pour les **règles de travail** de l'agent → [`../CLAUDE.md`](../CLAUDE.md).
 Pour la **roadmap / statut** → [`../PLAN.md`](../PLAN.md). Pour l'**API Lua SDK** →
@@ -65,19 +65,19 @@ Singleton `job_queue`, FIFO thread-safe. Cycle : `submit()` → `wait_result(tim
 ### Types de jobs (App → plugin)
 
 `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`,
-`apply_adjustments` — dispatchés dans [`PollingLoop.lua`](../LrAutomation.lrplugin/PollingLoop.lua)
+`apply_adjustments` — dispatchés dans [`PollingLoop.lua`](../ABELr.lrplugin/PollingLoop.lua)
 (≈ lignes 47-121).
 
-### Côté plugin (`LrAutomation.lrplugin/`, 14 fichiers Lua)
+### Côté plugin (`ABELr.lrplugin/`, 14 fichiers Lua)
 
 | Fichier | Rôle |
 |---|---|
-| `Info.lua` | Manifeste (`LrToolkitIdentifier = com.lrautomation.plugin`, SDK 12, menus) |
+| `Info.lua` | Manifeste (`LrToolkitIdentifier = com.abelr.plugin`, SDK 12, menus) |
 | `MenuConnect` / `MenuRelaunch` / `ShowMessage` | Entrées de menu |
 | `PluginInfoProvider.lua` | Section Gestionnaire de modules (boutons connect/relaunch/status/test) |
 | `Actions.lua` | connect / relaunch / checkStatus |
 | `AppLauncher.lua` | Start/stop/relaunch du process Python via `launch_app.ps1` |
-| `PollingLoop.lua` | Boucle 300 ms, dispatch jobs, heartbeat `_G.LR_AUTOMATION_BRIDGE_HEARTBEAT` (timeout 5 s) |
+| `PollingLoop.lua` | Boucle 300 ms, dispatch jobs, heartbeat `_G.ABELR_BRIDGE_HEARTBEAT` (timeout 5 s) |
 | `HttpClient.lua` | Wrappers GET/POST JSON (LrHttp) |
 | `PhotoData.lua` | Extraction path/EXIF/develop settings/catalog_path (**71 `DEVELOP_KEYS`**) |
 | `Adjustments.lua` | `applyDevelopSettings` batch dans `withWriteAccessDo` |
@@ -190,7 +190,7 @@ Parité vérifiée par `tools/validate_gpu_vs_libraw` (exposition Y corr 1.000 ;
 
 ## 5. Cache SQLite (`core/cache.py`)
 
-`LrAutomation_cache.db` dans le dossier du catalogue actif. `SCHEMA_VERSION = 4`,
+`ABELr_cache.db` dans le dossier du catalogue actif. `SCHEMA_VERSION = 4`,
 `ANALYSIS_VERSION = "v5-style-keys-g2wb"` salée dans les hash (bump = rebuild complet, pas de
 migration ligne à ligne ; v5 = revue Fable 5 G1 : clés style complétées + garde cam_mul[G2]). Les workers consultent le cache d'abord → 2ᵉ passage = zéro décode.
 C'est le vrai gain sur les séries 500-1000, en plus du GPU.

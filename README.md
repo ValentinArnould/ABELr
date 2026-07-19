@@ -31,4 +31,20 @@ I use GPU processing because CPU usage just froze my PC to death during image an
 
 ## Functionalities and how it's works
 Basic Context : Open Adobe Lightroom Classic, Open or Start a Catalog, get your photo displayed.
-Let's say you have 1000 photos (my daily punishment)
+Let's say you have 1000 photos (my daily punishment), apply the preset you want on your photos (the signature look of your set)
+Start ABELr, the plugin will maintain communication on the given port, and the app will request it for every action.
+
+Start with "Analyse Catalog", it will create a db file in the active catalog folder. This db file will contain everything needed for analysis and calculation.
+Edit a group of photos the way you want them (tone curve, color grading, effect, corrections, masking)
+Select them and start "Mark references"
+
+
+## Known limitations
+This project was (very) personal, and I'm sharing it with you thinking it might serve a much bigger purpose, and help many other people struggling with the same problem.
+So I'm asking for help, I would like help to make the best tool it can be, and solve the things I can't do alone.
+
+Actual context limitations :
+- I'm French, so the whole project (documentation, Claude files, everything except code) is in French. I'll gladly pass the project in English if you translate it right.
+- I'm on Windows 11, scripts are in powershell and other python packages run for Windows. If you have a Mac or Linux, feel free to add support for your hardware.
+- I use a Sony A7 IV Camera, exif data and raw processing works for .ARW files. It can be tricky on some part, but I'm kindly asking for other camera support.
+- The app isn't finished, some functionnalities doesn't completely give the wanted result. I can battle Claude all I want, I still miss Photography knowledge for this.

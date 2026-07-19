@@ -87,7 +87,7 @@ complet dans la conversation du 2026-07-19 (à reporter dans `documentation/ARCH
 - [x] **C1 — Validation manuelle en Lightroom réel.** ✅ (2026-07-19, Lr live + plugin connecté
   pendant la session — catalogue réel, dossier « 2- Dernier soir Abreu », caméra ILCE-7M4).
   Pas de GUI PySide6 lancée : seed_match/`_calib_develop_dict` appelés directement sur RAW réels
-  (`gpu_raw.analyze_raw_gpu`) via MCP `lr-automation`, cf. CLAUDE.md § chemin rapide de validation.
+  (`gpu_raw.analyze_raw_gpu`) via MCP `abelr`, cf. CLAUDE.md § chemin rapide de validation.
   Protocole : 3 seeds (SML03779, SML03872, SML04799) reçoivent chacun 7 valeurs Calibration
   distinctes et exagérées via `apply_adjustments` (écriture durable, ré-vérifiée par re-lecture
   develop) ; cible SML04057 choisie pour être sans ambiguïté la plus proche d'un seul seed
@@ -137,7 +137,7 @@ complet dans la conversation du 2026-07-19 (à reporter dans `documentation/ARCH
 - [x] **C3 — Trancher distance scène vs constante caméra.** ✅ (2026-07-19) : **décision = garder
   le k-NN scène-dépendant pour Calibration, ne pas remplacer par médiane/mode caméra.** Aucun
   changement de code (le comportement actuel était déjà le bon).
-  Preuve (catalogue réel via Lr live, MCP `lr-automation.get_catalog_photos(include_develop=True)`,
+  Preuve (catalogue réel via Lr live, MCP `abelr.get_catalog_photos(include_develop=True)`,
   1057 photos, une seule caméra `ILCE-7M4`, un seul dossier « 2- Dernier soir Abreu ») : 270/1057
   photos ont des champs Calibration non nuls, regroupés en **77 vecteurs distincts** qui changent
   par blocs alignés sur des plages de frames séquentielles (ex. `SML03338`→`SML03360` :

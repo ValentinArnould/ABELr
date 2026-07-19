@@ -225,7 +225,7 @@ catalog:withPrivateWriteAccessDo(function(context) ... end, timeoutParams)
 
 -- Écriture longue avec dialog d'avertissement + progress (gros batch)
 catalog:withProlongedWriteAccessDo{
-    title = 'Lr Automation', pluginName = 'Lr Automation',
+    title = 'ABELr', pluginName = 'ABELr',
     func = function(context, progressScope) ... end,
 }
 
@@ -405,7 +405,7 @@ catalog:withWriteAccessDo('Apply adjustments', function()
         Tint        = -5,
         Highlights  = -20,
         Shadows     = 15,
-    }, 'Lr Automation')       -- 2e arg = nom du pas d'historique (optionnel)
+    }, 'ABELr')       -- 2e arg = nom du pas d'historique (optionnel)
 end)
 ```
 
@@ -787,7 +787,7 @@ local LrProgressScope = import 'LrProgressScope'
 
 LrFunctionContext.callWithContext('analyse', function(context)
     local progress = LrProgressScope{
-        title = 'Lr Automation — Analyse',
+        title = 'ABELr — Analyse',
         functionContext = context,    -- terminé auto à la fin du contexte
         caption = 'Initialisation…',
     }
@@ -828,7 +828,7 @@ LrFunctionContext.callWithContext('dlg', function(context)
         f:separator { fill_horizontal = 1 },
         f:push_button { title = 'Action', action = function() ... end },
     }
-    LrDialogs.presentModalDialog{ title = 'Lr Automation', contents = c }
+    LrDialogs.presentModalDialog{ title = 'ABELr', contents = c }
 end)
 ```
 
@@ -946,7 +946,7 @@ local out = h:read('*all'); h:close()
 
 ```lua
 local LrLogger = import 'LrLogger'
-local log = LrLogger('LrAutomation')      -- crée ou retrouve un logger nommé
+local log = LrLogger('ABELr')      -- crée ou retrouve un logger nommé
 log:enable('logfile')                     -- 'print' | 'logfile' | 'traceback' | fonction | table
 log:trace(...) log:debug(...) log:info(...) log:warn(...) log:error(...) log:fatal(...)
 log:tracef('x=%d', 42)                    -- variantes *f (string.format) (2.0+)
@@ -1001,7 +1001,7 @@ Clés (SDK Guide chap. 2). Le dossier plugin **doit** se terminer par `.lrplugin
 |---|---|---|
 | `LrSdkVersion` | number (requis) | Version SDK préférée (ex. `15.2`) |
 | `LrSdkMinimumVersion` | number | Version SDK minimale (ex. `12.0`) |
-| `LrToolkitIdentifier` | string (requis) | ID unique style `com.domaine.lr-automation` |
+| `LrToolkitIdentifier` | string (requis) | ID unique style `com.domaine.abelr` |
 | `LrPluginName` | string (requis ≥2.0) | Nom affiché (Plug-in Manager) |
 | `VERSION` | table | `{ major=, minor=, revision=, build= , display= }` |
 | `LrPluginInfoUrl` | string | URL d'info |
@@ -1039,11 +1039,11 @@ return {
     LrSdkVersion        = 15.2,
     LrSdkMinimumVersion = 12.0,
 
-    LrToolkitIdentifier = 'com.lr-automation',
-    LrPluginName        = 'Lr Automation',
+    LrToolkitIdentifier = 'com.abelr',
+    LrPluginName        = 'ABELr',
 
     LrLibraryMenuItems = {
-        { title = 'Lr Automation', file = 'Menu.lua', enabledWhen = 'photosAvailable' },
+        { title = 'ABELr', file = 'Menu.lua', enabledWhen = 'photosAvailable' },
     },
 
     LrInitPlugin      = 'Init.lua',   -- démarrage de la boucle de polling
@@ -1090,10 +1090,10 @@ end
 local function applyAdjustmentsBatch(adjustmentsByUuid)
     local catalog = import('LrApplication').activeCatalog()
     local photos  = catalog:getTargetPhotos()
-    catalog:withWriteAccessDo('Lr Automation — Apply', function()
+    catalog:withWriteAccessDo('ABELr — Apply', function()
         for _, photo in ipairs(photos) do
             local adj = adjustmentsByUuid[photo:getRawMetadata('uuid')]
-            if adj then photo:applyDevelopSettings(adj, 'Lr Automation') end
+            if adj then photo:applyDevelopSettings(adj, 'ABELr') end
         end
     end)
 end
@@ -1114,7 +1114,7 @@ local function startPollingLoop()
             LrTasks.sleep(0.5)
         end
         if not ready then
-            import('LrDialogs').message('Lr Automation', 'App non accessible (app/main.py).', 'warning')
+            import('LrDialogs').message('ABELr', 'App non accessible (app/main.py).', 'warning')
             return
         end
 

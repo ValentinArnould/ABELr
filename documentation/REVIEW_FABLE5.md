@@ -119,10 +119,10 @@ tue donc aucun module core, mais fera de `gpu_schedule` l'unique entrant de `gpu
 **Claims vérifiés CONFORMES** (aucun écart trouvé) :
 - Endpoints FastAPI : les 6 annoncés (ARCHITECTURE.md:47-54, CLAUDE.md) = exactement ceux du code — `api.py:22` `/health`, `:28` `/status`, `:39` `/bridge`, `:52` `/jobs/pending`, `:63` `/shutdown`, `:74` `/jobs/{job_id}/result`. Ni extra ni manquant.
 - Types de jobs : 6/6 identiques doc↔`models.py:18-23`↔dispatch `PollingLoop.lua:47-121`.
-- Cache : 5 tables (`cache.py:132,150,175,193,206` = `LightroomPicture`, `SourceRAW`, `InCameraJPEG`, `PreviewJPEG`, `NeutralPreviewJPEG`), `SCHEMA_VERSION=4` (`cache.py:51`), `ANALYSIS_VERSION="v4-neutral-anchor"` (`cache.py:56`), fichier `LrAutomation_cache.db` (`cache.py:47`).
+- Cache : 5 tables (`cache.py:132,150,175,193,206` = `LightroomPicture`, `SourceRAW`, `InCameraJPEG`, `PreviewJPEG`, `NeutralPreviewJPEG`), `SCHEMA_VERSION=4` (`cache.py:51`), `ANALYSIS_VERSION="v4-neutral-anchor"` (`cache.py:56`), fichier `ABELr_cache.db` (`cache.py:47`).
 - Queue : `submit` `job_queue.py:72`, `wait_result` `:92`, `mark_poll` `:112`, `bridge_connected(threshold=5.0)` `:124`, TTL orphelins 900 s `:38`, garde saturation 100 `:41` — conforme ARCHITECTURE.md:56-61 et §2 (seuil 5 s).
 - GPU-strict : `GpuUnavailable` `gpu.py:25`, `require_cuda()` `gpu.py:50` ; torch 2.6.0 / torchvision 0.21.0 épinglés `requirements.txt:21-22`.
-- Poll 300 ms (`PollingLoop.lua:28` `POLL_INTERVAL = 0.3`) + heartbeat `_G.LR_AUTOMATION_BRIDGE_HEARTBEAT` (`PollingLoop.lua:38-39`) — conforme.
+- Poll 300 ms (`PollingLoop.lua:28` `POLL_INTERVAL = 0.3`) + heartbeat `_G.ABELR_BRIDGE_HEARTBEAT` (`PollingLoop.lua:38-39`) — conforme.
 - `Thumbnails.lua` : `fetch` `:46`, `fetchProbe` `:127` ; `fetchProbeExport` **inexistant** — conforme à ARCHITECTURE.md §8 / PLAN.md étape 8 qui le disent « prévu non câblé ».
 - Chemins HTTP côté plugin : `/health` (`HttpClient.lua:53`, `AppLauncher.lua:63`), `/shutdown` (`AppLauncher.lua:65`), `/jobs/pending` (`PollingLoop.lua:152`), `/jobs/{id}/result` (`PollingLoop.lua:188`). `/status` et `/bridge` ne sont pas appelés par le plugin (endpoints d'inspection côté App) — cohérent avec leur rôle doc.
 - `main.py` : FastAPI en thread daemon (`main.py:56-57`, uvicorn `127.0.0.1:5000` `:39`), GUI Qt thread principal (`:64-67`) — conforme §2.
@@ -133,7 +133,7 @@ tue donc aucun module core, mais fera de `gpu_schedule` l'unique entrant de `gpu
 
 ## Passe 1 — Bugs par sous-système
 
-### (a) Plugin Lua — `LrAutomation.lrplugin/` (14 fichiers)
+### (a) Plugin Lua — `ABELr.lrplugin/` (14 fichiers)
 
 Conformité vérifiée (aucun écart) : écritures develop toutes dans `withWriteAccessDo`
 (`Adjustments.lua:54`, `Thumbnails.lua:154,178`) ; `LrHttp.post` uniquement sous
@@ -148,7 +148,7 @@ chaque Temperature/Tint côté App — `autocorrect.py:453,556`).
 | L-02 | `Thumbnails.lua:59,85-97` | 🟠 | PLAUSIBLE | Fichier de sortie fixe `{photo_id}.jpg` + callbacks tardifs : après un timeout, le callback du job N peut encore écrire et **écraser** le fichier frais du job N+1 (ou muter `results` après retour) → l'App mesure des pixels périmés (probe ≠ état mesuré) | Nom de fichier unique par appel (compteur/nonce) + jeton de génération testé dans le callback | S |
 | L-03 | `Thumbnails.lua:178-185` | 🟠 | CONFIRMÉ | Restore du probe : le résultat de `LrTasks.pcall` est ignoré. Si le restore échoue, la photo reste en état neutre (WB As Shot / Exp 0 / HSL 0) **sans aucun signal** dans le résultat du job | Collecter les erreurs de restore, les remonter dans le résultat (`error` par photo_id), logguer | S |
 | L-04 | `PollingLoop.lua:125-131` | 🟡 | CONFIRMÉ | Apply partiel (applied>0 avec des erreurs) → `status='ok'`, textes d'erreur perdus (seuls applied/matched/total passent) ; le GUI affiche « Appliqué : n/m » sans cause pour les échecs | Joindre un résumé de `report.errors` au résultat même quand status='ok' | S |
-| L-05 | `PollingLoop.lua:219-225` | 🟡 | CONFIRMÉ | Heartbeat écrit une fois par tour, **avant** le dispatch : un job long (thumbnails/probe/apply, 1-3 min) rend `bridgeAlive()` faux et `/bridge` déconnecté pendant le travail → GUI « Pont inactif » + `_require_bridge` bloque, alors que le pont travaille | Rafraîchir `_G.LR_AUTOMATION_BRIDGE_HEARTBEAT` dans la boucle d'attente de `Thumbnails.fetch` et la boucle d'apply | S |
+| L-05 | `PollingLoop.lua:219-225` | 🟡 | CONFIRMÉ | Heartbeat écrit une fois par tour, **avant** le dispatch : un job long (thumbnails/probe/apply, 1-3 min) rend `bridgeAlive()` faux et `/bridge` déconnecté pendant le travail → GUI « Pont inactif » + `_require_bridge` bloque, alors que le pont travaille | Rafraîchir `_G.ABELR_BRIDGE_HEARTBEAT` dans la boucle d'attente de `Thumbnails.fetch` et la boucle d'apply | S |
 | L-06 | `HttpClient.lua:30` + `PollingLoop.lua:156-158` | 🟡 | CONFIRMÉ | Body 200 non-JSON → `Json.decode` nil → `pollOnce` le traite comme « pas de job » : le job reste IN_PROGRESS côté App jusqu'au TTL 900 s, **aucun log** | Logguer rawBody quand status=200 et décodage nil ; distinguer 204 de « décodage raté » | S |
 | L-07 | `PollingLoop.lua:188-189` | 🟡 | CONFIRMÉ | POST du résultat non réessayé (status nil = perte réseau) : le job a été **exécuté** (apply compris) mais le worker App timeout — invisible côté Lr | 1-2 retries avec backoff sur `postJsonRaw`, log en échec final | S |
 | L-08 | `Json.lua:142-159` | ⚪ | CONFIRMÉ | Décodage `\u` sans paires surrogates (astral → 2×3 octets faux). Starlette envoie de l'UTF-8 brut (ensure_ascii=False) → chemin quasi jamais pris | Gérer D800-DBFF (paire → code point → UTF-8 4 octets) | S |

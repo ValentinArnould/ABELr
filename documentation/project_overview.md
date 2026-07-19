@@ -1,8 +1,8 @@
-# Lr_automation — Vue d'ensemble du projet
+# ABELr — Vue d'ensemble du projet
 
 ## Description
 
-Lr_automation est un système de retouche photo intelligente pour Adobe Lightroom Classic.
+ABELr est un système de retouche photo intelligente pour Adobe Lightroom Classic.
 Il couple un plugin Lightroom (Lua) à une application Python externe dotée d'une interface graphique.
 
 L'application analyse les fichiers RAW Sony (format ARW), détermine les ajustements optimaux,
@@ -16,7 +16,7 @@ La retouche manuelle d'une série de 500 à 1000 photos est longue et incohéren
 L'exposition, la balance des blancs et l'étalonnage des couleurs varient d'une prise à l'autre
 selon les conditions lumineuses, et les corriger à la main produit des résultats inégaux.
 
-Lr_automation analyse l'ensemble de la série, construit une carte de prédiction des ajustements,
+ABELr analyse l'ensemble de la série, construit une carte de prédiction des ajustements,
 et applique des corrections cohérentes et précises sur toutes les photos en batch.
 
 ---
@@ -95,7 +95,7 @@ Permet une correction progressive et naturelle sur toute la durée d'une session
 ## Structure des fichiers
 
 ```
-Lr_automation/
+ABELr/
 ├── CLAUDE.md                      # Référence technique pour le développement
 ├── documentation/
 │   └── project_overview.md        # Ce fichier
@@ -134,7 +134,7 @@ Lr_automation/
 
 ```
 1. Utilisateur ouvre Lightroom, sélectionne une série de photos
-2. Utilisateur lance App Lr_automation (python app/main.py)
+2. Utilisateur lance App ABELr (python app/main.py)
 3. Plugin détecte l'App (polling /health)
 4. Utilisateur clique "Analyser la sélection" dans l'App
 5. App crée job "get_selected_photos"
