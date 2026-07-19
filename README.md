@@ -61,7 +61,8 @@ Actual context limitations :
 - The app isn't finished, some functionnalities doesn't completely give the wanted result. I can battle Claude all I want, I still miss Photography knowledge for this.
 
 ## Tips
-I've recently found that using Adobe Profile (DCP) with Camera Matching on your In Camera JPEG makes Adobe Lightroom Auto function more effective.
+I always generate all photos Previews (in Library Module, top right under the Histogram, you can click on "Dynamic previews" to generate them).
+I've recently found that using Adobe Profile (DCP) with the same Camera Matching profile than your In Camera JPEG makes Adobe Lightroom Auto function more effective.
 My workflow consist of :
 - Create 1 or 2 presets for the Catalog (Adobe Profile, Effects, Tone Curve, Color Grading, Lens Correction, Dezoising, Masks etc)
 - Apply the preset on my whole Catalog
