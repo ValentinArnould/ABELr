@@ -23,10 +23,26 @@ The project consist of :
 - A whole processing and calculation part I don't know at all because despite being a developer, I don't know anything about GPU Image processing, Luminance median, Gray world nor HSL calculations, so I let AI do it's magic while trying to supervise the work
 
 The plugin folder contain all the python application, you just need to add the folder in File->External Module Manager.\
-To launch the app server, in the Plugin Manager, click on "Démarrer l'Application" (sorry I'm French I haven't translated the project yet)
+To launch the app server, in the Plugin Manager, click on ~~"Démarrer l'Application" (sorry I'm French I haven't translated the project yet)~~ "Start / Connect"
 
 Be sure to install Python 3.1x and the virtual env needed (I just don't know why pytorch takes 4GB that's insane).\
 I use GPU processing because CPU usage just froze my PC to death during image analysis, I'm trying to maintain the CPU fallback, feel free to help if you need it.
+
+## Installation
+Plugin installation :
+- Download and install Python on your system (3.12 for example)
+- Download the project
+- Open Adobe Lightroom Classic, and go into File->External Modules Manager (or Plugin Manager)
+- Bottom Left, click on "Add", find and select the folder "ABELr.lrplugin"
+- Activate the plugin "ABELr" and click on "reload the external module", it should give a green dot if correctly added
+- Top menu of the plugin, click on "Start / Connect"
+- On the first launch, the python virtual env will install itself, give it some time. The script are in Powershell, I'll look to add shell script for MAC/Linux
+- When finished, you might need to close the application, and restart Lightroom (or just reload the plugin, to verify)
+- Relaunch the app with "Start / Connect", the GUI window displays and a popup message will appear in Lightroom, meaning the plugin is activated
+
+Now you can use the app functionalities.\
+If you use Claude Code, the API is accessible through http://127.0.0.1:5000, I haven't described it yet.\
+For Claude, add the project folder as a reference path, it will find how to use it, like an MCP.
 
 ## Functionalities and how it's works
 Basic Context : Open Adobe Lightroom Classic, Open or Start a Catalog, get your photo displayed.\
