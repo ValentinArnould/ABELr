@@ -1,57 +1,56 @@
 
 ## ABELr
-Automated Batch Editing for Lightroom
+Automated Batch Editing for Lightroom\n
 This project is an Adobe Lightroom Classic Plugin made to help batch editing pain.
 
 ## Back story
-I've started photography in August 2024, shooting at convention with cosplayers.
-I quickly started to shoot everything and everyone with the mighty power of my Sony camera.
+I've started photography in August 2024, shooting at convention with cosplayers.\n
+I quickly started to shoot everything and everyone with the mighty power of my Sony camera.\n
 Everyone looked so enlighted by the pictures I made I couldn't stop.
 
-Now it's July 2026, I shoot likely 1500 photos per event (almost no burst, always single pics), and end up with roughtly 5000 photos per month.
+Now it's July 2026, I shoot likely 1500 photos per event (almost no burst, always single pics), and end up with roughtly 5000 photos per month.\n
 As much as I love giving the best result, I can't do it anymore (I did in the past, spending 50h in 10 days instead of sleeping, over and over).
 
-This project is the fifth (sitxh ?) iteration of trying the make Adobe Lightroom better for my needs.
-I've considered Darktable, ART rawtherapee, even doing my own RAW Editor, but Lightroom has it's signature process making hard to leave it.
-I've spent months trying to do something, battle with Github Copilot and now Claude Code (yes, we'll speak about that later).
+This project is the fifth (sitxh ?) iteration of trying the make Adobe Lightroom better for my needs.\n
+I've considered Darktable, ART rawtherapee, Rapid RAW, even doing my own RAW Editor, but Lightroom has it's signature process making hard to leave it.\n
+I've spent months trying to do something, battle with Github Copilot and now Claude Code (yes, we'll speak about that later).\n
 And this might be the closest project to succeed the task.
 
 ## The project
 The project consist of :
 - A plugin "ABELr" serving as a bridge between the Python core and every functionnalities, being and API and likely an MCP for Claude.
 - A python server with a GUI and simple buttons like "Test", "Analyse Catalog", "Mark references", "Apply"
-- A whole processing and calculation part I don't know at all because despite being a developer,
-    I don't know anything about GPU Image processing, Luminance median, Gray world nor HSL calculations, so I let AI do it's magic while trying to supervise the work
+- A whole processing and calculation part I don't know at all because despite being a developer, I don't know anything about GPU Image processing, Luminance median, Gray world nor HSL calculations, so I let AI do it's magic while trying to supervise the work
 
-The plugin folder contain all the python application, you just need to add the folder in File->External Module Manager.
+The plugin folder contain all the python application, you just need to add the folder in File->External Module Manager.\n
 To launch the app server, in the Plugin Manager, click on "Démarrer l'Application" (sorry I'm French I haven't translated the project yet)
 
-Be sure to install Python 3.1x and the virtual env needed (I just don't know why pytorch takes 4GB that's insane).
+Be sure to install Python 3.1x and the virtual env needed (I just don't know why pytorch takes 4GB that's insane).\n
 I use GPU processing because CPU usage just froze my PC to death during image analysis, I'm trying to maintain the CPU fallback, feel free to help if you need it.
 
 ## Functionalities and how it's works
-Basic Context : Open Adobe Lightroom Classic, Open or Start a Catalog, get your photo displayed.
+Basic Context : Open Adobe Lightroom Classic, Open or Start a Catalog, get your photo displayed.\n
 Let's say you have 1000 photos (my daily punishment), apply the preset you want on your photos (the signature look of your set)
 
 Start ABELr, the plugin will maintain communication on the given port, and the app will request it for every action.
 
-Start with "Analyse Catalog", it will create a db file in the active catalog folder. This db file will contain everything needed for analysis and calculation.
+Start with "Analyse Catalog", it will create a db file in the active catalog folder. This db file will contain everything needed for analysis and calculation.\n
 Edit a group of photos the way you want them (tone curve, color grading, effect, corrections, masking)
 
-Select them and start "Mark references" : The app will process the RAW source files with CUDA, analysing luminance, chrominance, and sharp zone.
-The RAW results are saved in the db file. It will do the same for the Preview images in LrPreview.lrdata, and get all develop settings.
+Select them and start "Mark references" : The app will process the RAW source files with CUDA, analysing luminance, chrominance, and sharp zone.\n
+The RAW results are saved in the db file. It will do the same for the Preview images in LrPreview.lrdata, and get all develop settings.\n
 The selected photos are now reference seeds and will help to determine how to properly set Exposure, White-Balance, HSL cursors and Calibration cursors on the next photos.
 
-Now select the target photos to correct, start "Calibrate neutral" : the app will set Exposure 0 and WB As shot, and analyse the Previews, then restore the settings.
+Now select the target photos to correct, start "Calibrate neutral" : the app will set Exposure 0 and WB As shot, and analyse the Previews, then restore the settings.\n
 Start "Apply" on the selected photos : The app will calculate global and sharp luminance/chrominance/HSL and use seeds to find the closest matching photo to use.
 
-When edits are applied, you can adjust them one by one (Exposure, WB, HSL and Calibration adjustments), then launch "Mark references" to add them to the seeds pool.
+When edits are applied, you can adjust them one by one (Exposure, WB, HSL and Calibration adjustments), then launch "Mark references" to add them to the seeds pool.\n
 
-Keep doing this on all the photos, the more seeds you have the better the prediction get.
+Keep doing this on all the photos, the more seeds you have the better the prediction get.\n
 And voila, you have correctly aligned the whole event on your preset.
 
 ## Known limitations
-This project was (very) personal, and I'm sharing it with you thinking it might serve a much bigger purpose, and help many other people struggling with the same problem.
+This project was (very) personal, and I'm sharing it with you thinking it might serve a much bigger purpose, and help many other people struggling with the same problem.\n
 So I'm asking for help, I would like help to make the best tool it can be, and solve the things I can't do alone.
 
 Actual context limitations :
@@ -61,33 +60,34 @@ Actual context limitations :
 - The app isn't finished, some functionnalities doesn't completely give the wanted result. I can battle Claude all I want, I still miss Photography knowledge for this.
 
 ## Tips
-I always generate all photos Previews (in Library Module, top right under the Histogram, you can click on "Dynamic previews" to generate them).
-I've recently found that using Adobe Profile (DCP) with the same Camera Matching profile than your In Camera JPEG makes Adobe Lightroom Auto function more effective.
+I always generate all photos Previews (in Library Module, top right under the Histogram, you can click on "Dynamic previews" to generate them).\n
+I've recently found that using Adobe Profile (DCP) with the same Camera Matching profile than your In Camera JPEG makes Adobe Lightroom Auto function more effective.\n
 My workflow consist of :
 - Create 1 or 2 presets for the Catalog (Adobe Profile, Effects, Tone Curve, Color Grading, Lens Correction, Dezoising, Masks etc)
 - Apply the preset on my whole Catalog
 - Click Auto to set Automatic Tone settings on every photos
 - Apply again my preset (if I use fixed Vibrance/Saturation or specific tones like Highlights/Shadows)
 - Pass on each photos to adjust Exposure, White Balance, Calibration cursors
+
 With this plugin the goal is to do it the least possible, and apply corrections matching how I want it for this serie.
 
 ## AI
-Yes, the whole project development is done with Claude Code.
-I know nothing about CUDA, rawpy, and nothing about image engineering.
+Yes, the whole project development is done with Claude Code.\n
+I know nothing about CUDA, rawpy, and nothing about image engineering.\n
 Claude started it, I let him doing whatever he need, while trying to enclose it the best I can.
 
-If you know better how to make CLAUDE.MD, ARCHITECTURE.MD or PLAN.MD, be my guest.
+If you know better how to make CLAUDE.MD, ARCHITECTURE.MD or PLAN.MD, be my guest.\n
 If you know how luminance and gray world works, and you have a better solution for some functions, feel free to make suggestions.
 
 For now, the little knowledge and time I have, Claude is my best coworker to make it happens.
 
 ## Closure
-That's pretty much all, I've certainly skipped many things, but that's a start.
-Feel free to ask questions on Github, do pull requests, contribute to the project.
-I'm certainly wrong on sooo many things (the program, my workflow, how I use Claude).
+That's pretty much all, I've certainly skipped many things, but that's a start.\n
+Feel free to ask questions on Github, do pull requests, contribute to the project.\n
+I'm certainly wrong on sooo many things (the program, my workflow, how I use Claude).\n
 But I have so many hopes people would kindly help if the project is interesting enough.
 
 So thank you, if anything on this project has lit something in you, and you decided to use, contribute or help the project.
 
-
+##
 PS : I'm not a photographer, I do all this (photos, editing, research) for free, with passion for the people I meet, and the humanity I'm glad to be in.
