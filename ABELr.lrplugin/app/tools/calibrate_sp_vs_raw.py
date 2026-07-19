@@ -20,7 +20,7 @@ What the output settles:
 
 Usage:
     python -m app.tools.calibrate_sp_vs_raw \
-        "C:/photos sony/Catalogues/Last soirée Abreu/Last soirée Abreu.lrcat" [N]
+        "C:/path/to/LrCatalog/LrCatalog.lrcat" [N]
 
 N = max number of photos (default: all photos with both SP + RAW).
 """

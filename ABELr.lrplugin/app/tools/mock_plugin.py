@@ -24,7 +24,7 @@ THUMBS_DIR = Path(tempfile.gettempdir()) / "abelr_mock_thumbs"
 FAKE_PHOTOS = [
     {
         "photo_id": "uuid-aaa",
-        "path": "C:/photos sony/DSC00123.ARW",
+        "path": "C:/temp/DSC00123.ARW",
         "exif": {
             "iso": 800,
             "aperture": 2.8,
@@ -36,7 +36,7 @@ FAKE_PHOTOS = [
     },
     {
         "photo_id": "uuid-bbb",
-        "path": "C:/photos sony/DSC00124.ARW",
+        "path": "C:/temp/DSC00124.ARW",
         "exif": {
             "iso": 1600,
             "aperture": 4.0,
