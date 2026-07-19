@@ -1039,7 +1039,7 @@ return {
     LrSdkVersion        = 15.2,
     LrSdkMinimumVersion = 12.0,
 
-    LrToolkitIdentifier = 'com.valentin.lr-automation',
+    LrToolkitIdentifier = 'com.lr-automation',
     LrPluginName        = 'Lr Automation',
 
     LrLibraryMenuItems = {

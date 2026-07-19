@@ -1,7 +1,6 @@
 """Modèle de balance des blancs : Temperature physique + calibration par seeds.
 
-Découverte validée (essais CGC 1004, St-Valentin, Yggdrasil — voir mémoire
-projet) : sur un event *typique*, la Temperature choisie par le photographe suit
+Découverte validée : sur un event *typique*, la Temperature choisie par le photographe suit
 l'AWB boîtier de façon quasi-linéaire :
 
     Temperature ≈ SLOPE · (r/g as-shot) + intercept

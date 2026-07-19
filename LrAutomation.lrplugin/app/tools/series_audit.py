@@ -3,7 +3,7 @@ Audit d'une serie evenementielle : determiner si expo/WB sont PREDICTIBLES
 par photo, et dans quel REGIME de WB se situe la serie.
 
 Question centrale : la serie SUIT-elle l'AWB boitier (regime ou Temp ~ as-shot
-fonctionne, ex. St Valentin R2=0.92) ou IMPOSE-t-elle une teinte/expo arbitraire
+fonctionne) ou IMPOSE-t-elle une teinte/expo arbitraire
 (regime Yggdrasil ou tout echoue) ? Le 2e est l'exception (look artistique 2 mois) ;
 le 1er devrait etre la norme des events retouches.
 
