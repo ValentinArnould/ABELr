@@ -1,9 +1,9 @@
-"""Stabilité des clés de fraîcheur du cache (`core.cache`).
+"""Stability of cache freshness keys (`core.cache`).
 
-Invariant central du mode neutre : `style_hash` doit rester **stable** quand
-Temp/Tint/Exposure/HSL bougent (le probe les neutralise) et **changer** quand un
-réglage de style (profil, tons, crop, Color Grading) bouge — sinon l'ancre neutre
-est servie périmée (ou re-probée inutilement à chaque cycle).
+Central invariant of neutral mode: `style_hash` must stay **stable** when
+Temp/Tint/Exposure/HSL move (the probe neutralizes them) and **change** when a
+style setting (profile, tone, crop, Color Grading) moves — otherwise the neutral
+anchor is served stale (or needlessly re-probed on every cycle).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from app.core import cache
 
 
 def test_raw_signature_missing_file():
-    # Repli fichier absent : salé ANALYSIS_VERSION lui aussi (revue Fable 5 DB-04).
+    # Missing-file fallback: also salted with ANALYSIS_VERSION (Fable 5 review DB-04).
     sig = cache.raw_signature("does/not/exist.arw")
     assert sig.startswith("0:0")
     assert cache.ANALYSIS_VERSION in sig
@@ -23,8 +23,8 @@ def test_raw_signature_encodes_size_mtime_and_version(tmp_path):
     f.write_bytes(b"hello")
     sig = cache.raw_signature(f)
     parts = sig.split(":")
-    assert parts[0] == "5"  # taille en octets
-    assert cache.ANALYSIS_VERSION in sig  # salage de version présent
+    assert parts[0] == "5"  # size in bytes
+    assert cache.ANALYSIS_VERSION in sig  # version salt present
 
 
 def test_develop_hash_is_order_independent():
@@ -37,7 +37,7 @@ def test_develop_hash_is_order_independent():
 def test_style_hash_stable_under_neutralized_axes():
     base = {"CameraProfile": "Adobe Color", "Contrast2012": 10}
     ref = cache.style_hash(base)
-    # Temp/Tint/Exposure + HSL : neutralisés par le probe → ne changent PAS l'ancre.
+    # Temp/Tint/Exposure + HSL: neutralized by the probe → must NOT change the anchor.
     for key, val in (
         ("Temperature", 6500),
         ("Tint", 12),
@@ -48,7 +48,7 @@ def test_style_hash_stable_under_neutralized_axes():
     ):
         moved = dict(base)
         moved[key] = val
-        assert cache.style_hash(moved) == ref, f"{key} ne doit pas changer style_hash"
+        assert cache.style_hash(moved) == ref, f"{key} must not change style_hash"
 
 
 def test_style_hash_changes_on_style_axes():
@@ -59,8 +59,8 @@ def test_style_hash_changes_on_style_axes():
         ("Contrast2012", 25),
         ("Clarity2012", 30),
         ("CropLeft", 0.1),
-        # Clés ajoutées par la revue Fable 5 DB-01 (noms SDK réels — les anciens
-        # ColorGradeShadowHue etc. n'existaient pas).
+        # Keys added by the Fable 5 review DB-01 (real SDK names — the old
+        # ColorGradeShadowHue etc. did not exist).
         ("SplitToningShadowHue", 200),
         ("ColorGradeMidtoneHue", 120),
         ("Texture", 30),
@@ -69,7 +69,7 @@ def test_style_hash_changes_on_style_axes():
     ):
         moved = dict(base)
         moved[key] = val
-        assert cache.style_hash(moved) != ref, f"{key} doit changer style_hash"
+        assert cache.style_hash(moved) != ref, f"{key} must change style_hash"
 
 
 def test_style_hash_ignores_non_style_keys():

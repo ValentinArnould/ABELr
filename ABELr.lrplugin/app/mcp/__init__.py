@@ -1,11 +1,11 @@
-"""Serveur MCP (Model Context Protocol) de ABELr.
+"""ABELr's MCP (Model Context Protocol) server.
 
-Expose le pont plugin↔App existant comme outils MCP pour que Claude pilote
-Lightroom Classic. Monté in-process sur le serveur FastAPI (`app/server/api.py`)
-via `app.mount("/mcp", ...)` : les outils partagent directement le singleton
-`job_queue` (soumission d'un job + attente bloquante du résultat, offloadée sur
-un thread worker — cf. `app/mcp/tools.py`).
+Exposes the existing plugin<->App bridge as MCP tools so Claude can drive
+Lightroom Classic. Mounted in-process on the FastAPI server (`app/server/api.py`)
+via `app.mount("/mcp", ...)`: the tools directly share the `job_queue`
+singleton (job submission + blocking wait for the result, offloaded to
+a worker thread — see `app/mcp/tools.py`).
 
-NB : `app.mcp` (ce paquet) ≠ `mcp` (SDK PyPI, top-level). Les imports absolus
-`from mcp.server.fastmcp import ...` visent toujours le SDK.
+NB: `app.mcp` (this package) != `mcp` (PyPI SDK, top-level). Absolute imports
+`from mcp.server.fastmcp import ...` always target the SDK.
 """

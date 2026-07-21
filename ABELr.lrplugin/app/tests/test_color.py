@@ -1,6 +1,6 @@
-"""Invariants colorimétriques (`core.color`) — luminance ProPhoto + courbe sRGB.
+"""Colorimetric invariants (`core.color`) — ProPhoto luminance + sRGB curve.
 
-Si ces conversions dérivent, toute la mesure d'exposition/WB est faussée en silence.
+If these conversions drift, the whole exposure/WB measurement is silently thrown off.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from app.core import color
 
 
 def test_prophoto_y_weights_sum_to_one():
-    # La ligne Y de ProPhoto(D50)→XYZ doit sommer à ~1 (blanc → Y=1, D50 normalisé).
+    # The Y row of ProPhoto(D50)→XYZ must sum to ~1 (white → Y=1, D50 normalized).
     assert color.PROPHOTO_TO_Y.sum() == pytest.approx(1.0, abs=1e-4)
 
 
@@ -41,11 +41,11 @@ def test_linear_to_srgb_endpoints_and_monotonic():
     assert float(color.linear_to_srgb(np.array(1.0))) == pytest.approx(1.0, abs=1e-6)
     xs = np.linspace(0, 1, 50)
     ys = color.linear_to_srgb(xs)
-    assert np.all(np.diff(ys) >= -1e-9)  # monotone croissant
+    assert np.all(np.diff(ys) >= -1e-9)  # monotonically increasing
 
 
 def test_linear_to_srgb_clips_out_of_range():
-    # Entrées hors [0,1] écrêtées avant transfert.
+    # Inputs outside [0,1] clamped before transfer.
     assert float(color.linear_to_srgb(np.array(-0.5))) == pytest.approx(0.0, abs=1e-6)
     assert float(color.linear_to_srgb(np.array(2.0))) == pytest.approx(1.0, abs=1e-6)
 
@@ -56,6 +56,6 @@ def test_prophoto_to_srgb_u8_white_black():
     out_w = color.prophoto_linear_to_srgb_u8(white)
     out_b = color.prophoto_linear_to_srgb_u8(black)
     assert out_w.dtype == np.uint8 and out_b.dtype == np.uint8
-    # Blanc ProPhoto → quasi-blanc sRGB (254 : adaptation Bradford D50→D65 + arrondi).
+    # ProPhoto white → near-white sRGB (254: Bradford D50→D65 adaptation + rounding).
     assert np.all(out_w >= 253)
     assert np.all(out_b == 0)

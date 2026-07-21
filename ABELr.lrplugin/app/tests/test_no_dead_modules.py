@@ -1,10 +1,9 @@
-"""Étape 1 du PLAN — garde anti-code-mort.
+"""PLAN step 1 — anti-dead-code guard.
 
-Smoke-import de tous les modules `app/core/*` et `app/gui/*` présents sur disque
-(les modules Qt s'importent sans display — seule l'instanciation exige un écran ;
-tolérance documentée par le PLAN), et assert que les modules supprimés
-(`gui/analysis_worker.py`, `core/seeds.py`, `core/adjustments.py`,
-`core/prediction.py`) ne réapparaissent pas.
+Smoke-imports all `app/core/*` and `app/gui/*` modules present on disk (Qt modules
+import without a display — only instantiation requires a screen; tolerance
+documented by the PLAN), and asserts that removed modules (`gui/analysis_worker.py`,
+`core/seeds.py`, `core/adjustments.py`, `core/prediction.py`) do not reappear.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import pytest
 
 APP_DIR = Path(__file__).resolve().parents[1]
 
-# Modules supprimés (revue Fable 5 / ARCHITECTURE §3) — chemin relatif à app/.
+# Removed modules (Fable 5 review / ARCHITECTURE §3) — path relative to app/.
 DELETED = [
     "gui/analysis_worker.py",
     "core/seeds.py",
@@ -41,7 +40,7 @@ def test_smoke_import(module):
 @pytest.mark.parametrize("relpath", DELETED)
 def test_deleted_modules_stay_deleted(relpath):
     assert not (APP_DIR / relpath).exists(), (
-        f"{relpath} est censé être supprimé (PLAN étape 1) — ne pas le faire renaître"
+        f"{relpath} is supposed to be removed (PLAN step 1) — do not bring it back"
     )
 
 

@@ -1,9 +1,9 @@
-"""Étape H1 du PLAN — garde `raw_oversat` câblée (anti-sur-correction saturation).
+"""PLAN step H1 — `raw_oversat` guard wired (anti-saturation over-correction).
 
-`plan_band` doit bloquer une réduction de saturation quand le RAW infirme
-explicitement la sursaturation (`raw_oversat=False`), et se comporter comme avant
-(aucun blocage) quand l'info RAW est absente (`raw_oversat=None`, comportement
-historique) ou confirmée (`raw_oversat=True`).
+`plan_band` must block a saturation reduction when the RAW explicitly denies
+oversaturation (`raw_oversat=False`), and behave as before (no blocking) when the
+RAW info is absent (`raw_oversat=None`, historical behavior) or confirmed
+(`raw_oversat=True`).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def _band(
 
 
 def test_plan_band_reduces_saturation_when_excess_and_no_raw_info():
-    # Comportement historique : pas d'info RAW (raw_oversat=None) → pas de blocage.
+    # Historical behavior: no RAW info (raw_oversat=None) → no blocking.
     stats = _band(median_chroma=40.0)
     target = BandTarget(name="Red", chroma=20.0, raw_oversat=None)
     corr = plan_band(stats, target, BandResponse())
@@ -47,8 +47,8 @@ def test_plan_band_reduces_saturation_when_raw_confirms_oversat():
 
 
 def test_plan_band_blocks_reduction_when_raw_denies_oversat():
-    # Même excès de chroma mesuré que les cas ci-dessus, mais le RAW infirme →
-    # la garde doit bloquer la réduction de saturation (pas de sur-correction).
+    # Same measured chroma excess as the cases above, but the RAW denies it →
+    # the guard must block the saturation reduction (no over-correction).
     stats = _band(median_chroma=40.0)
     target = BandTarget(name="Red", chroma=20.0, raw_oversat=False)
     corr = plan_band(stats, target, BandResponse())
@@ -56,8 +56,8 @@ def test_plan_band_blocks_reduction_when_raw_denies_oversat():
 
 
 def test_plan_band_hard_clip_trigger_also_blocked_by_raw_denial():
-    # Sursaturation "dure" détectée sur le rendu (sat_clip_frac élevé, sans cible de
-    # chroma) : la garde raw_oversat=False doit bloquer même ce déclencheur.
+    # "Hard" oversaturation detected on the render (high sat_clip_frac, no chroma
+    # target): the raw_oversat=False guard must block even this trigger.
     stats = _band(median_chroma=10.0, sat_clip_frac=0.5)
     target = BandTarget(name="Red", chroma=None, raw_oversat=False)
     corr = plan_band(stats, target, BandResponse())
@@ -69,7 +69,7 @@ def test_raw_confirms_oversat_none_without_raw_band():
 
 
 def test_raw_confirms_oversat_none_when_band_underpopulated():
-    # frac sous le seuil minimal → pas assez de pixels RAW pour se prononcer.
+    # frac below the minimum threshold → not enough RAW pixels to decide.
     band = _band(frac=0.001, sat_clip_frac=0.9)
     assert raw_confirms_oversat(band) is None
 
@@ -85,14 +85,14 @@ def test_raw_confirms_oversat_false_without_hard_clip():
 
 
 # --------------------------------------------------------------------------- #
-# H3 (PLAN) — transplant embedded (`BandTarget.embedded_raw=True`) plafonne plus
-# strictement les deltas de luminance/teinte (pas de garde "réduction seule"
-# possible sur ces axes comme pour la saturation).
+# H3 (PLAN) — embedded transplant (`BandTarget.embedded_raw=True`) caps
+# luminance/hue deltas more strictly (no "reduction only" guard possible on these
+# axes like there is for saturation).
 # --------------------------------------------------------------------------- #
 def test_plan_band_embedded_raw_caps_luminance_delta_tighter():
-    # Cible JPEG boîtier très décalée en L* (+80) : sans le plafond dédié, le delta
-    # de luminance grimperait à _MAX_LUM (20). Avec embedded_raw=True, il doit
-    # rester au plafond strict (_MAX_LUM_EMBEDDED_RAW = 10).
+    # In-camera JPEG target heavily shifted in L* (+80): without the dedicated cap,
+    # the luminance delta would climb to _MAX_LUM (20). With embedded_raw=True, it
+    # must stay at the strict cap (_MAX_LUM_EMBEDDED_RAW = 10).
     stats = _band(median_l=20.0, median_chroma=20.0)
     target_loose = BandTarget(name="Red", lstar=100.0, embedded_raw=False)
     target_strict = BandTarget(name="Red", lstar=100.0, embedded_raw=True)
@@ -113,8 +113,8 @@ def test_plan_band_embedded_raw_caps_hue_delta_tighter():
 
 
 def test_plan_band_embedded_raw_default_false_unchanged_behavior():
-    # Comportement historique préservé : `embedded_raw` par défaut à False, plafond
-    # nominal inchangé (pas de régression sur les cibles non-embedded/seed-match).
+    # Historical behavior preserved: `embedded_raw` defaults to False, nominal cap
+    # unchanged (no regression on non-embedded/seed-match targets).
     stats = _band(median_l=20.0, median_chroma=20.0)
     target = BandTarget(name="Red", lstar=100.0)
     corr = plan_band(stats, target, BandResponse())

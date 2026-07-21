@@ -1,9 +1,9 @@
-"""Parité GPU/CPU des métriques de rendu — squelette marqué `gpu`.
+"""GPU/CPU parity of render metrics — skeleton marked `gpu`.
 
-Skippé si torch/CUDA absent (cf. fixture `cuda_or_skip`). Vérifie que le portage
-torch (`render_metrics_gpu`) reproduit la version numpy (`render_metrics`) sur un
-petit rendu synthétique — sans dépendre d'un vrai `.ARW`. Étend le pattern de
-`tools/validate_gpu_vs_libraw.py` en test unitaire déterministe.
+Skipped if torch/CUDA is absent (see the `cuda_or_skip` fixture). Verifies that the
+torch port (`render_metrics_gpu`) reproduces the numpy version (`render_metrics`) on
+a small synthetic render — without depending on a real `.ARW`. Extends the pattern
+from `tools/validate_gpu_vs_libraw.py` into a deterministic unit test.
 """
 
 from __future__ import annotations

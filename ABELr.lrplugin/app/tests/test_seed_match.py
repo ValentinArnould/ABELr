@@ -1,6 +1,6 @@
-"""Matching k-NN sur seeds (`core.seed_match`) — distance normalisée, sélection des
-plus proches, agrégation pondérée 1/distance. Pur, sans DB ni RAW (on construit des
-`SeedVector` synthétiques).
+"""k-NN matching on seeds (`core.seed_match`) — normalized distance, selection of
+the nearest, weighted 1/distance aggregation. Pure, no DB or RAW (synthetic
+`SeedVector` objects are built).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def test_distance_identical_is_zero():
 
 def test_distance_ignores_missing_feature():
     a = _seed("a", 0.5, None, 40.0)
-    b = _seed("b", 0.5, 0.6, 40.0)  # bg présent d'un seul côté → ignoré
+    b = _seed("b", 0.5, 0.6, 40.0)  # bg present on only one side → ignored
     scale = {"asshot_rg": 1.0, "asshot_bg": 1.0, "raw_median_l": 1.0}
     assert sm._distance(a, b, scale) == pytest.approx(0.0)
 
@@ -46,7 +46,7 @@ def test_k_nearest_excludes_self():
 
 def test_k_nearest_exact_match_returns_single():
     target = _seed("t", 0.5, 0.5, 50.0)
-    twin = _seed("twin", 0.5, 0.5, 50.0)   # identique → distance ~0
+    twin = _seed("twin", 0.5, 0.5, 50.0)   # identical → distance ~0
     far = _seed("far", 5.0, 5.0, 5.0)
     matches = sm.k_nearest(target, [twin, far])
     assert len(matches) == 1
@@ -60,7 +60,7 @@ def test_k_nearest_orders_by_distance():
     far = _seed("far", 0.9, 0.5, 90.0)
     matches = sm.k_nearest(target, [far, mid, near], k=3)
     ids = [m.photo_id for m, _ in matches]
-    assert ids[0] == "near"  # le plus proche en tête
+    assert ids[0] == "near"  # the nearest comes first
 
 
 def test_weighted_mean_and_empty():
@@ -75,7 +75,7 @@ def _circ_close(deg: float, target: float, tol: float = 1e-4) -> bool:
 
 
 def test_circular_mean_deg():
-    # Résultat dans [0,360) : 10 et 350 → moyenne circulaire ≡ 0 (peut sortir 360.0).
+    # Result in [0,360): 10 and 350 → circular mean ≡ 0 (may output 360.0).
     assert _circ_close(sm._circular_mean_deg([10.0, 350.0]), 0.0)
     assert sm._circular_mean_deg([0.0, 90.0]) == pytest.approx(45.0, abs=1e-6)
     assert sm._circular_mean_deg([]) == pytest.approx(0.0)
@@ -86,24 +86,24 @@ def test_target_from_seeds_none_on_empty():
 
 
 def test_target_from_seeds_weights_nearer_seed():
-    near = (_seed("near", 0.5, 0.5, 50.0, temp=6000.0), 0.001)  # poids ~1000
-    far = (_seed("far", 0.9, 0.9, 90.0, temp=4000.0), 1.0)      # poids ~1
+    near = (_seed("near", 0.5, 0.5, 50.0, temp=6000.0), 0.001)  # weight ~1000
+    far = (_seed("far", 0.9, 0.9, 90.0, temp=4000.0), 1.0)      # weight ~1
     tgt = sm.target_from_seeds([near, far])
     assert tgt is not None
     assert tgt.n_matched == 2
-    assert tgt.temperature > 5900.0  # dominé par le seed proche (6000)
+    assert tgt.temperature > 5900.0  # dominated by the near seed (6000)
 
 
 def test_filter_by_profile_soft():
     target = _seed("t", 0.5, 0.5, 50.0, profile="VV2")
     same = _seed("a", 0.5, 0.5, 50.0, profile="VV2")
     other = _seed("b", 0.5, 0.5, 50.0, profile="STD")
-    # Même profil disponible → pool restreint.
+    # Same profile available → restricted pool.
     assert sm._filter_by_profile(target, [same, other]) == [same]
-    # Aucun même-profil → repli sur le pool complet (jamais vide).
+    # No same-profile match → fall back to the full pool (never empty).
     only_other = [other]
     assert sm._filter_by_profile(target, only_other) == only_other
-    # Cible sans profil → pool complet.
+    # Target without a profile → full pool.
     no_prof = _seed("t2", 0.5, 0.5, 50.0, profile=None)
     assert sm._filter_by_profile(no_prof, [same, other]) == [same, other]
 
@@ -117,19 +117,19 @@ def test_target_from_seeds_no_calibration_when_seeds_lack_it():
 
 
 def test_target_from_seeds_aggregates_calibration_weighted():
-    near = (_seed("near", 0.5, 0.5, 50.0, shadow_tint=-10.0, red_hue=20.0), 0.001)  # poids ~1000
-    far = (_seed("far", 0.9, 0.9, 90.0, shadow_tint=10.0, red_hue=-20.0), 1.0)      # poids ~1
+    near = (_seed("near", 0.5, 0.5, 50.0, shadow_tint=-10.0, red_hue=20.0), 0.001)  # weight ~1000
+    far = (_seed("far", 0.9, 0.9, 90.0, shadow_tint=10.0, red_hue=-20.0), 1.0)      # weight ~1
     tgt = sm.target_from_seeds([near, far])
     assert tgt is not None
     assert tgt.has_calibration() is True
-    assert tgt.shadow_tint < -9.0  # dominé par le seed proche
+    assert tgt.shadow_tint < -9.0  # dominated by the near seed
     assert tgt.red_hue > 19.0
-    # Champs non seedés par personne restent None (pas de 0 imposé).
+    # Fields not seeded by anyone stay None (no 0 imposed).
     assert tgt.blue_hue is None
 
 
 def test_target_from_seeds_calibration_partial_across_seeds():
-    # Un seul des deux seeds porte GreenSaturation → seul lui contribue.
+    # Only one of the two seeds carries GreenSaturation → only it contributes.
     a = (_seed("a", 0.5, 0.5, 50.0, green_saturation=30.0), 1.0)
     b = (_seed("b", 0.5, 0.5, 50.0), 1.0)
     tgt = sm.target_from_seeds([a, b])
@@ -138,19 +138,19 @@ def test_target_from_seeds_calibration_partial_across_seeds():
 
 
 def test_target_from_seeds_calibration_spread_guard_falls_back_to_nearest():
-    # RedHue diverge fortement entre les 2 seeds matchés (+30 vs -20, spread 50 >
-    # _CALIB_SPREAD_MAX=25) : moyenne pondérée interdite (ne correspondrait à
-    # aucun seed réel) → repli sur la valeur exacte du seed le plus proche.
+    # RedHue diverges strongly between the 2 matched seeds (+30 vs -20, spread 50 >
+    # _CALIB_SPREAD_MAX=25): weighted average forbidden (wouldn't correspond to
+    # any real seed) → fall back to the exact value of the nearest seed.
     near = (_seed("near", 0.5, 0.5, 50.0, red_hue=30.0), 0.1)
     far = (_seed("far", 0.9, 0.9, 90.0, red_hue=-20.0), 1.0)
     tgt = sm.target_from_seeds([near, far])
     assert tgt is not None
-    assert tgt.red_hue == pytest.approx(30.0)  # valeur du seed proche, pas une moyenne (5.4)
+    assert tgt.red_hue == pytest.approx(30.0)  # near seed's value, not an average (5.4)
 
 
 def test_target_from_seeds_calibration_spread_guard_allows_close_values():
-    # Divergence faible (spread 2 < _CALIB_SPREAD_MAX) : seeds cohérents → moyenne
-    # pondérée normale inchangée, pas de repli 1-seed.
+    # Small divergence (spread 2 < _CALIB_SPREAD_MAX): consistent seeds → normal
+    # weighted average unchanged, no 1-seed fallback.
     near = (_seed("near", 0.5, 0.5, 50.0, red_hue=10.0), 0.001)
     far = (_seed("far", 0.9, 0.9, 90.0, red_hue=12.0), 1.0)
     tgt = sm.target_from_seeds([near, far])
@@ -162,12 +162,12 @@ def test_weighted_bands_averages_reliable_only():
     def band(name, frac, hue, chroma):
         return BandStats(name, frac, hue, chroma, 0.3, 0.0, 50.0)
 
-    # frac 0.5 fiable, frac 0.0 ignoré (band_is_reliable min 0.01).
+    # frac 0.5 reliable, frac 0.0 ignored (band_is_reliable min 0.01).
     s1 = _seed("s1", 0.5, 0.5, 50.0)
     s1.preview_bands = [band("Red", 0.5, 10.0, 20.0)]
     s2 = _seed("s2", 0.5, 0.5, 50.0)
-    s2.preview_bands = [band("Red", 0.0, 999.0, 999.0)]  # non fiable → exclu
+    s2.preview_bands = [band("Red", 0.0, 999.0, 999.0)]  # unreliable → excluded
     tgt = sm.target_from_seeds([(s1, 0.001), (s2, 0.002)])
     assert tgt is not None and tgt.bands is not None
     red = next(b for b in tgt.bands if b.name == "Red")
-    assert red.median_chroma == pytest.approx(20.0)  # seul s1 compte
+    assert red.median_chroma == pytest.approx(20.0)  # only s1 counts

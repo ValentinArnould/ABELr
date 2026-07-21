@@ -1,5 +1,5 @@
-"""Helpers purs de `core.autocorrect` : différence de teinte circulaire, aire de crop,
-lecture robuste de réglage. Petits mais utilisés dans chaque plan de correction.
+"""Pure helpers from `core.autocorrect`: circular hue difference, crop area,
+robust setting read. Small but used in every correction plan.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from app.core import autocorrect as ac
     [
         (10.0, 20.0, -10.0),
         (20.0, 10.0, 10.0),
-        (350.0, 10.0, -20.0),   # 350 est "avant" 10 sur le cercle
+        (350.0, 10.0, -20.0),   # 350 is "before" 10 on the circle
         (10.0, 350.0, 20.0),
         (0.0, 0.0, 0.0),
     ],
@@ -24,7 +24,7 @@ def test_hue_diff_circular(a, b, expected):
 
 
 def test_hue_diff_in_range():
-    # Implémentation `(a-b+180)%360-180` → intervalle [−180, 180) (l'antipode donne −180).
+    # Implementation `(a-b+180)%360-180` → interval [−180, 180) (the antipode gives −180).
     for a in range(0, 360, 17):
         for b in range(0, 360, 23):
             d = ac._hue_diff(float(a), float(b))
@@ -39,7 +39,7 @@ def test_crop_area_partial_and_inverted():
     assert ac._crop_area(
         {"CropLeft": 0.0, "CropRight": 0.5, "CropTop": 0.0, "CropBottom": 1.0}
     ) == pytest.approx(0.5)
-    # Bornes inversées → aire écrêtée à 0, jamais négative.
+    # Inverted bounds → area clamped to 0, never negative.
     assert ac._crop_area(
         {"CropLeft": 0.8, "CropRight": 0.2, "CropTop": 0.0, "CropBottom": 1.0}
     ) == pytest.approx(0.0)
@@ -78,19 +78,19 @@ def test_calib_develop_dict_writes_present_fields_clamped_and_rounded():
     dev = ac._calib_develop_dict(t)
     assert dev == {
         "ShadowTint": -12,
-        "RedHue": 100,          # écrêté à +100
+        "RedHue": 100,          # clamped to +100
         "GreenHue": 0,
-        "GreenSaturation": -100,  # écrêté à -100
+        "GreenSaturation": -100,  # clamped to -100
         "EnableCalibration": True,
     }
-    # Champs absents chez la cible (RedSaturation/BlueHue/BlueSaturation) omis.
+    # Fields absent from the target (RedSaturation/BlueHue/BlueSaturation) omitted.
     assert "RedSaturation" not in dev
     assert "BlueHue" not in dev
 
 
 # --------------------------------------------------------------------------- #
-# H1 (PLAN) — la garde `raw_oversat` est câblée depuis le RAW zone nette de la
-# photo cible (pas des seeds) dans les deux constructeurs de BandTarget.
+# H1 (PLAN) — the `raw_oversat` guard is wired from the sharp-zone RAW of the
+# target photo (not the seeds) in both BandTarget constructors.
 # --------------------------------------------------------------------------- #
 def _raw_band(name="Red", sat_clip_frac=0.0, frac=0.5):
     from app.core.render_metrics import BandStats
@@ -111,17 +111,17 @@ def test_embedded_band_targets_wires_raw_oversat_from_target_photo_raw():
     )
     bias = ac.ProfileBias(n=8)
 
-    # RAW confirme (sat_clip_frac dur) → raw_oversat=True.
+    # RAW confirms (hard sat_clip_frac) → raw_oversat=True.
     raw_bands = [_raw_band(sat_clip_frac=0.10)]
     tgs = ac._embedded_band_targets(t, bias, ignore_bias=True, raw_bands=raw_bands)
     assert tgs["Red"].raw_oversat is True
 
-    # RAW infirme (pas de clip dur) → raw_oversat=False.
+    # RAW denies (no hard clip) → raw_oversat=False.
     raw_bands = [_raw_band(sat_clip_frac=0.0)]
     tgs = ac._embedded_band_targets(t, bias, ignore_bias=True, raw_bands=raw_bands)
     assert tgs["Red"].raw_oversat is False
 
-    # Pas d'info RAW → raw_oversat=None (comportement historique, pas de blocage).
+    # No RAW info → raw_oversat=None (historical behavior, no blocking).
     tgs = ac._embedded_band_targets(t, bias, ignore_bias=True, raw_bands=None)
     assert tgs["Red"].raw_oversat is None
 
@@ -147,8 +147,9 @@ def test_band_targets_from_seed_match_wires_raw_oversat_from_target_photo_raw():
 
 
 # --------------------------------------------------------------------------- #
-# H3 (PLAN) — `embedded_raw` marque les cibles transplant brut JPEG boîtier
-# (mode `ignore_bias=True`), pour le plafond L*/teinte strict côté `hsl.plan_band`.
+# H3 (PLAN) — `embedded_raw` marks raw-transplant targets from the in-camera
+# JPEG (`ignore_bias=True` mode), for the strict L*/hue cap on the `hsl.plan_band`
+# side.
 # --------------------------------------------------------------------------- #
 def test_embedded_band_targets_marks_embedded_raw_only_when_ignore_bias():
     from app.core.pipeline import RenderAnalysis
@@ -164,7 +165,7 @@ def test_embedded_band_targets_marks_embedded_raw_only_when_ignore_bias():
     tgs = ac._embedded_band_targets(t, bias, ignore_bias=True)
     assert tgs["Red"].embedded_raw is True
 
-    # Mode historique (delta vs norme de biais) : pas de transplant brut → False.
+    # Historical mode (delta vs bias norm): no raw transplant → False.
     tgs = ac._embedded_band_targets(t, bias, ignore_bias=False)
     assert tgs["Red"].embedded_raw is False
 
