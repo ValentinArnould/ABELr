@@ -1,172 +1,172 @@
-# ABELr — Vue d'ensemble du projet
+# ABELr — Project overview
 
 ## Description
 
-ABELr est un système de retouche photo intelligente pour Adobe Lightroom Classic.
-Il couple un plugin Lightroom (Lua) à une application Python externe dotée d'une interface graphique.
+ABELr is an intelligent photo-editing system for Adobe Lightroom Classic.
+It couples a Lightroom plugin (Lua) with an external Python application that has a graphical interface.
 
-L'application analyse les fichiers RAW Sony (format ARW), détermine les ajustements optimaux,
-et les applique automatiquement dans Lightroom — sans intervention manuelle photo par photo.
-
----
-
-## Problème résolu
-
-La retouche manuelle d'une série de 500 à 1000 photos est longue et incohérente.
-L'exposition, la balance des blancs et l'étalonnage des couleurs varient d'une prise à l'autre
-selon les conditions lumineuses, et les corriger à la main produit des résultats inégaux.
-
-ABELr analyse l'ensemble de la série, construit une carte de prédiction des ajustements,
-et applique des corrections cohérentes et précises sur toutes les photos en batch.
+The application analyzes Sony RAW files (ARW format), determines the optimal adjustments,
+and applies them automatically in Lightroom — without manual photo-by-photo intervention.
 
 ---
 
-## Architecture globale
+## Problem solved
+
+Manually editing a series of 500 to 1000 photos is slow and inconsistent.
+Exposure, white balance, and color calibration vary from one shot to the next
+depending on lighting conditions, and correcting them by hand produces uneven results.
+
+ABELr analyzes the whole series, builds a prediction map of the adjustments,
+and applies consistent, precise corrections across all the photos in batch.
+
+---
+
+## Overall architecture
 
 ```
 ┌─────────────────────────────────┐      HTTP JSON       ┌──────────────────────────────────────┐
-│       Plugin Lightroom          │ ◄──── polling ──────► │         Application Python           │
-│         (Lua, SDK Lr)           │      localhost:5000   │   FastAPI + PySide6 (Qt6) GUI        │
+│       Lightroom Plugin          │ ◄──── polling ──────► │         Python Application            │
+│         (Lua, Lr SDK)           │      localhost:5000   │   FastAPI + PySide6 (Qt6) GUI        │
 │                                 │                       │                                      │
-│  • Lit les données catalog Lr   │                       │  • Interface graphique utilisateur   │
-│  • Applique les ajustements     │                       │  • Décodage RAW Sony (rawpy/LibRaw)  │
-│  • Boucle polling 300ms         │                       │  • Analyse image (numpy, OpenCV)     │
-└─────────────────────────────────┘                       │  • Calcul ajustements                │
-              │                                           │  • Carte de prédiction (scikit-learn)│
-              │ SDK Lr                                    └──────────────────────────────────────┘
+│  • Reads Lr catalog data        │                       │  • Graphical user interface          │
+│  • Applies the adjustments      │                       │  • Sony RAW decoding (rawpy/LibRaw)  │
+│  • 300ms polling loop           │                       │  • Image analysis (numpy, OpenCV)    │
+└─────────────────────────────────┘                       │  • Adjustment computation             │
+              │                                           │  • Prediction map (scikit-learn)     │
+              │ Lr SDK                                    └──────────────────────────────────────┘
               ▼
 ┌─────────────────────────────────┐
 │      Lightroom Classic 12+      │
 │                                 │
 │  • Catalog photos               │
 │  • Develop settings             │
-│  • Métadonnées / EXIF           │
+│  • Metadata / EXIF              │
 └─────────────────────────────────┘
 ```
 
-### Principe de communication
+### Communication principle
 
-Le plugin Lua est toujours **client HTTP**. L'App Python est toujours **serveur HTTP**.
+The Lua plugin is always the **HTTP client**. The Python App is always the **HTTP server**.
 
-Le plugin tourne une boucle de polling toutes les 300 ms (`LrTasks`).
-Quand l'App a besoin de données Lightroom, elle crée un *job* dans sa file d'attente interne.
-Le plugin récupère ce job, l'exécute via le SDK Lr, et retourne le résultat à l'App.
-Les ajustements calculés par l'App sont eux aussi transmis au plugin via un job.
-
----
-
-## Fonctionnalités
-
-### Équilibrage batch de l'exposition
-Analyse les histogrammes de luminance de chaque photo.
-Calcule un delta d'exposition pour ramener chaque image à une luminosité cible cohérente.
-Prend en compte les paramètres EXIF (ISO, ouverture, vitesse) pour pondérer la correction.
-
-### Équilibrage batch de la balance des blancs
-Analyse les zones neutres et la température de couleur effective de chaque RAW.
-Calcule les valeurs Température et Teinte Lr pour uniformiser la série.
-
-### Harmonisation de l'étalonnage des couleurs
-Analyse les teintes dominantes, saturation et luminosité par canal (HSL).
-Harmonise l'étalonnage (Color Grading) sur l'ensemble de la série.
-
-### Carte de prédiction (séries 500-1000 photos)
-Sur une grande série, construit un modèle de variation des conditions lumineuses.
-Prédit les ajustements nécessaires pour les photos intermédiaires.
-Permet une correction progressive et naturelle sur toute la durée d'une session de prise de vue.
+The plugin runs a polling loop every 300 ms (`LrTasks`).
+When the App needs Lightroom data, it creates a *job* in its internal queue.
+The plugin picks up this job, executes it via the Lr SDK, and returns the result to the App.
+Adjustments computed by the App are likewise passed to the plugin via a job.
 
 ---
 
-## Stack technique
+## Features
 
-| Composant | Technologie | Rôle |
+### Batch exposure balancing
+Analyzes the luminance histograms of each photo.
+Computes an exposure delta to bring each image back to a consistent target brightness.
+Takes EXIF settings (ISO, aperture, shutter speed) into account to weight the correction.
+
+### Batch white balance balancing
+Analyzes the neutral areas and the effective color temperature of each RAW.
+Computes the Lr Temperature and Tint values to make the series uniform.
+
+### Color calibration harmonization
+Analyzes dominant hues, saturation, and lightness per channel (HSL).
+Harmonizes the calibration (Color Grading) across the whole series.
+
+### Prediction map (500-1000 photo series)
+On a large series, builds a model of the lighting conditions' variation.
+Predicts the adjustments needed for the in-between photos.
+Enables a progressive, natural correction across an entire shooting session.
+
+---
+
+## Tech stack
+
+| Component | Technology | Role |
 |---|---|---|
-| Plugin Lr | Lua 5.1 + SDK Lr Classic 12+ | Bridge vers Lightroom |
-| Serveur App | Python 3.11+ + FastAPI | API HTTP localhost |
-| GUI | PySide6 (Qt6) | Interface utilisateur |
-| Décodage RAW | rawpy (LibRaw) | Lecture fichiers ARW Sony |
-| Analyse image | numpy + OpenCV | Histogrammes, analyse couleur |
-| Calcul ajustements | scipy | Optimisation numérique |
-| Carte prédiction | scikit-learn | Modèle sur séries photo |
-| Accélération | Rust via PyO3 (optionnel) | Si bottleneck algo custom identifié |
+| Lr Plugin | Lua 5.1 + Lr Classic SDK 12+ | Bridge to Lightroom |
+| App server | Python 3.11+ + FastAPI | Localhost HTTP API |
+| GUI | PySide6 (Qt6) | User interface |
+| RAW decoding | rawpy (LibRaw) | Reading Sony ARW files |
+| Image analysis | numpy + OpenCV | Histograms, color analysis |
+| Adjustment computation | scipy | Numerical optimization |
+| Prediction map | scikit-learn | Model over photo series |
+| Acceleration | Rust via PyO3 (optional) | If a custom algo bottleneck is identified |
 
 ---
 
-## Structure des fichiers
+## File structure
 
 ```
 ABELr/
-├── CLAUDE.md                      # Référence technique pour le développement
+├── CLAUDE.md                      # Technical reference for development
 ├── documentation/
-│   └── project_overview.md        # Ce fichier
+│   └── project_overview.md        # This file
 │
-├── plugin/                        # Plugin Lightroom (Lua)
-│   ├── Info.lua                   # Manifeste plugin (obligatoire)
-│   ├── Menu.lua                   # Entrées menu Lightroom
+├── plugin/                        # Lightroom plugin (Lua)
+│   ├── Info.lua                   # Plugin manifest (required)
+│   ├── Menu.lua                   # Lightroom menu entries
 │   └── lib/
-│       ├── PollingLoop.lua        # Boucle LrTasks 300ms
-│       ├── HttpClient.lua         # Requêtes HTTP (LrHttp)
-│       ├── Adjustments.lua        # Application ajustements SDK
-│       ├── PhotoData.lua          # Lecture données photos
+│       ├── PollingLoop.lua        # 300ms LrTasks loop
+│       ├── HttpClient.lua         # HTTP requests (LrHttp)
+│       ├── Adjustments.lua        # SDK adjustment application
+│       ├── PhotoData.lua          # Photo data reading
 │       └── Utils.lua              # Helpers, JSON
 │
-└── app/                           # Application Python
-    ├── main.py                    # Point d'entrée (GUI + serveur)
+└── app/                           # Python application
+    ├── main.py                    # Entry point (GUI + server)
     ├── server/
-    │   ├── api.py                 # Routes FastAPI
-    │   └── job_queue.py           # File de jobs thread-safe
+    │   ├── api.py                 # FastAPI routes
+    │   └── job_queue.py           # Thread-safe job queue
     ├── gui/
-    │   ├── main_window.py         # Fenêtre principale
-    │   ├── photo_panel.py         # Panneau photos
-    │   └── analysis_panel.py      # Visualisation analyse
+    │   ├── main_window.py         # Main window
+    │   ├── photo_panel.py         # Photo panel
+    │   └── analysis_panel.py      # Analysis visualization
     ├── core/
-    │   ├── raw.py                 # Décodage RAW Sony
-    │   ├── analysis.py            # Analyse exposition / WB / couleurs
-    │   ├── prediction.py          # Modèle carte de prédiction
-    │   └── adjustments.py         # Calcul corrections finales
-    ├── rust_ext/                  # (optionnel) Extensions Rust/PyO3
+    │   ├── raw.py                 # Sony RAW decoding
+    │   ├── analysis.py            # Exposure / WB / color analysis
+    │   ├── prediction.py          # Prediction map model
+    │   └── adjustments.py         # Final correction computation
+    ├── rust_ext/                  # (optional) Rust/PyO3 extensions
     └── requirements.txt
 ```
 
 ---
 
-## Flux d'utilisation typique
+## Typical usage flow
 
 ```
-1. Utilisateur ouvre Lightroom, sélectionne une série de photos
-2. Utilisateur lance App ABELr (python app/main.py)
-3. Plugin détecte l'App (polling /health)
-4. Utilisateur clique "Analyser la sélection" dans l'App
-5. App crée job "get_selected_photos"
-6. Plugin récupère job → lit paths + EXIF + develop settings via SDK Lr
-7. Plugin retourne les données à l'App
-8. App décode chaque ARW (rawpy), analyse histogrammes et couleurs
-9. App calcule ajustements et génère carte de prédiction
-10. App affiche aperçu des corrections dans la GUI
-11. Utilisateur valide
-12. App crée job "apply_adjustments" avec toutes les corrections
-13. Plugin récupère job → applique batch dans Lr (withWriteAccessDo)
-14. Photos corrigées dans Lightroom
+1. User opens Lightroom, selects a series of photos
+2. User launches the ABELr App (python app/main.py)
+3. Plugin detects the App (polling /health)
+4. User clicks "Analyze selection" in the App
+5. App creates a "get_selected_photos" job
+6. Plugin picks up the job → reads paths + EXIF + develop settings via the Lr SDK
+7. Plugin returns the data to the App
+8. App decodes each ARW (rawpy), analyzes histograms and colors
+9. App computes adjustments and generates the prediction map
+10. App displays a preview of the corrections in the GUI
+11. User confirms
+12. App creates an "apply_adjustments" job with all the corrections
+13. Plugin picks up the job → applies the batch in Lr (withWriteAccessDo)
+14. Photos corrected in Lightroom
 ```
 
 ---
 
-## Décisions d'architecture
+## Architecture decisions
 
-| Décision | Choix retenu | Raison |
+| Decision | Choice made | Reason |
 |---|---|---|
-| Communication plugin ↔ App | HTTP JSON polling | Plugin ne peut pas exposer de serveur facilement ; LrHttp disponible en client |
-| Langage App | Python (pas Rust natif) | Ecosystem image mature (rawpy, OpenCV, scikit-learn) ; Rust n'a pas d'équivalent |
-| Rust | PyO3 optionnel, différé | rawpy/OpenCV/numpy sont déjà du C/C++ ; profiler avant d'optimiser |
-| GUI | PySide6 (Qt6) | UI riche impossible avec les dialogs Lr natifs |
-| Serveur App | FastAPI | Suffisant pour localhost ; async natif compatible PySide6 |
-| Version Lr | 12+ (2023+) | LrHttp stable, SDK mature, pas de contrainte rétrocompatibilité |
+| Plugin ↔ App communication | HTTP JSON polling | The plugin cannot easily expose a server; LrHttp is available as a client |
+| App language | Python (not native Rust) | Mature image ecosystem (rawpy, OpenCV, scikit-learn); Rust has no equivalent |
+| Rust | Optional PyO3, deferred | rawpy/OpenCV/numpy are already C/C++; profile before optimizing |
+| GUI | PySide6 (Qt6) | Rich UI not possible with native Lr dialogs |
+| App server | FastAPI | Sufficient for localhost; native async compatible with PySide6 |
+| Lr version | 12+ (2023+) | Stable LrHttp, mature SDK, no backward-compatibility constraint |
 
 ---
 
-## Prérequis
+## Requirements
 
 - Adobe Lightroom Classic 12+
 - Python 3.11+
-- Dépendances Python : voir `app/requirements.txt`
-- Fichiers RAW au format Sony ARW (ILCE-7M4 et compatibles LibRaw)
+- Python dependencies: see `app/requirements.txt`
+- RAW files in Sony ARW format (ILCE-7M4 and LibRaw-compatible)

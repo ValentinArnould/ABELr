@@ -1,49 +1,49 @@
-# App externe — ABELr
+# External App — ABELr
 
-Serveur HTTP (FastAPI, localhost:5000) + GUI (PySide6). Le plugin Lr est client :
-il interroge l'App en polling.
+HTTP server (FastAPI, localhost:5000) + GUI (PySide6). The Lr plugin is the client:
+it polls the App.
 
-Ce dossier (`app/`) vit **dans** `ABELr.lrplugin/` — le plugin est auto-suffisant, il
-embarque tout le code Python. Toutes les commandes ci-dessous se lancent depuis
-`ABELr.lrplugin/` (le dossier du plugin), pas depuis la racine du repo.
+This folder (`app/`) lives **inside** `ABELr.lrplugin/` — the plugin is self-sufficient, it
+embeds all the Python code. All the commands below are run from
+`ABELr.lrplugin/` (the plugin folder), not from the repo root.
 
 ## Install
 
-**Automatique (recommandé)** : le plugin construit son venv tout seul au 1er lancement
-(`launch.ps1` → `bootstrap.ps1`, déclenché par le menu Lr *Démarrer/connecter l'application*).
-Détecte un GPU NVIDIA (`nvidia-smi`) et installe torch CUDA (cu124) si présent, sinon torch CPU.
-Nécessite Python 3.11+ sur le PATH + internet (1ère installation seulement).
+**Automatic (recommended)**: the plugin builds its own venv on first launch
+(`launch.ps1` → `bootstrap.ps1`, triggered by the Lr *Start/connect the application* menu).
+Detects an NVIDIA GPU (`nvidia-smi`) and installs torch CUDA (cu124) if present, otherwise torch CPU.
+Requires Python 3.11+ on the PATH + internet (first install only).
 
-**Manuelle** (dev) :
+**Manual** (dev):
 ```bash
 cd ABELr.lrplugin
 python -m venv app\.venv
 app\.venv\Scripts\activate        # Windows
 pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124  # GPU
-# ou : pip install torch==2.6.0 torchvision==0.21.0                                                # CPU
+# or: pip install torch==2.6.0 torchvision==0.21.0                                                 # CPU
 pip install -r app\requirements.txt
 ```
 
-## Lancer
+## Launch
 
 ```bash
-python -m app.main            # depuis ABELr.lrplugin/
+python -m app.main            # from ABELr.lrplugin/
 ```
 
-Démarre le serveur FastAPI (thread daemon) + la fenêtre GUI. Le device (GPU si CUDA
-utilisable, sinon CPU) est décidé automatiquement par `core/gpu.py` — aucun réglage requis.
+Starts the FastAPI server (daemon thread) + the GUI window. The device (GPU if CUDA
+is usable, otherwise CPU) is decided automatically by `core/gpu.py` — no setting required.
 
-## Tester sans Lightroom
+## Test without Lightroom
 
-Avec l'App lancée, simuler le plugin dans un autre terminal :
+With the App running, simulate the plugin in another terminal:
 
 ```bash
 python -m app.tools.mock_plugin
 ```
 
-Cliquer « Analyser la sélection » dans le GUI → le mock renvoie des photos factices.
+Click "Analyze selection" in the GUI → the mock returns fake photos.
 
-## Vérifier le serveur seul
+## Check the server alone
 
 ```bash
 curl http://localhost:5000/health
@@ -52,36 +52,36 @@ curl http://localhost:5000/status
 
 ## Structure
 
-| Dossier | Rôle |
+| Folder | Role |
 |---|---|
-| `server/` | FastAPI (`api.py`), queue de jobs thread-safe (`job_queue.py`), modèles Pydantic (`models.py`) |
-| `gui/` | Fenêtre PySide6 (`main_window.py`), workers Qt non-bloquants (`job_worker.py` = attente plugin, `autocorrect_worker.py` = mesure+plan, `neutral_preview_worker.py` = ancres neutres) |
-| `core/` | Pipeline image et analyse (voir ci-dessous) |
-| `tools/` | Mock plugin pour dev sans Lr |
+| `server/` | FastAPI (`api.py`), thread-safe job queue (`job_queue.py`), Pydantic models (`models.py`) |
+| `gui/` | PySide6 window (`main_window.py`), non-blocking Qt workers (`job_worker.py` = waits on the plugin, `autocorrect_worker.py` = measure+plan, `neutral_preview_worker.py` = neutral anchors) |
+| `core/` | Image and analysis pipeline (see below) |
+| `tools/` | Mock plugin for dev without Lr |
 
-### `core/` — pipeline image
+### `core/` — image pipeline
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `color.py` | Espaces couleur de l'analyse : ProPhoto linéaire, luminance Y (XYZ), conversion → sRGB pour l'affichage |
-| `raw.py` | Décodage RAW Sony ARW via rawpy : `load_linear` (ProPhoto linéaire, analyse) / `load_rgb` (sRGB uint8, GUI) |
-| `image_source.py` | Source pixel de l'analyse : **RAW → ProPhoto linéaire** (`LoadedImage`) |
-| `analysis.py` | Métriques exposition (luminance Y) + balance des blancs (gray-world), en linéaire |
-| `catalog.py` | Localise `.lrcat` + bundles `.lrdata` ; ouvre les SQLite en lecture seule (cohabite avec Lr ouvert) |
-| `previews.py` | Résout `id_global` → fichiers de preview ; aperçu rendu (vérif résultat). **Smart Preview = inspection seulement** |
-| `adjustments.py` / `prediction.py` | Calcul des corrections / lissage série — en cours |
+| `color.py` | Analysis color spaces: linear ProPhoto, Y (XYZ) luminance, conversion → sRGB for display |
+| `raw.py` | Sony ARW RAW decoding via rawpy: `load_linear` (linear ProPhoto, analysis) / `load_rgb` (sRGB uint8, GUI) |
+| `image_source.py` | Analysis pixel source: **RAW → linear ProPhoto** (`LoadedImage`) |
+| `analysis.py` | Exposure metrics (Y luminance) + white balance (gray-world), in linear space |
+| `catalog.py` | Locates the `.lrcat` + `.lrdata` bundles; opens the SQLite files read-only (coexists with Lr open) |
+| `previews.py` | Resolves `id_global` → preview files; rendered preview (result check). **Smart Preview = inspection only** |
+| `adjustments.py` / `prediction.py` | Correction / series smoothing computation — in progress |
 
-> **Pourquoi le RAW et pas la Smart Preview ?** La calibration (`tools/calibrate_sp_vs_raw.py`)
-> a montré que la Smart Preview est du **raw caméra-natif** (avant WB et matrice
-> couleur), que LibRaw ne décode pas et qu'un dev fait main ne ramène pas
-> fidèlement au RAW. Le RAW via rawpy est la seule source juste et cohérente.
-> Format d'analyse : **float32 ProPhoto linéaire** (gamut large = WB non biaisée),
-> luminance via Y de XYZ ; sRGB réservé à l'affichage.
+> **Why RAW and not the Smart Preview?** Calibration (`tools/calibrate_sp_vs_raw.py`)
+> showed that the Smart Preview is **camera-native raw** (before WB and the color
+> matrix), which LibRaw doesn't decode and which a hand-tuned develop doesn't map
+> faithfully back to the RAW. RAW via rawpy is the only accurate, consistent source.
+> Analysis format: **float32 linear ProPhoto** (wide gamut = unbiased WB),
+> luminance via XYZ's Y; sRGB reserved for display.
 
-## Flux job
+## Job flow
 
 ```
 GUI submit() -> JobQueue.pending
-plugin GET /jobs/pending      -> récupère le job
-plugin POST /jobs/{id}/result -> JobQueue.submit_result() débloque le worker GUI
+plugin GET /jobs/pending      -> retrieves the job
+plugin POST /jobs/{id}/result -> JobQueue.submit_result() unblocks the GUI worker
 ```

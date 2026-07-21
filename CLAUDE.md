@@ -1,91 +1,92 @@
-# ABELr — Plugin Lightroom Classic
+# ABELr — Lightroom Classic Plugin
 
-Plugin Lightroom Classic (Lua + SDK Lr) + application Python externe pour retouche batch
-intelligente. Cœur : **exposition / HSL / Calibration / White Balance par photo**, calibrée sur des
-**seeds** (photos repères marquées à la main) via matching k-NN sur l'analyse RAW zone nette.
+Lightroom Classic plugin (Lua + Lr SDK) + external Python application for intelligent batch
+editing. Core: **exposure / HSL / Calibration / White Balance per photo**, calibrated on
+**seeds** (reference photos marked by hand) via k-NN matching on sharp-zone RAW analysis.
 
-**Plugin auto-suffisant** : `ABELr.lrplugin/` embarque tout — le code Lua *et* le package
-Python complet (`ABELr.lrplugin/app/`), plus `launch.ps1`/`bootstrap.ps1`. Copier ce seul
-dossier sur une autre machine suffit à installer le plugin (Python 3.11+ + internet requis au
-1er lancement — `bootstrap.ps1` construit le venv et installe les dépendances, GPU CUDA détecté
-automatiquement sinon repli CPU). Le reste du repo (`documentation/`, `PLAN.md`…) est le
-dépôt de dev, pas une dépendance runtime du plugin.
+**Self-sufficient plugin**: `ABELr.lrplugin/` embeds everything — the Lua code *and* the
+complete Python package (`ABELr.lrplugin/app/`), plus `launch.ps1`/`bootstrap.ps1`. Copying
+this single folder to another machine is enough to install the plugin (Python 3.11+ + internet
+required on first launch — `bootstrap.ps1` builds the venv and installs the dependencies, GPU
+CUDA detected automatically otherwise falls back to CPU). The rest of the repo (`documentation/`,
+`PLAN.md`…) is the dev repository, not a runtime dependency of the plugin.
 
-## Où lire quoi
+## Where to read what
 
-| Fichier | Pour |
+| File | For |
 |---|---|
-| [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md) | **Comment le système marche** : flux, carte des modules (statut live/mort), pipeline image, cache, GPU, communication |
-| [`PLAN.md`](PLAN.md) | **Roadmap / statut** : étapes en cours, tests de non-régression, backlog |
-| [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md) | **Tout code Lua** : imports, APIs SDK, paramètres Camera Raw 18, patterns, limitations. Méthodes ⚠️ = non vérifiées, confirmer avant usage |
-| [`documentation/project_overview.md`](documentation/project_overview.md) | Vision globale, décisions historiques |
-| [`ABELr.lrplugin/app/README.md`](ABELr.lrplugin/app/README.md) | Install / lancement / structure `core/` |
+| [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md) | **How the system works**: flow, module map (live/dead status), image pipeline, cache, GPU, communication |
+| [`PLAN.md`](PLAN.md) | **Roadmap / status**: steps in progress, regression tests, backlog |
+| [`documentation/lr15_sdk_api_reference.md`](documentation/lr15_sdk_api_reference.md) | **All Lua code**: imports, SDK APIs, Camera Raw 18 parameters, patterns, limitations. ⚠️ methods = unverified, confirm before use |
+| [`documentation/project_overview.md`](documentation/project_overview.md) | Overall vision, historical decisions |
+| [`ABELr.lrplugin/app/README.md`](ABELr.lrplugin/app/README.md) | Install / launch / `core/` structure |
 
-> Avant d'écrire du Lua ou de chercher un nom de paramètre develop : `lr15_sdk_api_reference.md`.
-> Avant d'affirmer qu'un module est utilisé : la carte de statut d'ARCHITECTURE.md (§3) —
-> plusieurs modules `core/` sont tool-only ou morts.
+> Before writing any Lua or looking up a develop parameter name: `lr15_sdk_api_reference.md`.
+> Before claiming a module is used: the status map in ARCHITECTURE.md (§3) —
+> several `core/` modules are tool-only or dead.
 
-## Stack (détail : ARCHITECTURE.md § Stack)
+## Stack (detail: ARCHITECTURE.md § Stack)
 
-| Couche | Techno |
+| Layer | Tech |
 |---|---|
 | Plugin | Lua 5.1 + Adobe Lr Classic SDK 12+ |
-| Serveur / GUI | Python 3.11+ · FastAPI · PySide6 (même process : serveur en thread daemon, GUI thread principal) |
-| Image / GPU | rawpy · numpy · opencv · torch 2.6.0 + torchvision 0.21.0 (cu124, nvJPEG ; **fallback CPU** si pas de GPU CUDA) |
-| Analyse | scipy · scikit-learn · `exiftool` (binaire externe, hors pip) |
+| Server / GUI | Python 3.11+ · FastAPI · PySide6 (same process: server in a daemon thread, GUI on the main thread) |
+| Image / GPU | rawpy · numpy · opencv · torch 2.6.0 + torchvision 0.21.0 (cu124, nvJPEG; **CPU fallback** if no CUDA GPU) |
+| Analysis | scipy · scikit-learn · `exiftool` (external binary, outside pip) |
 
 ---
 
-## Contraintes à ne jamais violer
+## Constraints never to violate
 
-**Lua / SDK :**
-- Lua 5.1 : pas de `//`, `goto`, ni `utf8` stdlib.
-- Toute écriture catalog/develop dans `catalog:withWriteAccessDo(...)`.
-- Tout I/O bloquant dans `LrTasks.startAsyncTask` ; `LrHttp.post` exige `LrFunctionContext.postAsyncTaskWithContext`.
-- Chemins Windows via `LrPathUtils` — jamais concaténer `/`.
-- Modules SDK : `import 'LrXxx'` ; modules du plugin : `require`.
-- Pas de lib JSON native → `Json.lua` embarqué (`Json.array(t)` force un tableau JSON).
-- `Collections.lua`, `Metadata.lua`, `PhotoLookup.lua`, `Presets.lua` (Phase 2, câblés dans
-  `PollingLoop.lua`) contiennent des méthodes SDK marquées ⚠️ non vérifiées en Lr live dans leur
-  propre en-tête — même règle que `lr15_sdk_api_reference.md` : confirmer avant d'étendre/copier
-  leur usage.
+**Lua / SDK:**
+- Lua 5.1: no `//`, `goto`, or `utf8` stdlib.
+- Any catalog/develop write inside `catalog:withWriteAccessDo(...)`.
+- Any blocking I/O inside `LrTasks.startAsyncTask`; `LrHttp.post` requires `LrFunctionContext.postAsyncTaskWithContext`.
+- Windows paths via `LrPathUtils` — never concatenate `/`.
+- SDK modules: `import 'LrXxx'`; plugin modules: `require`.
+- No native JSON lib → embedded `Json.lua` (`Json.array(t)` forces a JSON array).
+- `Collections.lua`, `Metadata.lua`, `PhotoLookup.lua`, `Presets.lua` (Phase 2, wired into
+  `PollingLoop.lua`) contain SDK methods marked ⚠️ unverified in live Lr, in their own
+  header — same rule as `lr15_sdk_api_reference.md`: confirm before extending/copying
+  their usage.
 
-**App Python :**
-- **GPU prioritaire, fallback CPU** (décision utilisateur, plugin doit tourner sans NVIDIA) :
-  `app/core/gpu.py` : `device()` renvoie `cuda` si utilisable, sinon `cpu` — **ne lève jamais**.
-  Tout le pipeline (`gpu_raw`, `gpu_jpeg`, `render_metrics_gpu`, `gpu_schedule`) route son device
-  via cet appel, donc bascule automatiquement ; les workers GUI logguent un avertissement (pas un
-  échec) quand ils tournent en CPU. `require_cuda()`/`GpuUnavailable` restent disponibles pour les
-  usages qui veulent explicitement exiger CUDA (`tools/calibrate_hsl_response.py`,
-  `tools/validate_gpu_vs_libraw.py`, `tests/test_gpu_parity.py`) — ne pas les utiliser comme gate
-  par défaut ailleurs. (Politique précédente « GPU-strict, aucun repli CPU » levée — historique
-  dans [[lr_gpu_cache_refactor]].)
-- **Cache obligatoire** : les workers consultent `cache` (SQLite, `app/core/cache.py`, 5 tables —
-  `LightroomPicture`, `SourceRAW`, `InCameraJPEG`, `PreviewJPEG`, `NeutralPreviewJPEG`) d'abord.
-  `ANALYSIS_VERSION` salée dans les hash → changer l'algo de mesure = bumper la constante
-  (rebuild complet, pas de migration ; ne pas graver sa valeur ici, elle bouge à chaque bump —
-  lire `cache.py` si besoin de la valeur courante).
-- **`python -m app.main` tourne sans Lightroom** : le serveur démarre seul, le pont reste juste
-  « déconnecté ». Le décodage RAW n'exige que le `.ARW` sur disque, jamais le catalogue ni Lr.
+**Python App:**
+- **GPU-first, CPU fallback** (user decision, the plugin must run without an NVIDIA card):
+  `app/core/gpu.py`: `device()` returns `cuda` if usable, otherwise `cpu` — **never raises**.
+  The whole pipeline (`gpu_raw`, `gpu_jpeg`, `render_metrics_gpu`, `gpu_schedule`) routes its
+  device through this call, so it switches automatically; GUI workers log a warning (not a
+  failure) when running on CPU. `require_cuda()`/`GpuUnavailable` remain available for
+  usages that explicitly want to require CUDA (`tools/calibrate_hsl_response.py`,
+  `tools/validate_gpu_vs_libraw.py`, `tests/test_gpu_parity.py`) — do not use them as a
+  default gate elsewhere. (Previous policy "GPU-strict, no CPU fallback" lifted — history
+  in [[lr_gpu_cache_refactor]].)
+- **Cache mandatory**: workers consult `cache` (SQLite, `app/core/cache.py`, 5 tables —
+  `LightroomPicture`, `SourceRAW`, `InCameraJPEG`, `PreviewJPEG`, `NeutralPreviewJPEG`) first.
+  `ANALYSIS_VERSION` is salted into the hashes → changing the measurement algorithm means
+  bumping the constant (full rebuild, no migration; don't hardcode its value here, it moves
+  on every bump — read `cache.py` if you need the current value).
+- **`python -m app.main` runs without Lightroom**: the server starts on its own, the bridge
+  just stays "disconnected". RAW decoding only requires the `.ARW` on disk, never the catalog
+  nor Lr.
 
-**Paramètres develop = PV2012** : les noms réels portent le suffixe `2012` (`Exposure2012`,
-`Highlights2012`…). `WhiteBalance='Custom'` requis pour que `Temperature`/`Tint` prennent effet.
-`WhiteBalance='Custom'` sert aussi de marqueur historique côté App.
+**Develop parameters = PV2012**: the real names carry the `2012` suffix (`Exposure2012`,
+`Highlights2012`…). `WhiteBalance='Custom'` is required for `Temperature`/`Tint` to take effect.
+`WhiteBalance='Custom'` also serves as a historical marker on the App side.
 
 ---
 
-## Communication (détail : ARCHITECTURE.md §2 — ⚠️ ce §2 est en retard sur cette section, se fier à celle-ci)
+## Communication (detail: ARCHITECTURE.md §2 — ⚠️ that §2 is behind this section, trust this one)
 
-**Plugin = TOUJOURS client HTTP. App = TOUJOURS serveur (`127.0.0.1:5000`).** L'App ne pousse
-jamais : elle dépose un job dans `job_queue`, le plugin le récupère en pollant (`GET /jobs/pending`,
-300 ms) et renvoie via `POST /jobs/{id}/result`.
+**Plugin = ALWAYS HTTP client. App = ALWAYS server (`127.0.0.1:5000`).** The App never
+pushes: it drops a job into `job_queue`, the plugin picks it up by polling (`GET /jobs/pending`,
+300 ms) and returns it via `POST /jobs/{id}/result`.
 
-Jobs (14 — source de vérité : `JobType` enum `app/server/models.py` + `dispatch()`
-`PollingLoop.lua`, garder synchrones à tout ajout) :
-- Base : `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`, `apply_adjustments`
-- Métadonnées : `set_rating`, `set_flag_color`, `set_keywords`
-- Collections : `list_collections`, `create_collection`, `add_to_collection`
-- Presets : `list_develop_presets`, `apply_develop_preset`
+Jobs (14 — source of truth: `JobType` enum in `app/server/models.py` + `dispatch()` in
+`PollingLoop.lua`, keep them in sync on any addition):
+- Base: `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`, `apply_adjustments`
+- Metadata: `set_rating`, `set_flag_color`, `set_keywords`
+- Collections: `list_collections`, `create_collection`, `add_to_collection`
+- Presets: `list_develop_presets`, `apply_develop_preset`
 
 ```json
 { "job_id": "uuid", "type": "apply_adjustments",
@@ -93,53 +94,53 @@ Jobs (14 — source de vérité : `JobType` enum `app/server/models.py` + `dispa
       "WhiteBalance": "Custom", "Temperature": 5650, "Tint": -5, "Exposure2012": 0.35 } } ] } }
 ```
 
-**Second canal — MCP (`app/mcp/server.py` + `tools.py`, monté sur `/mcp` dans `app/server/api.py`)** :
-expose le `job_queue` ci-dessus comme 15 tools MCP pour Claude Code lui-même (introspection,
-lecture, écriture, métadonnées/collections/presets), enregistré dans [`.mcp.json`](.mcp.json)
-(serveur `abelr`, `http://127.0.0.1:5000/mcp`). Sert à piloter Lr live pendant le dev sans
-écrire de script. Requiert `python -m app.main` lancé ; tools dépendants du bridge timeout
-proprement si le plugin Lr n'est pas connecté (pas de crash).
+**Second channel — MCP (`app/mcp/server.py` + `tools.py`, mounted on `/mcp` in `app/server/api.py`)**:
+exposes the `job_queue` above as 15 MCP tools for Claude Code itself (introspection,
+reading, writing, metadata/collections/presets), registered in [`.mcp.json`](.mcp.json)
+(server `abelr`, `http://127.0.0.1:5000/mcp`). Used to drive live Lr during dev without
+writing a script. Requires `python -m app.main` running; tools that depend on the bridge time
+out cleanly if the Lr plugin isn't connected (no crash).
 
 ---
 
-## Workflow de développement
+## Development workflow
 
-**Plugin Lua :** éditer dans `ABELr.lrplugin/` → Lr : *Fichier > Gestionnaire des modules
-externes* > Recharger → tester via *Bibliothèque > Modules externes* → logs `Utils.logf` dans
-*Aide > Console Lua*.
+**Lua plugin:** edit in `ABELr.lrplugin/` → Lr: *File > Plug-in Manager* > Reload → test via
+*Library > Plug-in Extras* → logs via `Utils.logf` in *Help > Lua Console*.
 
-**App Python :** toutes les commandes se lancent depuis `ABELr.lrplugin/` (le plugin est la
-racine du package Python depuis la refonte auto-suffisante — `app/` n'est plus à la racine du
-repo). `python -m app.main` (ou `launch.ps1`, qui chaîne `bootstrap.ps1` tout seul si `app/.venv`
-est absent — 1er lancement). Venv attendu en `app/.venv` (relatif à `ABELr.lrplugin/`).
-Endpoints : `curl http://127.0.0.1:5000/health`. Mock sans Lr : `python -m app.tools.mock_plugin`.
-Piloter Lr live sans écrire de script : tools MCP `abelr` (cf. § Communication) — app
-lancée requise.
+**Python App:** all commands are run from `ABELr.lrplugin/` (the plugin is the root of the
+Python package since the self-sufficient rework — `app/` is no longer at the repo root).
+`python -m app.main` (or `launch.ps1`, which chains `bootstrap.ps1` automatically if `app/.venv`
+is missing — first launch). Venv expected at `app/.venv` (relative to `ABELr.lrplugin/`).
+Endpoints: `curl http://127.0.0.1:5000/health`. Mock without Lr: `python -m app.tools.mock_plugin`.
+Drive live Lr without writing a script: `abelr` MCP tools (see § Communication) — the app
+must be running.
 
-**Tests unitaires (fonctions pures, sans GPU ni RAW) — depuis `ABELr.lrplugin/` :**
+**Unit tests (pure functions, no GPU or RAW) — from `ABELr.lrplugin/`:**
 ```
-python -m pytest app/tests -q            # tout
-python -m pytest app/tests -q -m "not gpu"   # exclut la parité GPU (skippée si CUDA absent)
+python -m pytest app/tests -q            # all
+python -m pytest app/tests -q -m "not gpu"   # excludes GPU parity (skipped if CUDA is absent)
 ```
 
-**Chemin le plus rapide pour valider un algo** : appeler `core/` directement sur des `.ARW` réels
+**Fastest path to validate an algorithm**: call `core/` directly on real `.ARW` files
 (`raw.load_linear`, `analysis.gray_world_wb`, `gpu_raw.analyze_raw_gpu`, `seed_match.k_nearest`)
-sans passer par le serveur ni le GUI — cf. `tools/`.
+without going through the server or the GUI — see `tools/`.
 
-**Installer sur une autre machine :** copier uniquement le dossier `ABELr.lrplugin/`
-(pas besoin du reste du repo) → l'installer comme module externe Lr → menu *Démarrer/connecter
-l'application* déclenche `bootstrap.ps1` au 1er lancement (Python 3.11+ doit être sur le PATH,
-connexion internet requise le temps du téléchargement — torch CUDA ~2,5 Go si GPU NVIDIA détecté
-via `nvidia-smi`, sinon build CPU ~250 Mo). `exiftool` reste à part (binaire externe, PATH système
-ou `ABELr.lrplugin/bin/exiftool.exe` si bundlé manuellement — absence non bloquante).
+**Installing on another machine:** copy only the `ABELr.lrplugin/` folder
+(no need for the rest of the repo) → install it as an Lr plug-in → the *Start/connect
+the application* menu triggers `bootstrap.ps1` on first launch (Python 3.11+ must be on the
+PATH, internet connection required for the duration of the download — torch CUDA ~2.5 GB if
+an NVIDIA GPU is detected via `nvidia-smi`, otherwise CPU build ~250 MB). `exiftool` stays
+separate (external binary, system PATH or `ABELr.lrplugin/bin/exiftool.exe` if bundled
+manually — its absence is not blocking).
 
 ---
 
-## Conventions de nommage
+## Naming conventions
 
-| Contexte | Convention |
+| Context | Convention |
 |---|---|
-| Fichiers Lua | `PascalCase.lua` · fonctions/locales `camelCase` · constantes `UPPER_SNAKE_CASE` |
-| Fichiers Python | `snake_case.py` · classes `PascalCase` · fonctions/vars `snake_case` |
-| Clés JSON échangées | `snake_case` |
-| Noms paramètres SDK Lr dans JSON | `PascalCase` (identique au SDK) |
+| Lua files | `PascalCase.lua` · functions/locals `camelCase` · constants `UPPER_SNAKE_CASE` |
+| Python files | `snake_case.py` · classes `PascalCase` · functions/vars `snake_case` |
+| Exchanged JSON keys | `snake_case` |
+| Lr SDK parameter names in JSON | `PascalCase` (identical to the SDK) |

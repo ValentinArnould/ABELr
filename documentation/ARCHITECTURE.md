@@ -1,277 +1,279 @@
 # Architecture — ABELr
 
-Comment le système fonctionne. Pour les **règles de travail** de l'agent → [`../CLAUDE.md`](../CLAUDE.md).
-Pour la **roadmap / statut** → [`../PLAN.md`](../PLAN.md). Pour l'**API Lua SDK** →
+How the system works. For the agent's **working rules** → [`../CLAUDE.md`](../CLAUDE.md).
+For the **roadmap / status** → [`../PLAN.md`](../PLAN.md). For the **Lua SDK API** →
 [`lr15_sdk_api_reference.md`](lr15_sdk_api_reference.md).
 
-> État vérifié par revue de code (2026-07-05). La colonne « statut » des modules reflète
-> ce que le code fait réellement, pas l'intention.
+> State verified by code review (2026-07-05). The module "status" column reflects
+> what the code actually does, not the intent.
 
 ---
 
-## 1. Vue d'ensemble
+## 1. Overview
 
-Plugin Lightroom Classic (Lua + SDK Lr) + application Python externe. Le plugin est un
-**pont** vers Lightroom ; l'App fait tout le calcul (décodage RAW, analyse, planification
-des ajustements) et pilote le plugin via une queue de jobs.
+Lightroom Classic plugin (Lua + Lr SDK) + external Python application. The plugin is a
+**bridge** to Lightroom; the App does all the computation (RAW decoding, analysis, adjustment
+planning) and drives the plugin via a job queue.
 
-Fonction cœur : **balance des blancs / exposition / HSL / étalonnage caméra batch par photo**,
-calibrée sur des **seeds** (photos repères retouchées à la main, marquées explicitement) via
-matching k-NN sur l'analyse RAW de la zone nette. L'étalonnage (ShadowTint, Hue/Saturation
-R/G/B) n'a pas de cible mesurable depuis un rendu — il est **toujours transplanté** depuis les
-seeds les plus proches (comme Temperature/Tint), dans les deux modes de référence.
+Core function: **white balance / exposure / HSL / camera calibration batch per photo**,
+calibrated on **seeds** (reference photos manually retouched, explicitly marked) via
+k-NN matching on the sharp-area RAW analysis. Calibration (ShadowTint, Hue/Saturation
+R/G/B) has no measurable target from a render — it is **always transplanted** from the
+nearest seeds (like Temperature/Tint), in both reference modes.
 
 ```
-Utilisateur ──GUI──▶ App Python (serveur FastAPI + GUI, même process)
-                         │  crée un job dans job_queue
+User ──GUI──▶ Python App (FastAPI server + GUI, same process)
+                         │  creates a job in job_queue
                          ▼
-                    [ job_queue ]  ◀── polling HTTP 300 ms ── Plugin Lua (client)
-                         │                                         │ exécute via SDK Lr
+                    [ job_queue ]  ◀── HTTP polling 300 ms ── Lua Plugin (client)
+                         │                                         │ executes via Lr SDK
                          │  ◀────────── POST /jobs/{id}/result ─────┘
                          ▼
-                    App décode RAW (GPU), mesure, planifie ──▶ job apply_adjustments ──▶ plugin applique
+                    App decodes RAW (GPU), measures, plans ──▶ apply_adjustments job ──▶ plugin applies
 ```
 
 ---
 
-## 2. Communication plugin ↔ App
+## 2. Plugin ↔ App communication
 
-**Invariant : le plugin est TOUJOURS client HTTP, l'App TOUJOURS serveur** (`127.0.0.1:5000`).
-Le plugin ne peut pas exposer de serveur simplement → il *poll*. L'App ne pousse jamais : elle
-dépose un job, le plugin le récupère au prochain poll.
+**Invariant: the plugin is ALWAYS the HTTP client, the App ALWAYS the server** (`127.0.0.1:5000`).
+The plugin cannot easily expose a server → it *polls*. The App never pushes: it
+deposits a job, the plugin picks it up on the next poll.
 
-GUI et serveur FastAPI vivent dans le **même process** Python : serveur dans un thread daemon,
-GUI sur le thread principal Qt. Ils partagent l'instance `job_queue` en mémoire (`Lock` +
-`threading.Event`), pas de HTTP entre eux.
+GUI and FastAPI server live in the **same** Python process: server in a daemon thread,
+GUI on the main Qt thread. They share the in-memory `job_queue` instance (`Lock` +
+`threading.Event`), no HTTP between them.
 
-### Endpoints FastAPI (`app/server/api.py`)
+### FastAPI endpoints (`app/server/api.py`)
 
-| Endpoint | Méthode | Rôle |
+| Endpoint | Method | Role |
 |---|---|---|
-| `/health` | GET | Healthcheck (plugin vérifie au démarrage) |
-| `/status` | GET | État App (jobs pending, pont connecté) |
-| `/bridge` | GET | Battement de cœur du pont (secondes depuis dernier poll) |
-| `/jobs/pending` | GET | Plugin récupère le prochain job (204 si vide) — marque le heartbeat |
-| `/jobs/{id}/result` | POST | Plugin soumet le résultat |
-| `/shutdown` | POST | Arrêt propre du process (utilisé par « Relancer ») |
+| `/health` | GET | Healthcheck (plugin checks at startup) |
+| `/status` | GET | App state (pending jobs, bridge connected) |
+| `/bridge` | GET | Bridge heartbeat (seconds since last poll) |
+| `/jobs/pending` | GET | Plugin retrieves the next job (204 if empty) — marks the heartbeat |
+| `/jobs/{id}/result` | POST | Plugin submits the result |
+| `/shutdown` | POST | Clean process shutdown (used by "Relaunch") |
 
-### Queue de jobs (`app/server/job_queue.py`)
+### Job queue (`app/server/job_queue.py`)
 
-Singleton `job_queue`, FIFO thread-safe. Cycle : `submit()` → `wait_result(timeout)` côté GUI ;
-`GET /jobs/pending` puis `POST result` côté plugin → `done_event.set()` débloque le GUI.
-Éviction des orphelins (TTL), garde de saturation (max pending), heartbeat plugin
+Singleton `job_queue`, thread-safe FIFO. Cycle: `submit()` → `wait_result(timeout)` on the GUI
+side; `GET /jobs/pending` then `POST result` on the plugin side → `done_event.set()` unblocks
+the GUI. Orphan eviction (TTL), saturation guard (max pending), plugin heartbeat
 (`mark_poll()` / `bridge_connected(threshold=5 s)`).
 
-### Types de jobs (App → plugin)
+### Job types (App → plugin)
 
 `test`, `get_selected_photos`, `get_catalog_photos`, `get_thumbnails`, `render_probe`,
-`apply_adjustments` — dispatchés dans [`PollingLoop.lua`](../ABELr.lrplugin/PollingLoop.lua)
-(≈ lignes 47-121).
+`apply_adjustments` — dispatched in [`PollingLoop.lua`](../ABELr.lrplugin/PollingLoop.lua)
+(≈ lines 47-121).
 
-### Côté plugin (`ABELr.lrplugin/`, 14 fichiers Lua)
+### Plugin side (`ABELr.lrplugin/`, 14 Lua files)
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `Info.lua` | Manifeste (`LrToolkitIdentifier = com.abelr.plugin`, SDK 12, menus) |
-| `MenuConnect` / `MenuRelaunch` / `ShowMessage` | Entrées de menu |
-| `PluginInfoProvider.lua` | Section Gestionnaire de modules (boutons connect/relaunch/status/test) |
+| `Info.lua` | Manifest (`LrToolkitIdentifier = com.abelr.plugin`, SDK 12, menus) |
+| `MenuConnect` / `MenuRelaunch` / `ShowMessage` | Menu entries |
+| `PluginInfoProvider.lua` | Plug-in Manager section (connect/relaunch/status/test buttons) |
 | `Actions.lua` | connect / relaunch / checkStatus |
-| `AppLauncher.lua` | Start/stop/relaunch du process Python via `launch_app.ps1` |
-| `PollingLoop.lua` | Boucle 300 ms, dispatch jobs, heartbeat `_G.ABELR_BRIDGE_HEARTBEAT` (timeout 5 s) |
-| `HttpClient.lua` | Wrappers GET/POST JSON (LrHttp) |
-| `PhotoData.lua` | Extraction path/EXIF/develop settings/catalog_path (**71 `DEVELOP_KEYS`**) |
-| `Adjustments.lua` | `applyDevelopSettings` batch dans `withWriteAccessDo` |
-| `Thumbnails.lua` | `requestJpegThumbnail` (`fetch`) + cycle apply/render/restore (`fetchProbe` → `render_probe`) |
-| `Json.lua` | JSON encodeur/décodeur embarqué |
-| `Utils.lua` | Log, chemins projet |
+| `AppLauncher.lua` | Start/stop/relaunch of the Python process via `launch_app.ps1` |
+| `PollingLoop.lua` | 300 ms loop, job dispatch, heartbeat `_G.ABELR_BRIDGE_HEARTBEAT` (5 s timeout) |
+| `HttpClient.lua` | GET/POST JSON wrappers (LrHttp) |
+| `PhotoData.lua` | Extracts path/EXIF/develop settings/catalog_path (**71 `DEVELOP_KEYS`**) |
+| `Adjustments.lua` | `applyDevelopSettings` batch inside `withWriteAccessDo` |
+| `Thumbnails.lua` | `requestJpegThumbnail` (`fetch`) + apply/render/restore cycle (`fetchProbe` → `render_probe`) |
+| `Json.lua` | Embedded JSON encoder/decoder |
+| `Utils.lua` | Logging, project paths |
 
 ---
 
-## 3. Carte des modules Python — statut réel
+## 3. Python module map — actual status
 
-Racine `app/` : `main.py` (FastAPI thread daemon + GUI Qt), `requirements.txt`, `README.md`.
-Venv attendu en `app/.venv` (cf. `launch_app.ps1`).
+Root `app/`: `main.py` (FastAPI daemon thread + Qt GUI), `requirements.txt`, `README.md`.
+Venv expected at `app/.venv` (cf. `launch_app.ps1`).
 
-### `core/` — pipeline image & calcul
+### `core/` — image & compute pipeline
 
-**Live (chemin d'exécution réel) :**
+**Live (actual execution path):**
 
-| Module | Rôle | Entrées principales |
+| Module | Role | Main entry points |
 |---|---|---|
-| `gpu.py` | Contexte CUDA strict, budget VRAM, pool de streams | `require_cuda()`, `GpuUnavailable` |
-| `gpu_raw.py` | Bayer → demosaic + WB + matrice → ProPhoto + stats (GPU) | `analyze_raw_gpu()` |
-| `gpu_jpeg.py` | Décodage JPEG GPU (nvJPEG) + extraction flux | `decode_blobs()`, `extract_jpeg_stream()` |
-| `gpu_schedule.py` | Scheduler VRAM-aware : unpack unifié (1 ouverture rawpy), double-buffer CPU/GPU, vagues par pipeline (revue Fable 5 G7) | `process_combined_batch()` (+ wrappers `process_raw_batch()`/`process_embedded_batch()`), `analyze_render_blobs()` |
-| `analysis.py` | Métriques exposition (Y) + gray-world en linéaire | `ExposureStats`, `ev100()` |
-| `render_metrics.py` | Tone L* / neutral a*b* / bandes HSL en CIELAB (numpy, source de vérité) | `tone_stats()`, `neutral_stats()`, `band_stats()` |
-| `render_metrics_gpu.py` | Portage torch CUDA de `render_metrics` (constantes importées de la version numpy) | `analyze_rendered_gpu_dual()` |
-| `sharpness.py` | Masque « zone nette » (Laplacien, top 25 %) — restreint les histogrammes au sujet | CPU+GPU |
-| `seed_match.py` | k-NN sur seeds → cible Temp/Tint/tone/bandes/étalonnage (pondération 1/distance) | `build_seed_pool()`, `target_from_seeds()` |
-| `autocorrect.py` | Orchestration expo+WB+HSL+calib par photo (modes seeds/embedded) | `plan()` → `PhotoAdjustment[]` |
-| `exposure.py` | ΔEV depuis L* courant → L* cible | (via `autocorrect`) |
-| `hsl.py` | Deltas HSL par bande vs cible (saturation = réduction seule) | (via `autocorrect`) |
-| `response.py` | Modèle ∂rendu/∂curseur calibré (cache disque) | `load()` |
-| `wb_model.py` | Raffinement Temp/Tint post-k-NN (**live**) | `refine_temp_tint()` (appelé `autocorrect.py:554`) |
-| `cache.py` | Cache SQLite (5 tables) | voir §5 |
-| `embedded_jpeg.py` | JPEG boîtier (cible embedded) + WB as-shot ; importe `raw` | `RawReference` |
-| `raw.py` | Décodage ARW via rawpy (**live** via `embedded_jpeg`, + tools) | `load_linear()`, `load_rgb()` |
-| `color.py` | Espaces couleur : ProPhoto linéaire, Y, → sRGB | constantes de conversion |
-| `catalog.py` | Localise `.lrcat` + bundles `.lrdata`, SQLite lecture seule | résolution catalogue |
-| `previews.py` | Résout `id_global` → fichiers preview | `PreviewIndex` |
-| `measure.py` | Sélection du canal de rendu (thumbnail frais / preview passif) | résolution chemin rendu |
-| `pipeline.py` | Dataclasses `RenderAnalysis` / `RenderAnalysisDual`, helpers (band_map) | — |
-| `exif_profile.py` | Profil style créatif Sony via binaire externe `exiftool` (absence → None non bloquant) | `read_capture_profiles()` |
+| `gpu.py` | Strict CUDA context, VRAM budget, stream pool | `require_cuda()`, `GpuUnavailable` |
+| `gpu_raw.py` | Bayer → demosaic + WB + matrix → ProPhoto + stats (GPU) | `analyze_raw_gpu()` |
+| `gpu_jpeg.py` | GPU JPEG decoding (nvJPEG) + stream extraction | `decode_blobs()`, `extract_jpeg_stream()` |
+| `gpu_schedule.py` | VRAM-aware scheduler: unified unpack (1 rawpy open), CPU/GPU double-buffer, per-pipeline waves (Fable 5 review G7) | `process_combined_batch()` (+ wrappers `process_raw_batch()`/`process_embedded_batch()`), `analyze_render_blobs()` |
+| `analysis.py` | Exposure metrics (Y) + gray-world in linear space | `ExposureStats`, `ev100()` |
+| `render_metrics.py` | Tone L* / neutral a*b* / HSL bands in CIELAB (numpy, source of truth) | `tone_stats()`, `neutral_stats()`, `band_stats()` |
+| `render_metrics_gpu.py` | torch CUDA port of `render_metrics` (constants imported from the numpy version) | `analyze_rendered_gpu_dual()` |
+| `sharpness.py` | "Sharp area" mask (Laplacian, top 25%) — restricts histograms to the subject | CPU+GPU |
+| `seed_match.py` | k-NN on seeds → Temp/Tint/tone/bands/calibration target (1/distance weighting) | `build_seed_pool()`, `target_from_seeds()` |
+| `autocorrect.py` | Orchestrates exposure+WB+HSL+calibration per photo (seeds/embedded modes) | `plan()` → `PhotoAdjustment[]` |
+| `exposure.py` | ΔEV from current L* → target L* | (via `autocorrect`) |
+| `hsl.py` | Per-band HSL deltas vs target (saturation = reduction only) | (via `autocorrect`) |
+| `response.py` | Calibrated ∂render/∂slider model (disk cache) | `load()` |
+| `wb_model.py` | Post-k-NN Temp/Tint refinement (**live**) | `refine_temp_tint()` (called from `autocorrect.py:554`) |
+| `cache.py` | SQLite cache (5 tables) | see §5 |
+| `embedded_jpeg.py` | In-camera JPEG (embedded target) + as-shot WB; imports `raw` | `RawReference` |
+| `raw.py` | ARW decoding via rawpy (**live** via `embedded_jpeg`, + tools) | `load_linear()`, `load_rgb()` |
+| `color.py` | Color spaces: linear ProPhoto, Y, → sRGB | conversion constants |
+| `catalog.py` | Locates `.lrcat` + `.lrdata` bundles, read-only SQLite | catalog resolution |
+| `previews.py` | Resolves `id_global` → preview files | `PreviewIndex` |
+| `measure.py` | Render channel selection (fresh thumbnail / passive preview) | render path resolution |
+| `pipeline.py` | `RenderAnalysis` / `RenderAnalysisDual` dataclasses, helpers (band_map) | — |
+| `exif_profile.py` | Sony creative-style profile via external `exiftool` binary (absence → None, non-blocking) | `read_capture_profiles()` |
 
-**Tool-only (mort côté app, gardé pour `tools/`) :**
-- `image_source.py` (`LoadedImage`) — importé seulement par `tools/{sharp_raw_predict,series_audit,analyze_ground_truth}.py`.
-- `regime.py` — détection régime physique/artistique ; importé par `tools/validate_wb_seeds.py`. Le
-  chemin live k-NN n'en a pas besoin. (`regime.py` importe `wb_model`.)
+**Tool-only (dead on the app side, kept for `tools/`):**
+- `image_source.py` (`LoadedImage`) — imported only by `tools/{sharp_raw_predict,series_audit,analyze_ground_truth}.py`.
+- `regime.py` — physical/artistic regime detection; imported by `tools/validate_wb_seeds.py`. The
+  live k-NN path doesn't need it. (`regime.py` imports `wb_model`.)
 
-**Supprimés / inexistants :** `core/seeds.py`, `core/adjustments.py` (supprimés — `is_seed` vit
-maintenant en DB via `cache`, matching via `seed_match`). `core/prediction.py` n'a jamais existé.
+**Removed / never existed:** `core/seeds.py`, `core/adjustments.py` (removed — `is_seed` now
+lives in the DB via `cache`, matching via `seed_match`). `core/prediction.py` never existed.
 
 ### `gui/`
 
-| Module | Statut | Rôle |
+| Module | Status | Role |
 |---|---|---|
-| `main_window.py` | live | Boutons seeds / analyser / apply par axe / calibrer neutre, indicateur pont |
-| `job_worker.py` | live | QThread générique : soumet un job, attend le résultat plugin |
-| `autocorrect_worker.py` | live | QThread : RAW+JPEG boîtier+aperçu (zone nette) → cache → `autocorrect.plan` ; mode `analyze_only` |
-| `neutral_preview_worker.py` | live | QThread : ancres neutres (`render_probe`) → cache `NeutralPreviewJPEG` |
-| `photo_panel.py` / `analysis_panel.py` | **STUB** | Vides, réservés (aperçus / histogrammes) |
+| `main_window.py` | live | Seeds / analyze / apply-per-axis / calibrate-neutral buttons, bridge indicator |
+| `job_worker.py` | live | Generic QThread: submits a job, waits for the plugin result |
+| `autocorrect_worker.py` | live | QThread: RAW+in-camera JPEG+preview (sharp area) → cache → `autocorrect.plan`; `analyze_only` mode |
+| `neutral_preview_worker.py` | live | QThread: neutral anchors (`render_probe`) → `NeutralPreviewJPEG` cache |
+| `photo_panel.py` / `analysis_panel.py` | **STUB** | Empty, reserved (previews / histograms) |
 
-> `analysis_worker.py` supprimé (PLAN étape 1, revue Fable 5) — garde de
-> non-réapparition : `app/tests/test_no_dead_modules.py`.
+> `analysis_worker.py` removed (PLAN step 1, Fable 5 review) — non-reappearance
+> guard: `app/tests/test_no_dead_modules.py`.
 
 ### `server/`
-`api.py` (routes), `job_queue.py` (queue + heartbeat), `models.py` (Pydantic : `Job`, `JobResult`,
+`api.py` (routes), `job_queue.py` (queue + heartbeat), `models.py` (Pydantic: `Job`, `JobResult`,
 `PhotoResult`, `ThumbnailResult`, `ExifData`, `PhotoAdjustment`, enums `JobType` / `JobStatus`).
 
 ---
 
-## 4. Pipeline image — source & espace d'analyse
+## 4. Image pipeline — source & analysis space
 
-**Source = RAW d'origine via rawpy** (décision validée par calibration réelle, cf.
-`tools/calibrate_sp_vs_raw.py`). rawpy fait un développement complet et cohérent (WB, matrice,
-démosaïquage) — seule source donnant des métriques comparables entre photos.
+**Source = original RAW via rawpy** (decision validated by real calibration, cf.
+`tools/calibrate_sp_vs_raw.py`). rawpy performs a complete, consistent development (WB, matrix,
+demosaic) — the only source giving metrics comparable across photos.
 
-| Décision | Valeur | Raison |
+| Decision | Value | Reason |
 |---|---|---|
-| Format | float32 scène-linéaire 0-1 | Pas de gamma (WB/clipping justes), pas d'écrêtage 8-bit |
-| Primaires | ProPhoto (gamut large) | sRGB écrête les couleurs saturées → biais jusqu'à ×2 sur les ratios gray-world |
-| Luminance | Y de XYZ (ligne ProPhoto→XYZ) | Exacte, indépendante du gamut |
-| WB | `use_camera_wb=True` | Sans elle les ratios mesurent le capteur, pas la scène |
-| Affichage GUI | uint8 sRGB à la demande | Jamais pour l'analyse |
+| Format | float32 scene-linear 0-1 | No gamma (WB/clipping stay accurate), no 8-bit clipping |
+| Primaries | ProPhoto (wide gamut) | sRGB clips saturated colors → bias up to ×2 on gray-world ratios |
+| Luminance | Y from XYZ (ProPhoto→XYZ row) | Exact, gamut-independent |
+| WB | `use_camera_wb=True` | Without it the ratios measure the sensor, not the scene |
+| GUI display | uint8 sRGB on demand | Never for analysis |
 
-**Pourquoi pas la Smart Preview** : son DNG est en `PhotometricInterpretation = 34892` (LinearRaw,
-avant WB et matrice) ; LibRaw/rawpy ne décode pas ses tuiles JPEG XL ; la calibration donne un
-Δexposition incohérent (σ ≈ 0.7-1.3 stop). Les SP sont aussi souvent absentes. `previews.py` /
-`catalog.py` restent utiles pour localiser les bundles et décoder l'**aperçu rendu** (vérifier un
-résultat), pas pour mesurer.
+**Why not the Smart Preview**: its DNG is in `PhotometricInterpretation = 34892` (LinearRaw,
+before WB and matrix); LibRaw/rawpy doesn't decode its JPEG XL tiles; calibration gives an
+inconsistent Δexposure (σ ≈ 0.7-1.3 stop). SPs are also often missing. `previews.py` /
+`catalog.py` remain useful for locating bundles and decoding the **rendered preview** (checking a
+result), not for measuring.
 
 ### GPU-strict
 
-Décision utilisateur : le décodage pixel est sur **GPU** (torch CUDA + nvJPEG), plus d'appel
-LibRaw `postprocess`.
+User decision: pixel decoding runs on **GPU** (torch CUDA + nvJPEG), no more LibRaw
+`postprocess` call.
 
-| Étape | Où |
+| Step | Where |
 |---|---|
-| Décompression/unpack ARW → plan bayer 16-bit | **CPU irréductible** (pool borné aux cœurs physiques) |
-| Black-level, WB CFA, demosaic, matrice → ProPhoto, stats | **GPU** (`gpu_raw`) |
-| Décodage JPEG (aperçu rendu + JPEG boîtier) | **GPU** nvJPEG (`gpu_jpeg`) |
-| tone / neutral / bandes (CIELAB) | **GPU** (`render_metrics_gpu`, validé exact vs numpy ≤ 8 M px ; au-delà, quantiles sous-échantillonnés — biais négligeable, cf. REVIEW_FABLE5 C-04) |
+| ARW decompression/unpack → 16-bit bayer plane | **Irreducibly CPU** (pool bounded to physical cores) |
+| Black-level, CFA WB, demosaic, matrix → ProPhoto, stats | **GPU** (`gpu_raw`) |
+| JPEG decoding (rendered preview + in-camera JPEG) | **GPU** nvJPEG (`gpu_jpeg`) |
+| tone / neutral / bands (CIELAB) | **GPU** (`render_metrics_gpu`, validated exact vs numpy ≤ 8 M px; beyond that, subsampled quantiles — negligible bias, cf. REVIEW_FABLE5 C-04) |
 
-Aucun repli CPU de calcul : `gpu.require_cuda()` lève `GpuUnavailable` si CUDA absent, le worker
-échoue avec un message clair. VRAM gérée par `gpu_schedule` (vagues dimensionnées au budget).
-Parité vérifiée par `tools/validate_gpu_vs_libraw` (exposition Y corr 1.000 ; gray-world corr
-0.97-0.9995, petit biais constant absorbé par le calibrage seeds).
+No CPU compute fallback: `gpu.require_cuda()` raises `GpuUnavailable` if CUDA is absent, the
+worker fails with a clear message. VRAM managed by `gpu_schedule` (waves sized to the budget).
+Parity verified by `tools/validate_gpu_vs_libraw` (exposure Y corr 1.000; gray-world corr
+0.97-0.9995, small constant bias absorbed by seed calibration).
 
 ---
 
-## 5. Cache SQLite (`core/cache.py`)
+## 5. SQLite cache (`core/cache.py`)
 
-`ABELr_cache.db` dans le dossier du catalogue actif. `SCHEMA_VERSION = 4`,
-`ANALYSIS_VERSION = "v5-style-keys-g2wb"` salée dans les hash (bump = rebuild complet, pas de
-migration ligne à ligne ; v5 = revue Fable 5 G1 : clés style complétées + garde cam_mul[G2]). Les workers consultent le cache d'abord → 2ᵉ passage = zéro décode.
-C'est le vrai gain sur les séries 500-1000, en plus du GPU.
+`ABELr_cache.db` in the active catalog's folder. `SCHEMA_VERSION = 4`,
+`ANALYSIS_VERSION = "v5-style-keys-g2wb"` salted into the hashes (bump = full rebuild, no
+row-by-row migration; v5 = Fable 5 review G1: style keys completed + cam_mul[G2] guard). Workers
+consult the cache first → 2nd pass = zero decoding.
+That's the real gain on 500-1000 series, on top of the GPU.
 
-| Table | Clé hash | Contenu |
+| Table | Hash key | Content |
 |---|---|---|
-| `LightroomPicture` | `hash_develop` | path, EXIF, `current_develop`, flag `is_seed`, profils DCP/capture |
-| `SourceRAW` | `hash_raw` (taille:mtime:ANALYSIS_VERSION) | WB as-shot, expo global+sharp, gray-world global+sharp, tone/hsl zone nette, ev100 |
-| `InCameraJPEG` | `hash_jpeg` (= signature RAW taille:mtime+version — le JPEG vit dans le .ARW) | tone/neutral/hsl global+sharp, deltas RAW↔JPEG précalculés |
-| `PreviewJPEG` | `hash_preview` (= signature fichier source + version) | mesures du rendu courant (état-dépendant) |
-| `NeutralPreviewJPEG` | `hash_style` | ancre neutre + `wb_asshot_temp/tint` |
+| `LightroomPicture` | `hash_develop` | path, EXIF, `current_develop`, `is_seed` flag, DCP/capture profiles |
+| `SourceRAW` | `hash_raw` (size:mtime:ANALYSIS_VERSION) | as-shot WB, global+sharp exposure, global+sharp gray-world, sharp-area tone/hsl, ev100 |
+| `InCameraJPEG` | `hash_jpeg` (= RAW signature size:mtime+version — the JPEG lives inside the .ARW) | global+sharp tone/neutral/hsl, precomputed RAW↔JPEG deltas |
+| `PreviewJPEG` | `hash_preview` (= source file signature + version) | measurements of the current render (state-dependent) |
+| `NeutralPreviewJPEG` | `hash_style` | neutral anchor + `wb_asshot_temp/tint` |
 
-`is_seed` : marqué/démarqué en DB (pas de décode pixel). k-NN `seed_match` lit le pool de seeds.
+`is_seed`: marked/unmarked in the DB (no pixel decode). k-NN `seed_match` reads the seed pool.
 
-### Mode embedded ancré-neutre
+### Neutral-anchored embedded mode
 
-`neutral_preview_worker` fait rendre chaque photo par le plugin (job `render_probe` : WB As Shot +
-`Exposure2012=0` + 24 curseurs HSL à 0, style DCP/tons/crop intact), mesure ce rendu neutre (GPU),
-et le cache sous `hash_style` (stable si Temp/Tint/HSL bougent, change si tons/clarté/étalonnage
-changent — le probe ne neutralise pas l'étalonnage). Le
-delta `JPEG boîtier − rendu neutre` donne des réglages **absolus** (idempotents), sans dépendre du
-rendu courant. Garde anti-probe-périmé : `neutral_preview_worker._anchor_suspect` refuse de cacher
-une ancre suspecte.
+`neutral_preview_worker` has the plugin render each photo (job `render_probe`: WB As Shot +
+`Exposure2012=0` + 24 HSL sliders at 0, DCP/tone/crop style intact), measures this neutral render
+(GPU), and caches it under `hash_style` (stable if Temp/Tint/HSL move, changes if
+tone/clarity/calibration change — the probe doesn't neutralize calibration). The
+delta `in-camera JPEG − neutral render` gives **absolute** settings (idempotent), independent of
+the current render. Stale-probe guard: `neutral_preview_worker._anchor_suspect` refuses to cache
+a suspect anchor.
 
 ---
 
-## 6. Résolution uuid → preview (vérification / inspection)
+## 6. uuid → preview resolution (verification / inspection)
 
-Le `uuid` qui nomme les fichiers de preview n'est **pas** celui envoyé par le plugin
-(`getRawMetadata('uuid')` = `id_global`). Deux sauts SQLite (`previews.PreviewIndex`) :
+The `uuid` that names the preview files is **not** the one sent by the plugin
+(`getRawMetadata('uuid')` = `id_global`). Two SQLite hops (`previews.PreviewIndex`):
 
 ```
 id_global  ──(.lrcat: Adobe_images)──▶  id_local
 id_local   ──(previews.db: ImageCacheEntry)──▶  uuid de cache + digest
 ```
 
-Le `uuid` de cache nomme les fichiers (`{uuid}-{digest}_{taille}`) et le DNG Smart Preview
-(`{uuid}.dng`), sous `{uuid[0]}/{uuid[:4]}`. `.lrcat` et `previews.db` ouverts en lecture seule
-immuable (`mode=ro&immutable=1`) : cohabite avec Lightroom ouvert.
+The cache `uuid` names the files (`{uuid}-{digest}_{size}`) and the Smart Preview DNG
+(`{uuid}.dng`), under `{uuid[0]}/{uuid[:4]}`. `.lrcat` and `previews.db` opened read-only
+immutable (`mode=ro&immutable=1`): coexists with Lightroom open.
 
 ---
 
-## 7. Modèle seeds → correction (flux d'un Apply)
+## 7. Seeds → correction model (Apply flow)
 
-1. **Marquer + analyser références** : `AutoCorrectWorker(analyze_only=True)` — RAW (demosaic GPU,
-   zone nette) + JPEG boîtier + aperçu rendu → peuple le cache, marque `is_seed`, n'applique rien.
-2. **Apply `<axe>`** : `AutoCorrectWorker(axes={axe}, force_fresh_preview=True)` — mesure (aperçu
-   toujours redécodé, jamais servi du cache pendant un Apply) → cible = JPEG boîtier (mode embedded)
-   ou k-NN sur les seeds les plus proches (`seed_match`, mode seeds) → `autocorrect.plan` → job
-   `apply_adjustments`. Le plugin l'applique via `photo:applyDevelopSettings()`.
-3. `wb_model.refine_temp_tint` raffine Temp/Tint après le k-NN (mode seeds).
+1. **Mark + analyze references**: `AutoCorrectWorker(analyze_only=True)` — RAW (GPU demosaic,
+   sharp area) + in-camera JPEG + rendered preview → populates the cache, marks `is_seed`, applies
+   nothing.
+2. **Apply `<axis>`**: `AutoCorrectWorker(axes={axis}, force_fresh_preview=True)` — measures
+   (preview always re-decoded, never served from cache during an Apply) → target = in-camera JPEG
+   (embedded mode) or k-NN on the nearest seeds (`seed_match`, seeds mode) → `autocorrect.plan` →
+   `apply_adjustments` job. The plugin applies it via `photo:applyDevelopSettings()`.
+3. `wb_model.refine_temp_tint` refines Temp/Tint after the k-NN (seeds mode).
 
-Les cibles sont **absolues** (L*/Temperature visées, pas un delta ajouté) → convergence : un 2ᵉ
-Apply sur un aperçu à jour donne un delta ≈ 0.
+Targets are **absolute** (L*/Temperature aimed for, not an added delta) → convergence: a 2nd
+Apply on an up-to-date preview gives a delta ≈ 0.
 
 ---
 
-## 8. Limitations connues
+## 8. Known limitations
 
-- **Verrou `requestJpegThumbnail`** : `Thumbnails.fetch` suppose que le thumbnail reflète l'état
-  develop courant, pas un cache périmé. `force_fresh_preview=True` bypasse le cache SQLite de l'App,
-  mais si **Lightroom** n'a pas régénéré `Previews.lrdata` entre deux clics, la mesure reste
-  périmée. Repli prévu non câblé : canal `RenderChannel.EXPORT` (`Thumbnails.fetchProbeExport` +
-  job `render_probe_export`). À valider en conditions réelles (convergence 2ᵉ Aperçu ≈ 0). Cf.
-  PLAN.md étape 8.
-- Panneaux GUI (`photo_panel`, `analysis_panel`) au stade stub.
+- **`requestJpegThumbnail` lock**: `Thumbnails.fetch` assumes the thumbnail reflects the current
+  develop state, not a stale cache. `force_fresh_preview=True` bypasses the App's SQLite cache,
+  but if **Lightroom** hasn't regenerated `Previews.lrdata` between two clicks, the measurement
+  stays stale. Planned but unwired fallback: `RenderChannel.EXPORT` channel
+  (`Thumbnails.fetchProbeExport` + `render_probe_export` job). To validate under real conditions
+  (2nd-Preview convergence ≈ 0). Cf. PLAN.md step 8.
+- GUI panels (`photo_panel`, `analysis_panel`) at stub stage.
 
 ---
 
 ## Stack
 
-| Couche | Technologie |
+| Layer | Technology |
 |---|---|
-| Plugin Lr | Lua 5.1 + Adobe Lr Classic SDK 12+ |
-| Serveur | Python 3.11+ + FastAPI + uvicorn |
+| Lr plugin | Lua 5.1 + Adobe Lr Classic SDK 12+ |
+| Server | Python 3.11+ + FastAPI + uvicorn |
 | GUI | PySide6 (Qt6) |
 | Image / RAW | rawpy + numpy + opencv |
 | GPU | torch 2.6.0 + torchvision 0.21.0 (cu124) — nvJPEG |
 | Previews | tifffile + imagecodecs (libjxl) + SQLite |
-| Analyse | scipy + scikit-learn |
-| Profil boîtier | binaire externe `exiftool` (hors pip) |
+| Analysis | scipy + scikit-learn |
+| Camera profile | external `exiftool` binary (outside pip) |
 
-> Le décodage RAW (LibRaw/rawpy), la décompression JPEG XL et OpenCV sont déjà du C/C++ : pas de
-> gain Rust sur ces parties. Profiler (`py-spy`, `cProfile`) avant d'envisager PyO3.
+> RAW decoding (LibRaw/rawpy), JPEG XL decompression, and OpenCV are already C/C++: no
+> Rust gain on these parts. Profile (`py-spy`, `cProfile`) before considering PyO3.

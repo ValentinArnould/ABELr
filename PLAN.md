@@ -1,172 +1,175 @@
-# PLAN — Fiabiliser HSL & Calibration
+# PLAN — Hardening HSL & Calibration
 
-Roadmap exécutable **une étape à la fois**. Contexte technique : [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md).
-Règles de travail : [`CLAUDE.md`](CLAUDE.md). Historique nettoyage (étapes 1-7, backlogs perf/Fable5) :
+Executable roadmap **one step at a time**. Technical context: [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md).
+Working rules: [`CLAUDE.md`](CLAUDE.md). Cleanup history (steps 1-7, perf/Fable5 backlogs):
 [`OLD_PLAN.md`](OLD_PLAN.md).
 
-## Origine
+## Origin
 
-Audit 2026-07-19 des axes HSL (`core/hsl.py`) et Calibration caméra (`core/seed_match.py` +
-`autocorrect._calib_develop_dict`) : 2 failles sur HSL (garde RAW jamais câblée, gain de
-curseur jamais calibré — toujours nominal), 3 lacunes sur Calibration (non validée en Lr réel,
-pas de garde de cohérence k-NN, distance de matching scène-dépendante non tranchée). Détail
-complet dans la conversation du 2026-07-19 (à reporter dans `documentation/ARCHITECTURE.md`
-§ Limitations une fois corrigé).
+2026-07-19 audit of the HSL axes (`core/hsl.py`) and camera Calibration (`core/seed_match.py` +
+`autocorrect._calib_develop_dict`): 2 flaws on HSL (RAW guard never wired, slider gain
+never calibrated — always nominal), 3 gaps on Calibration (not validated in real Lr, no
+k-NN consistency guard, scene-dependent matching distance not settled). Full detail
+in the 2026-07-19 conversation (to be carried over into `documentation/ARCHITECTURE.md`
+§ Limitations once fixed).
 
-## Règles d'exécution (Sonnet 5)
+## Execution rules (Sonnet 5)
 
-1. Faire **une seule étape** à la fois, dans l'ordre.
-2. Pour chaque étape : **implémenter le test de non-régression AVANT/AVEC le changement**.
-3. Valider par `python -m pytest app/tests -q` (doit rester **vert**, y compris les tests existants).
-4. **Cocher `- [ ]` → `- [x]` uniquement après test vert.** Ne jamais cocher une étape non validée.
-5. Ne pas ajouter de repli CPU (GPU-strict). Ne pas toucher au comportement live sans test qui le couvre.
-6. Si une étape casse un test existant sans raison légitime : arrêter, ne pas cocher, signaler.
-7. Étapes marquées **⚠️ Lr requis** : non automatisables ici (pas de Lr dans cet environnement) —
-   implémenter + tester ce qui est testable sans Lr, documenter la partie manuelle en annexe.
+1. Do **one step only** at a time, in order.
+2. For each step: **implement the regression test BEFORE/WITH the change**.
+3. Validate with `python -m pytest app/tests -q` (must stay **green**, including existing tests).
+4. **Check `- [ ]` → `- [x]` only after a green test.** Never check off an unvalidated step.
+5. Do not add a CPU fallback (GPU-strict). Do not touch live behavior without a test that covers it.
+6. If a step breaks an existing test with no legitimate reason: stop, don't check it off, flag it.
+7. Steps marked **⚠️ Lr required**: not automatable here (no Lr in this environment) —
+   implement + test whatever is testable without Lr, document the manual part in the appendix.
 
 ---
 
-## Étapes — HSL
+## Steps — HSL
 
-- [x] **H1 — Câbler ou retirer la garde `raw_oversat`.** ✅ Câblée (2026-07-19) : nouveau
-  `hsl.raw_confirms_oversat(raw_band)` (seuil `_SAT_CLIP_TRIGGER` réutilisé, pas de seuil
-  inventé) ; `PhotoMeasure.raw_bands` ajouté (RAW zone nette, cache `SourceRAW.hsl_sharp`
-  déjà présent mais jamais transmis) ; câblé dans `_embedded_band_targets` et
-  `_band_targets_from_seed_match` (RAW de la photo **cible**, pas des seeds) ; worker
-  (`autocorrect_worker.py`) alimente `raw_bands=raw_d.get("bands")`. Tests :
-  `test_hsl.py` (8 cas plan_band + raw_confirms_oversat) et 5 cas de wiring dans
-  `test_autocorrect_helpers.py`. `python -m pytest app/tests -q` : 103 passed.
-  `hsl.BandTarget.raw_oversat` est documentée comme garde anti-sur-correction (« ne réduire la
-  saturation d'une bande que si le RAW confirme qu'elle est chargée à la capture ») mais aucun
-  appelant (`autocorrect._embedded_band_targets`, `_band_targets_from_seed_match`) ne la
-  renseigne — `raw_blocks` toujours `False`, garde morte.
-  Décision à prendre en 1er : **câbler** (mesurer chroma de la bande sur le RAW zone nette,
-  `sharpness`/`analysis`, comparer à un seuil) ou **retirer** (champ + doc + docstring) si jugée
-  hors périmètre. Ne pas laisser un garde-fou documenté qui ne protège rien.
-  - *Test non-rég* : si câblée, `app/tests/test_hsl.py` cas `raw_oversat=False` bloque bien une
-    réduction de saturation même avec excès de chroma mesuré. Si retirée : `grep -rn
-    "raw_oversat" app` ne renvoie plus rien hors historique git.
-  - *Valider* : `python -m pytest app/tests -q` vert.
+- [x] **H1 — Wire up or remove the `raw_oversat` guard.** ✅ Wired (2026-07-19): new
+  `hsl.raw_confirms_oversat(raw_band)` (reuses the `_SAT_CLIP_TRIGGER` threshold, no invented
+  threshold); `PhotoMeasure.raw_bands` added (sharp-zone RAW, `SourceRAW.hsl_sharp` cache
+  already present but never forwarded); wired into `_embedded_band_targets` and
+  `_band_targets_from_seed_match` (RAW of the **target** photo, not of the seeds); the worker
+  (`autocorrect_worker.py`) feeds `raw_bands=raw_d.get("bands")`. Tests:
+  `test_hsl.py` (8 cases plan_band + raw_confirms_oversat) and 5 wiring cases in
+  `test_autocorrect_helpers.py`. `python -m pytest app/tests -q`: 103 passed.
+  `hsl.BandTarget.raw_oversat` is documented as an anti-overcorrection guard ("only reduce a
+  band's saturation if the RAW confirms it is loaded at capture") but no caller
+  (`autocorrect._embedded_band_targets`, `_band_targets_from_seed_match`) was setting it —
+  `raw_blocks` was always `False`, a dead guard.
+  Decision to make first: **wire it up** (measure the band's chroma on the sharp-zone RAW,
+  `sharpness`/`analysis`, compare to a threshold) or **remove it** (field + doc + docstring) if
+  deemed out of scope. Don't leave a documented safeguard that protects nothing.
+  - *Regression test*: if wired, `app/tests/test_hsl.py` case `raw_oversat=False` correctly
+    blocks a saturation reduction even with excess measured chroma. If removed: `grep -rn
+    "raw_oversat" app` returns nothing outside git history.
+  - *Validate*: `python -m pytest app/tests -q` green.
 
-- [x] **H2 — Sondage `render_probe` pour calibrer `ResponseModel.bands`.** ✅ (2026-07-19) :
-  `core.response.fit_linear_response(deltas, measured)` — régression linéaire pure (ordonnée
-  libre, moindres carrés) ; retombe sur `0.0` (non calibré) si <2 échantillons ou deltas non
-  dispersés. Outil `tools/calibrate_hsl_response.py` : démarre le serveur App (headless, sans
-  GUI — même processus que `app.main`, requis car `job_queue` est un singleton in-process),
-  attend le pont, prend la photo sélectionnée dans Lr, sonde chaque bande × axe
-  (Saturation/Luminance/Hue) delta par delta via des jobs `render_probe` séquentiels (pas de
-  lot — évite de supposer un ordre de résultat non confirmé), mesure GPU
-  (`render_metrics_gpu.analyze_rendered_gpu`), fit, `response.save()`. Teinte réunwrappée
-  (circulaire) avant fit. Tests : `test_response.py` — 5 cas `fit_linear_response` (pente
-  positive, négative, <2 échantillons, deltas non dispersés, longueurs différentes) sur
-  données synthétiques. `python -m pytest app/tests -q` : 108 passed.
-  - *Test non-rég* : fonction de fit pure testée sur données synthétiques (delta curseur connu
-    → pente attendue). Pas de test Lr ici (⚠️ Lr requis pour le sondage réel — non exécuté,
-    aucun environnement Lr disponible ici ; script prêt, à lancer manuellement).
-  - *Valider* : `python -m pytest app/tests -q` vert.
+- [x] **H2 — `render_probe` probing to calibrate `ResponseModel.bands`.** ✅ (2026-07-19):
+  `core.response.fit_linear_response(deltas, measured)` — pure linear regression (free
+  intercept, least squares); falls back to `0.0` (uncalibrated) if <2 samples or deltas aren't
+  spread out. Tool `tools/calibrate_hsl_response.py`: starts the App server (headless, no
+  GUI — same process as `app.main`, required because `job_queue` is an in-process singleton),
+  waits for the bridge, takes the photo selected in Lr, probes each band × axis
+  (Saturation/Luminance/Hue) delta by delta via sequential `render_probe` jobs (no
+  batching — avoids assuming an unconfirmed result ordering), measures via GPU
+  (`render_metrics_gpu.analyze_rendered_gpu`), fits, `response.save()`. Hue is unwrapped
+  (circular) before fitting. Tests: `test_response.py` — 5 cases for `fit_linear_response`
+  (positive slope, negative slope, <2 samples, non-spread deltas, mismatched lengths) on
+  synthetic data. `python -m pytest app/tests -q`: 108 passed.
+  - *Regression test*: the pure fitting function is tested on synthetic data (known slider
+    delta → expected slope). No Lr test here (⚠️ Lr required for the real probing — not run,
+    no Lr environment available here; script ready, to be run manually).
+  - *Validate*: `python -m pytest app/tests -q` green.
 
-- [x] **H3 — Garde sur le transplant embedded (luminance/teinte).** ✅ (2026-07-19) :
-  `BandTarget.embedded_raw: bool = False` — marque une cible transplant brut JPEG boîtier
-  (`ignore_bias=True`). `hsl.plan_band` applique un plafond dédié plus strict quand
-  `embedded_raw=True` : `_MAX_LUM_EMBEDDED_RAW=10` (vs `_MAX_LUM=20`),
-  `_MAX_HUE_EMBEDDED_RAW=8` (vs `_MAX_HUE=15`) — la saturation avait déjà sa garde
-  réduction-seule, L*/teinte n'en avaient aucune. Câblé uniquement dans
-  `_embedded_band_targets(ignore_bias=True)` ; le mode historique (`ignore_bias=False`,
-  delta vs norme de biais) et `_band_targets_from_seed_match` (cibles k-NN déjà validées,
-  pas un transplant brut) gardent `embedded_raw=False` par défaut → pas de régression.
-  Tests : `test_hsl.py` (3 cas — plafond strict actif, plafond nominal inchangé par défaut,
-  luminance et teinte) et `test_autocorrect_helpers.py` (2 cas — wiring
-  `ignore_bias=True/False`, non-wiring seed-match). `python -m pytest app/tests -q` :
+- [x] **H3 — Guard on the embedded transplant (luminance/hue).** ✅ (2026-07-19):
+  `BandTarget.embedded_raw: bool = False` — marks a raw in-camera JPEG transplant target
+  (`ignore_bias=True`). `hsl.plan_band` applies a dedicated, stricter cap when
+  `embedded_raw=True`: `_MAX_LUM_EMBEDDED_RAW=10` (vs `_MAX_LUM=20`),
+  `_MAX_HUE_EMBEDDED_RAW=8` (vs `_MAX_HUE=15`) — saturation already had its reduction-only
+  guard, L*/hue had none. Wired only into `_embedded_band_targets(ignore_bias=True)`; the
+  historical mode (`ignore_bias=False`, delta vs. bias norm) and
+  `_band_targets_from_seed_match` (already-validated k-NN targets, not a raw transplant) keep
+  `embedded_raw=False` by default → no regression.
+  Tests: `test_hsl.py` (3 cases — strict cap active, nominal cap unchanged by default,
+  luminance and hue) and `test_autocorrect_helpers.py` (2 cases — wiring
+  `ignore_bias=True/False`, non-wiring for seed-match). `python -m pytest app/tests -q`:
   113 passed.
-  - *Test non-rég* : `test_hsl.py` / `test_autocorrect_helpers.py` — cas cible JPEG à L*/hue
-    fortement décalé, vérifier plafond appliqué (pas de transplant intégral).
-  - *Valider* : `python -m pytest app/tests -q` vert.
+  - *Regression test*: `test_hsl.py` / `test_autocorrect_helpers.py` — case of a JPEG target
+    with strongly shifted L*/hue, verify the cap is applied (no full transplant).
+  - *Validate*: `python -m pytest app/tests -q` green.
 
-## Étapes — Calibration caméra
+## Steps — Camera Calibration
 
-- [x] **C1 — Validation manuelle en Lightroom réel.** ✅ (2026-07-19, Lr live + plugin connecté
-  pendant la session — catalogue réel, dossier « 2- Dernier soir Abreu », caméra ILCE-7M4).
-  Pas de GUI PySide6 lancée : seed_match/`_calib_develop_dict` appelés directement sur RAW réels
-  (`gpu_raw.analyze_raw_gpu`) via MCP `abelr`, cf. CLAUDE.md § chemin rapide de validation.
-  Protocole : 3 seeds (SML03779, SML03872, SML04799) reçoivent chacun 7 valeurs Calibration
-  distinctes et exagérées via `apply_adjustments` (écriture durable, ré-vérifiée par re-lecture
-  develop) ; cible SML04057 choisie pour être sans ambiguïté la plus proche d'un seul seed
-  (SML04799, distance z-score 1.11 vs 2.44/2.47 pour les 2 autres — k=1 sur pool de 3 comme prévu
-  par `seed_match.K_MAX`/`len(pool)//2`). `seed_match.k_nearest` + `target_from_seeds` +
-  `autocorrect._calib_develop_dict` reproduits sur ces vecteurs réels (pas de mock) :
-  - `EnableCalibration=True` posé.
-  - Les 7 valeurs transplantées (ShadowTint=-25, RedHue=-18, RedSaturation=-22, GreenHue=14,
-    GreenSaturation=-6, BlueHue=-35, BlueSaturation=19) correspondent **exactement** aux valeurs
-    du seed SML04799 (k=1 → pas de moyenne, transplant brut) — aucune contamination par les 2
-    autres seeds (distance 2x plus grande).
-  - Dict retourné ne contient que les clés Calibration + `EnableCalibration` — pas de recouvrement
-    possible avec les clés expo/wb/hsl (`Exposure2012`, `Temperature`/`Tint`,
-    `SaturationAdjustment*`…) : pas de régression structurelle sur les autres axes.
-  - Round-trip Lr réel via `render_probe` (write temporaire + rendu + restore) sur la cible :
-    application acceptée sans erreur, aperçu rendu (fort virage cyan cohérent avec BlueHue=-35/
-    GreenHue=+14/ShadowTint=-25 — valeurs volontairement exagérées pour un test non-ambigu),
-    `restore_error` absent, develop de la cible confirmé revenu à l'état d'origine après coup.
-  Nettoyage : les 3 seeds ré-écrits à leurs valeurs Calibration d'origine (0, `EnableCalibration`
-  déjà `true` avant la session) après le test — catalogue réel laissé dans l'état constaté au
-  début de la session. `python -m pytest app/tests -q` : 113 passed (aucun code touché, C1 est
-  une validation manuelle pure).
-  - *Limite* : validation faite en appelant `core/` directement (RAW réels, pas de mock), sans
-    passer par la GUI PySide6 (`main_window.py`/`autocorrect_worker.py`) ni par le marquage
-    `is_seed` en cache SQLite — ce chemin GUI+cache bout-en-bout reste non exercé par ce test
-    (seule la mécanique k-NN + écriture Lr réelle l'est). À couvrir si un doute apparaît côté GUI.
+- [x] **C1 — Manual validation in real Lightroom.** ✅ (2026-07-19, live Lr + plugin connected
+  during the session — real catalog, folder "2- Dernier soir Abreu", camera ILCE-7M4).
+  No PySide6 GUI launched: seed_match/`_calib_develop_dict` called directly on real RAWs
+  (`gpu_raw.analyze_raw_gpu`) via the `abelr` MCP, see CLAUDE.md § fast validation path.
+  Protocol: 3 seeds (SML03779, SML03872, SML04799) each receive 7 distinct, exaggerated
+  Calibration values via `apply_adjustments` (durable write, re-verified by reading develop
+  back); target SML04057 chosen for being unambiguously closest to a single seed
+  (SML04799, z-score distance 1.11 vs 2.44/2.47 for the other two — k=1 on a pool of 3 as
+  expected by `seed_match.K_MAX`/`len(pool)//2`). `seed_match.k_nearest` + `target_from_seeds` +
+  `autocorrect._calib_develop_dict` reproduced on these real vectors (no mock):
+  - `EnableCalibration=True` set.
+  - The 7 transplanted values (ShadowTint=-25, RedHue=-18, RedSaturation=-22, GreenHue=14,
+    GreenSaturation=-6, BlueHue=-35, BlueSaturation=19) match **exactly** the values of seed
+    SML04799 (k=1 → no averaging, raw transplant) — no contamination from the other two
+    seeds (distance 2x larger).
+  - The returned dict contains only the Calibration keys + `EnableCalibration` — no possible
+    overlap with the exposure/wb/hsl keys (`Exposure2012`, `Temperature`/`Tint`,
+    `SaturationAdjustment*`…): no structural regression on the other axes.
+  - Real-Lr round-trip via `render_probe` (temporary write + render + restore) on the target:
+    application accepted with no error, preview rendered (strong cyan cast consistent with
+    BlueHue=-35/GreenHue=+14/ShadowTint=-25 — deliberately exaggerated values for an
+    unambiguous test), `restore_error` absent, target's develop confirmed back to its
+    original state afterward.
+  Cleanup: the 3 seeds were rewritten back to their original Calibration values (0,
+  `EnableCalibration` already `true` before the session) after the test — real catalog left
+  in the state observed at the start of the session. `python -m pytest app/tests -q`: 113
+  passed (no code touched, C1 is a pure manual validation).
+  - *Limitation*: validation done by calling `core/` directly (real RAWs, no mock), without
+    going through the PySide6 GUI (`main_window.py`/`autocorrect_worker.py`) or the `is_seed`
+    marking in the SQLite cache — this end-to-end GUI+cache path remains untested by this
+    test (only the k-NN mechanics + real Lr write are). To be covered if doubt arises on the
+    GUI side.
 
-- [x] **C2 — Garde de cohérence k-NN avant transplant.** ✅ (2026-07-19) :
-  `seed_match._weighted_calib_field` (remplace `_weighted_field`, seul appelant — les 7 champs
-  `CALIB_FIELDS`) — si les valeurs des seeds matchés sur un champ divergent de plus de
-  `_CALIB_SPREAD_MAX=25` points curseur (échelle -100..100), refuse la moyenne pondérée et replie
-  sur la valeur exacte du seed le plus proche en distance (pas de champ fabriqué qui ne
-  correspondrait à aucun seed réel). Seuil provisoire (pas de données seeds réelles conflictuelles
-  pour le trancher — cf. C3 non tranché), choisi dans le même ordre de grandeur que
-  `hsl._MAX_SAT=25`. `temperature`/`tint`/`tone`/`bands` non touchés (chemin séparé,
-  `_weighted_field` n'était utilisé que pour Calibration). Tests : `test_seed_match.py` — 2 cas
-  (spread 50 → repli seed proche exact ; spread 2 → moyenne pondérée inchangée) + tests
-  existants (`test_target_from_seeds_aggregates_calibration_weighted` : spread 40 sur `red_hue`
-  reste `> 19.0` car repli = valeur exacte du seed proche 20.0 — coïncide avec l'ancien
-  comportement dominé par le même seed, pas de régression). `python -m pytest app/tests -q` :
-  115 passed.
-  - *Test non-rég* : `test_seed_match.py` — cas 2 seeds proches en distance mais divergents sur
-    `red_hue` (spread 50) → repli 1-seed au lieu de moyenne aveugle. Cas seeds cohérents (spread 2)
-    → transplant inchangé (pas de régression).
-  - *Valider* : `python -m pytest app/tests -q` vert.
+- [x] **C2 — k-NN consistency guard before transplant.** ✅ (2026-07-19):
+  `seed_match._weighted_calib_field` (replaces `_weighted_field`, its only caller — the 7
+  `CALIB_FIELDS` fields) — if the values of the matched seeds on a field diverge by more than
+  `_CALIB_SPREAD_MAX=25` slider points (-100..100 scale), refuses the weighted average and
+  falls back to the exact value of the closest seed by distance (no fabricated field that
+  wouldn't match any real seed). Provisional threshold (no real conflicting seed data
+  available to settle it — see C3, unresolved), chosen in the same order of magnitude as
+  `hsl._MAX_SAT=25`. `temperature`/`tint`/`tone`/`bands` untouched (separate path,
+  `_weighted_field` was only used for Calibration). Tests: `test_seed_match.py` — 2 cases
+  (spread 50 → fallback to exact closest seed; spread 2 → weighted average unchanged) +
+  existing tests (`test_target_from_seeds_aggregates_calibration_weighted`: spread 40 on
+  `red_hue` stays `> 19.0` because the fallback = the exact value of the closest seed 20.0 —
+  matches the old behavior dominated by the same seed, no regression). `python -m pytest
+  app/tests -q`: 115 passed.
+  - *Regression test*: `test_seed_match.py` — case of 2 seeds close in distance but diverging
+    on `red_hue` (spread 50) → 1-seed fallback instead of blind averaging. Case of consistent
+    seeds (spread 2) → transplant unchanged (no regression).
+  - *Validate*: `python -m pytest app/tests -q` green.
 
-- [x] **C3 — Trancher distance scène vs constante caméra.** ✅ (2026-07-19) : **décision = garder
-  le k-NN scène-dépendant pour Calibration, ne pas remplacer par médiane/mode caméra.** Aucun
-  changement de code (le comportement actuel était déjà le bon).
-  Preuve (catalogue réel via Lr live, MCP `abelr.get_catalog_photos(include_develop=True)`,
-  1057 photos, une seule caméra `ILCE-7M4`, un seul dossier « 2- Dernier soir Abreu ») : 270/1057
-  photos ont des champs Calibration non nuls, regroupés en **77 vecteurs distincts** qui changent
-  par blocs alignés sur des plages de frames séquentielles (ex. `SML03338`→`SML03360` :
-  `(0,0,-5,10,5,5,15)` constant, puis `SML03361`→`SML03371` bascule à
-  `(-25,0,-10,10,-10,40,-10)` — bloc à `BlueHue=40` nettement hors norme des blocs voisins
-  (0–15), signature éclairage mixte isolé — puis `SML03372`→`SML03374` à
-  `(5,0,-10,-10,-50,5,-5)`, etc.). Cette variation par blocs de scène/lumière, sur une **même**
-  caméra et un **même** événement, contredit l'hypothèse « quasi constant par caméra » : le
-  réglage Calibration chez cet utilisateur suit la scène (comme expo/wb/hsl), pas seulement le
-  corps caméra. Le vecteur de distance k-NN scène (asshot_rg/bg, raw_median_l) reste donc
-  pertinent pour Calibration — pas de repli médiane/mode global à coder. Script d'analyse
-  jetable (non conservé, ad hoc sur le dump JSON du catalogue).
-  - *Test non-rég* : aucun (décision = statu quo comportemental, `test_seed_match.py` existant
-    reste la couverture valide du chemin k-NN Calibration, y compris la garde C2).
-  - *Valider* : `python -m pytest app/tests -q` vert (115 passed, inchangé — aucun code touché).
+- [x] **C3 — Settle scene distance vs. camera constant.** ✅ (2026-07-19): **decision = keep
+  the scene-dependent k-NN for Calibration, do not replace it with a camera median/mode.** No
+  code change (current behavior was already the right one).
+  Evidence (real catalog via live Lr, MCP `abelr.get_catalog_photos(include_develop=True)`,
+  1057 photos, a single `ILCE-7M4` camera, a single "2- Dernier soir Abreu" folder): 270/1057
+  photos have non-zero Calibration fields, grouped into **77 distinct vectors** that change
+  in blocks aligned with sequential frame ranges (e.g. `SML03338`→`SML03360`:
+  `(0,0,-5,10,5,5,15)` constant, then `SML03361`→`SML03371` shifts to
+  `(-25,0,-10,10,-10,40,-10)` — block with `BlueHue=40` clearly out of the norm of neighboring
+  blocks (0–15), signature of an isolated mixed-lighting shot — then `SML03372`→`SML03374`
+  to `(5,0,-10,-10,-50,5,-5)`, etc.). This block-wise variation by scene/light, on a **single**
+  camera and a **single** event, contradicts the "near-constant per camera" hypothesis: this
+  user's Calibration setting follows the scene (like exposure/wb/hsl), not just the camera
+  body. The scene-based k-NN distance vector (asshot_rg/bg, raw_median_l) therefore remains
+  relevant for Calibration — no global median/mode fallback to code. Throwaway analysis
+  script (not kept, ad hoc on the catalog's JSON dump).
+  - *Regression test*: none (decision = behavioral status quo, existing `test_seed_match.py`
+    remains the valid coverage of the Calibration k-NN path, including the C2 guard).
+  - *Validate*: `python -m pytest app/tests -q` green (115 passed, unchanged — no code
+    touched).
 
 ---
 
-## Backlog nettoyage (reporté)
+## Cleanup backlog (deferred)
 
-Étapes 2-7 de l'ancien plan (config pytest, garde anti-désync docs, couverture tests modules
-purs, hygiène logging, cleanup QThread, resync docs) + backlogs perf (G9, P-10) + repli régime
-artistique + `core/image_source.py` tool-only : **non abandonnés, reportés après H1-H3/C1-C3**.
-Détail intact dans [`OLD_PLAN.md`](OLD_PLAN.md).
+Steps 2-7 of the old plan (pytest config, doc-desync guard, pure-module test coverage,
+logging hygiene, QThread cleanup, doc resync) + perf backlogs (G9, P-10) + artistic regime
+fallback + `core/image_source.py` tool-only: **not abandoned, deferred until after
+H1-H3/C1-C3**. Full detail intact in [`OLD_PLAN.md`](OLD_PLAN.md).
 
-## Annexe — Validation dépendante de Lightroom (manuelle si pas de MCP)
+## Appendix — Lightroom-dependent validation (manual if no MCP)
 
-- H2 : sondage `render_probe` réel pour calibrer `ResponseModel.bands` (résultat à noter ici une
-  fois fait : caméra/profil, pentes mesurées).
-- C1 : résultat de la validation manuelle Calibration (cf. étape C1).
-- Reportés d'`OLD_PLAN.md` : verrou `requestJpegThumbnail` (convergence 2ᵉ Aperçu ≈ 0), test e2e
-  seeds→Aperçu→Appliquer, stubs GUI `photo_panel`/`analysis_panel`.
+- H2: real `render_probe` probing to calibrate `ResponseModel.bands` (result to be noted here
+  once done: camera/profile, measured slopes).
+- C1: result of the manual Calibration validation (see step C1).
+- Deferred from `OLD_PLAN.md`: `requestJpegThumbnail` lock (2nd Preview convergence ≈ 0), real
+  e2e seeds→Preview→Apply test, `photo_panel`/`analysis_panel` GUI stubs.

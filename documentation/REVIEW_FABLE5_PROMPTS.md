@@ -1,134 +1,135 @@
-# Prompts de lancement — Revue Fable 5
+# Launch Prompts — Fable 5 Review
 
-Mode d'emploi :
+How to use:
 1. `/model` → `claude-fable-5`.
-2. **Une session neuve par passe** (ou `/clear` entre chaque). Ne jamais enchaîner deux passes
-   dans le même contexte : la passe précédente pollue les findings.
-3. Copier-coller le prompt de la passe. Chaque passe écrit sa section dans
+2. **A fresh session per pass** (or `/clear` between each). Never chain two passes
+   in the same context: the previous pass pollutes the findings.
+3. Copy-paste the pass prompt. Each pass writes its section into
    [`REVIEW_FABLE5.md`](REVIEW_FABLE5.md).
-4. Ordre imposé : 0 → 1 → 2 → 3. La passe 0 fige le périmètre vivant/mort dont dépend tout le reste.
+4. Mandatory order: 0 → 1 → 2 → 3. Pass 0 locks down the live/dead scope everything else depends on.
 
-Rappels valables pour TOUTES les passes (déjà dans CLAUDE.md, mais faux positifs fréquents) :
-- **GPU-strict = choix voulu.** L'absence de fallback CPU n'est pas un bug.
-- **Lua 5.1** : `//`, `goto`, `utf8` stdlib absents = normal.
-- Toute reco touchant l'algo de mesure impose un bump de `ANALYSIS_VERSION` (pas de migration) — le dire.
-- Aucun finding sans `file:line`. Noms de paramètres develop vérifiés contre `lr15_sdk_api_reference.md`.
-
----
-
-## PASSE 0 — Vérité terrain (archi / doc)
-
-```
-Revue projet ABELr, PASSE 0 sur 4 : vérité terrain architecture/doc. Objectif =
-figer le périmètre vivant/mort AVANT toute chasse aux bugs. Ne corrige rien, ne propose aucun
-fix de code : cette passe est purement descriptive.
-
-Lis d'abord : CLAUDE.md, documentation/ARCHITECTURE.md (surtout §3 carte des modules), PLAN.md.
-
-Tâches :
-1. Pour CHAQUE module de app/core/ (24 fichiers), app/server/ (3), app/gui/ (7) et les 14
-   fichiers Lua de ABELr.lrplugin/ : déterminer le statut réel (live / tool-only / mort)
-   en cherchant les références entrantes (imports, require, appels). Un module sans importeur
-   hors app/tests/ et hors app/tools/ est candidat "mort" ou "tool-only".
-2. Comparer ce statut réel au statut annoncé dans ARCHITECTURE.md §3. Lister les écarts.
-3. Relever les divergences doc↔code hors carte modules : endpoints FastAPI, types de jobs,
-   pipeline image, schéma cache (nb de tables), contraintes CLAUDE.md — tout ce que la doc
-   affirme et que le code contredit.
-
-Pour localiser sans saturer le contexte, délègue les recherches "qui importe X / qui appelle Y"
-à l'agent cavecrew-investigator.
-
-Sortie : remplis UNIQUEMENT les sections "Passe 0" de documentation/REVIEW_FABLE5.md
-(tables 0.1 et 0.2). Chaque ligne avec preuve file:line. Rien sans preuve. Puis renseigne la
-ligne Passe 0 du Journal.
-```
+Reminders valid for ALL passes (already in CLAUDE.md, but frequent false positives):
+- **GPU-strict = deliberate choice.** The absence of a CPU fallback is not a bug.
+- **Lua 5.1**: missing `//`, `goto`, `utf8` stdlib = normal.
+- Any recommendation touching the measurement algorithm requires an `ANALYSIS_VERSION` bump (no migration) — state it.
+- No finding without `file:line`. Develop parameter names verified against `lr15_sdk_api_reference.md`.
 
 ---
 
-## PASSE 1 — Bugs par sous-système
+## PASS 0 — Ground truth (architecture / doc)
 
 ```
-Revue projet ABELr, PASSE 1 sur 4 : chasse aux bugs (correctness). Ne traite QUE les
-modules marqués "live" en Passe 0 (section Passe 0 de documentation/REVIEW_FABLE5.md). Ignore
-le code mort/tool-only côté bugs.
+ABELr project review, PASS 0 of 4: architecture/doc ground truth. Goal =
+lock down the live/dead scope BEFORE any bug hunting. Fix nothing, propose no
+code fix: this pass is purely descriptive.
 
-Lis d'abord : CLAUDE.md, documentation/ARCHITECTURE.md, la section Passe 0 de REVIEW_FABLE5.md.
-Pour tout code Lua ou tout nom de paramètre develop : documentation/lr15_sdk_api_reference.md.
+Read first: CLAUDE.md, documentation/ARCHITECTURE.md (especially §3 module map), PLAN.md.
 
-Balaie sous-système par sous-système, dans cet ordre, un à la fois :
-  (a) Plugin Lua — ABELr.lrplugin/ (14 fichiers). Vérifier : écritures catalog/develop
-      dans catalog:withWriteAccessDo ; I/O bloquant dans LrTasks.startAsyncTask ; LrHttp.post
-      dans postAsyncTaskWithContext ; chemins via LrPathUtils (jamais de concat "/") ;
-      import 'LrXxx' vs require ; usage correct de Json.array. Signaler tout PV2012 manquant
-      (Exposure2012…) et WhiteBalance='Custom' requis pour Temperature/Tint.
-  (b) Pont HTTP + serveur — app/server/api.py, job_queue.py, models.py + HttpClient.lua,
-      PollingLoop.lua. Vérifier : cycle de vie du polling (génération vs flag partagé),
-      contrat job_id/type/payload, gestion d'erreur réseau, désérialisation, races sur la queue.
+Tasks:
+1. For EACH module in app/core/ (24 files), app/server/ (3), app/gui/ (7) and the 14
+   Lua files in ABELr.lrplugin/: determine the actual status (live / tool-only / dead)
+   by looking for inbound references (imports, require, calls). A module with no importer
+   outside app/tests/ and app/tools/ is a candidate for "dead" or "tool-only".
+2. Compare this actual status to the status stated in ARCHITECTURE.md §3. List the gaps.
+3. Note doc↔code divergences outside the module map: FastAPI endpoints, job types,
+   image pipeline, cache schema (number of tables), CLAUDE.md constraints — anything the doc
+   asserts that the code contradicts.
+
+To locate things without saturating the context, delegate the "who imports X / who calls Y"
+searches to the cavecrew-investigator agent.
+
+Output: fill in ONLY the "Pass 0" sections of documentation/REVIEW_FABLE5.md
+(tables 0.1 and 0.2). Every line with file:line evidence. Nothing without evidence. Then fill in
+the Pass 0 line of the Journal.
+```
+
+---
+
+## PASS 1 — Bugs by subsystem
+
+```
+ABELr project review, PASS 1 of 4: bug hunt (correctness). Deal ONLY with
+modules marked "live" in Pass 0 (Pass 0 section of documentation/REVIEW_FABLE5.md). Ignore
+dead/tool-only code for the bug hunt.
+
+Read first: CLAUDE.md, documentation/ARCHITECTURE.md, the Pass 0 section of REVIEW_FABLE5.md.
+For any Lua code or any develop parameter name: documentation/lr15_sdk_api_reference.md.
+
+Sweep subsystem by subsystem, in this order, one at a time:
+  (a) Lua plugin — ABELr.lrplugin/ (14 files). Check: catalog/develop writes
+      inside catalog:withWriteAccessDo; blocking I/O inside LrTasks.startAsyncTask; LrHttp.post
+      inside postAsyncTaskWithContext; paths via LrPathUtils (never "/" concatenation);
+      import 'LrXxx' vs require; correct use of Json.array. Flag any missing PV2012
+      (Exposure2012…) and WhiteBalance='Custom' required for Temperature/Tint.
+  (b) HTTP bridge + server — app/server/api.py, job_queue.py, models.py + HttpClient.lua,
+      PollingLoop.lua. Check: polling lifecycle (generation vs shared flag),
+      job_id/type/payload contract, network error handling, deserialization, races on the queue.
   (c) Core image/GPU — raw, gpu, gpu_raw, gpu_jpeg, gpu_schedule, pipeline, image_source, color,
-      render_metrics, render_metrics_gpu, embedded_jpeg, previews. Vérifier : gpu.require_cuda
-      aux points d'entrée, espaces colorimétriques (ProPhoto linéaire float32, luminance Y,
-      use_camera_wb), dtype/normalisation, libération mémoire GPU, chemins RAW Windows.
-  (d) Cache SQLite — cache.py + hash dans measure.py, exif_profile.py. Vérifier : les 5 tables,
-      ANALYSIS_VERSION salée dans TOUS les hash concernés, cohérence clé/insert/lookup,
+      render_metrics, render_metrics_gpu, embedded_jpeg, previews. Check: gpu.require_cuda
+      at entry points, color spaces (linear ProPhoto float32, Y luminance,
+      use_camera_wb), dtype/normalization, GPU memory release, Windows RAW paths.
+  (d) SQLite cache — cache.py + hashing in measure.py, exif_profile.py. Check: the 5 tables,
+      ANALYSIS_VERSION salted into ALL relevant hashes, key/insert/lookup consistency,
       invalidation, transactions.
-  (e) Analyse/seed-match — analysis, measure, seed_match, wb_model, exposure, hsl, autocorrect,
-      sharpness, regime, response, catalog. Vérifier : correctness numérique, divisions par zéro,
-      bornes HSL (saturation = réduction seule), k-NN, régression WB, cohérence unités
-      (espace rendu L* pour l'expo).
+  (e) Analysis/seed-match — analysis, measure, seed_match, wb_model, exposure, hsl, autocorrect,
+      sharpness, regime, response, catalog. Check: numerical correctness, divisions by zero,
+      HSL bounds (saturation = reduction only), k-NN, WB regression, unit consistency
+      (render-space L* for exposure).
 
-Rappels anti-faux-positif : GPU-strict sans fallback CPU = voulu ; Lua 5.1 sans //,goto,utf8 =
-normal ; reco touchant les mesures ⇒ mentionner le bump ANALYSIS_VERSION.
+Anti-false-positive reminders: GPU-strict with no CPU fallback = deliberate; Lua 5.1 missing
+//,goto,utf8 = normal; recommendation touching measurements ⇒ mention the ANALYSIS_VERSION bump.
 
-Sortie : remplis les tables (a)–(e) de la section "Passe 1" de documentation/REVIEW_FABLE5.md.
-Colonnes : file:line, Sévérité (🔴/🟠/🟡/⚪), Statut (CONFIRMÉ/PLAUSIBLE), Problème, Fix, Effort.
-Rien sans file:line. N'applique aucun patch. Puis renseigne la ligne Passe 1 du Journal.
+Output: fill in tables (a)–(e) of the "Pass 1" section of documentation/REVIEW_FABLE5.md.
+Columns: file:line, Severity (🔴/🟠/🟡/⚪), Status (CONFIRMED/PLAUSIBLE), Problem, Fix, Effort.
+Nothing without file:line. Apply no patch. Then fill in the Pass 1 line of the Journal.
 ```
 
 ---
 
-## PASSE 2 — Performance
+## PASS 2 — Performance
 
 ```
-Revue projet ABELr, PASSE 2 sur 4 : performance, zones chaudes UNIQUEMENT. Pas de
-micro-optimisation généraliste, pas de réécriture cosmétique.
+ABELr project review, PASS 2 of 4: performance, hot spots ONLY. No
+generic micro-optimization, no cosmetic rewrite.
 
-Lis d'abord : CLAUDE.md, documentation/ARCHITECTURE.md (§4 pipeline image, §5 cache), la section
-Passe 0 de documentation/REVIEW_FABLE5.md.
+Read first: CLAUDE.md, documentation/ARCHITECTURE.md (§4 image pipeline, §5 cache), the Pass 0
+section of documentation/REVIEW_FABLE5.md.
 
-Cibles autorisées, dans l'ordre :
-  1. Pipeline image / GPU — décodage RAW, transferts CPU↔GPU, batch, réutilisation buffers,
-     opérations redondantes par photo (raw, gpu_raw, gpu_jpeg, pipeline, render_metrics_gpu).
-  2. Cache SQLite — coût des lookups, index manquants, requêtes N+1, sérialisation des blobs,
-     hit-rate effectif (cache.py).
-  3. Polling du pont — GET /jobs/pending toutes les 300 ms : coût côté serveur/plugin,
-     réveils inutiles, granularité (PollingLoop.lua, api.py, job_queue.py).
+Allowed targets, in order:
+  1. Image / GPU pipeline — RAW decoding, CPU↔GPU transfers, batching, buffer reuse,
+     redundant per-photo operations (raw, gpu_raw, gpu_jpeg, pipeline, render_metrics_gpu).
+  2. SQLite cache — lookup cost, missing indexes, N+1 queries, blob serialization,
+     effective hit-rate (cache.py).
+  3. Bridge polling — GET /jobs/pending every 300 ms: server/plugin-side cost,
+     unnecessary wakeups, granularity (PollingLoop.lua, api.py, job_queue.py).
 
-Pour chaque hotspot : quantifie le coût actuel (ou décris pourquoi il est chaud), la cause
-racine, l'optimisation, le gain estimé, et indique s'il touche l'algo de mesure (si oui ⇒
-bump ANALYSIS_VERSION requis). Ne pas casser le contrat GPU-strict ni le versioning cache.
+For each hotspot: quantify the current cost (or describe why it's hot), the root
+cause, the optimization, the estimated gain, and state whether it touches the measurement
+algorithm (if so ⇒ ANALYSIS_VERSION bump required). Do not break the GPU-strict contract or the
+cache versioning.
 
-Sortie : remplis la table "Passe 2" de documentation/REVIEW_FABLE5.md. N'applique aucun patch.
-Puis renseigne la ligne Passe 2 du Journal.
+Output: fill in the "Pass 2" table of documentation/REVIEW_FABLE5.md. Apply no patch.
+Then fill in the Pass 2 line of the Journal.
 ```
 
 ---
 
-## PASSE 3 — Consolidation / backlog
+## PASS 3 — Consolidation / backlog
 
 ```
-Revue projet ABELr, PASSE 3 sur 4 : consolidation. Aucune nouvelle analyse de code —
-uniquement synthèse des passes 0 à 2.
+ABELr project review, PASS 3 of 4: consolidation. No new code analysis —
+only synthesis of passes 0 to 2.
 
-Lis documentation/REVIEW_FABLE5.md en entier (sections Passe 0, 1, 2).
+Read documentation/REVIEW_FABLE5.md in full (Pass 0, 1, 2 sections).
 
-Tâches :
-1. Fusionner tous les findings des passes 0–2 en un backlog unique. Tri : sévérité décroissante
-   (🔴 > 🟠 > 🟡 > ⚪), puis effort croissant (S avant L). Remplir la table "Passe 3".
-2. Détecter les doublons / findings liés entre sous-systèmes et les regrouper.
-3. Proposer une mise à jour de PLAN.md : intégrer les items 🔴/🟠 dans le backlog du projet,
-   corriger ARCHITECTURE.md §3 selon la Passe 0. Présente les diffs proposés, n'écris dans
-   PLAN.md / ARCHITECTURE.md qu'après validation explicite de l'utilisateur.
+Tasks:
+1. Merge all findings from passes 0-2 into a single backlog. Sort: descending severity
+   (🔴 > 🟠 > 🟡 > ⚪), then ascending effort (S before L). Fill in the "Pass 3" table.
+2. Detect duplicates / related findings across subsystems and group them.
+3. Propose a PLAN.md update: fold 🔴/🟠 items into the project backlog,
+   correct ARCHITECTURE.md §3 per Pass 0. Present the proposed diffs, only write to
+   PLAN.md / ARCHITECTURE.md after explicit user validation.
 
-Sortie : table "Passe 3" de REVIEW_FABLE5.md remplie + ligne Passe 3 du Journal. Les
-modifications de PLAN.md/ARCHITECTURE.md restent en proposition tant que non validées.
+Output: "Pass 3" table of REVIEW_FABLE5.md filled in + Pass 3 line of the Journal. The
+PLAN.md/ARCHITECTURE.md changes remain proposals until validated.
 ```

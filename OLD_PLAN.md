@@ -1,132 +1,133 @@
-# PLAN — Nettoyage & durcissement (ARCHIVÉ 2026-07-19)
+# PLAN — Cleanup & hardening (ARCHIVED 2026-07-19)
 
-> Archivé au profit de [`PLAN.md`](PLAN.md), qui priorise les corrections HSL/Calibration
-> (audit 2026-07-19). Étapes 2-7 et backlogs ci-dessous non abandonnés — reportés, cf. §
-> « Backlog nettoyage (reporté) » du nouveau PLAN.md.
+> Archived in favor of [`PLAN.md`](PLAN.md), which prioritizes the HSL/Calibration fixes
+> (2026-07-19 audit). Steps 2-7 and the backlogs below are not abandoned — deferred, see §
+> "Cleanup backlog (deferred)" of the new PLAN.md.
 
-Roadmap exécutable **une étape à la fois**. Contexte technique : [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md).
-Règles de travail : [`CLAUDE.md`](CLAUDE.md).
+Executable roadmap **one step at a time**. Technical context: [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md).
+Working rules: [`CLAUDE.md`](CLAUDE.md).
 
-## Règles d'exécution (Sonnet 5)
+## Execution rules (Sonnet 5)
 
-1. Faire **une seule étape** à la fois, dans l'ordre.
-2. Pour chaque étape : **implémenter le test de non-régression AVANT/AVEC le changement**.
-3. Lancer `python -m app.main` n'est pas requis ; valider par : `python -m pytest app/tests -q`
-   (doit rester **vert**, y compris les tests existants).
-4. **Cocher `- [ ]` → `- [x]` uniquement après test vert.** Ne jamais cocher une étape non validée.
-5. Ne pas ajouter de repli CPU (GPU-strict). Ne pas toucher au comportement live sans test qui le couvre.
-6. Si une étape casse un test existant sans raison légitime : arrêter, ne pas cocher, signaler.
+1. Do **one step only** at a time, in order.
+2. For each step: **implement the regression test BEFORE/WITH the change**.
+3. Running `python -m app.main` is not required; validate with: `python -m pytest app/tests -q`
+   (must stay **green**, including existing tests).
+4. **Check `- [ ]` → `- [x]` only after a green test.** Never check off an unvalidated step.
+5. Do not add a CPU fallback (GPU-strict). Do not touch live behavior without a test that covers it.
+6. If a step breaks an existing test with no legitimate reason: stop, don't check it off, flag it.
 
-État de départ vérifié (2026-07-05) : 6 fichiers de test, ~40 tests, 1 seul `@pytest.mark.gpu`,
-**aucune config pytest** (marker `gpu` enregistré seulement dans `conftest.py`).
-
----
-
-## Étapes
-
-- [x] **1 — Supprimer le code mort.** *(fait 2026-07-18, revue Fable 5 — `test_no_dead_modules.py` vert)*
-  Supprimer `app/gui/analysis_worker.py` (`AnalysisWorker` jamais instancié ni importé — vérifié).
-  Note (revue Fable 5, Passe 0) : `analysis_worker` est le seul importeur GUI direct de
-  `gpu_raw`/`raw` — leur statut live tient par la chaîne `gpu_schedule`/`embedded_jpeg`.
-  Sa suppression ne tue aucun module core, mais fait de `gpu_schedule` l'unique entrant de `gpu_raw`.
-  - *Vérif préalable* : `grep -rn "analysis_worker\|AnalysisWorker" app` ne renvoie que la définition.
-  - *Test non-rég* : créer `app/tests/test_no_dead_modules.py` qui importe chaque module de
-    `app/core/*` et `app/gui/*` (smoke import, sauf ceux exigeant Qt display → `importlib` avec
-    tolérance documentée) et **assert** qu'`app.gui.analysis_worker` n'existe plus.
-  - *Valider* : `python -m pytest app/tests -q` vert.
-
-- [ ] **2 — Config pytest.**
-  Ajouter `pyproject.toml` à la racine avec `[tool.pytest.ini_options]` : `testpaths = ["app/tests"]`,
-  `markers = ["gpu: parité GPU/CPU, skip si CUDA absent"]`. Garder le skip `gpu` de `conftest.py`.
-  - *Test* : `python -m pytest -q` (sans chemin) depuis la racine découvre bien les tests ;
-    `python -m pytest -q -m "not gpu"` fonctionne. Aucun test cassé.
-
-- [ ] **3 — Garde anti-désync des docs.**
-  Créer `app/tests/test_docs_consistency.py` : parse `CLAUDE.md` et `documentation/ARCHITECTURE.md`,
-  et **assert** que (a) tout `core/xxx.py` / `gui/xxx.py` cité existe réellement sur disque, (b)
-  aucun fichier supprimé (`core/seeds.py`, `core/adjustments.py`, `core/prediction.py`,
-  `gui/analysis_worker.py`) n'est présenté comme vivant.
-  - *Test = le test lui-même* : `python -m pytest app/tests/test_docs_consistency.py -q` vert.
-
-- [ ] **4 — Couvrir les modules live non testés (fonctions pures uniquement, sans GPU ni RAW).**
-  Ajouter des tests pour :
-  - `core/exposure.py` — ΔEV depuis L* courant → L* cible (borne, signe, monotonie).
-  - `core/hsl.py` — deltas par bande vs cible ; **saturation = réduction seule** (jamais d'augmentation).
-  - `core/analysis.py` — `ev100()` / `ExposureStats` (valeurs connues).
-  - `core/autocorrect.py` — `plan()` sur des `PhotoMeasure` synthétiques (aucun accès disque/GPU).
-  - *Test non-rég* : nouveaux tests verts ; les ~40 tests existants inchangés.
-  - *Note* : si une fonction n'est pas pure (dépend GPU/RAW), la laisser hors périmètre et le noter
-    dans le test — ne pas fabriquer de mock qui invente un comportement.
-
-- [ ] **5 — Hygiène logging.**
-  Dans `app/gui/neutral_preview_worker.py`, remplacer les `except Exception: pass` par un log
-  (module `logging`, niveau `warning`/`exception`). Si la logique d'ancre n'est pas déjà pure,
-  isoler `_anchor_suspect` en fonction testable.
-  - *Test non-rég* : unit test de `_anchor_suspect` sur cas limites (ancre saine vs suspecte) —
-    entrées numériques, pas de Qt. `python -m pytest app/tests -q` vert.
-
-- [ ] **6 — Cleanup QThread.**
-  Dans `app/gui/main_window.py`, appeler `quit()` + `wait()` sur les workers à la fermeture
-  (`closeEvent`) pour éviter les threads orphelins.
-  - *Test* : **couverture limitée, honnête** — smoke `python -c "import app.gui.main_window"` sans
-    crash d'import (à documenter comme tel dans l'étape). Validation GUI réelle → Annexe.
-
-- [ ] **7 — Resync des docs finales.**
-  Après 1-6, mettre à jour `documentation/ARCHITECTURE.md` (retirer `analysis_worker` de la carte,
-  §8) et `CLAUDE.md` (ajouter la config pytest au workflow si pertinent).
-  - *Test* : `test_docs_consistency` (étape 3) reste vert après édition.
+Verified starting state (2026-07-05): 6 test files, ~40 tests, a single `@pytest.mark.gpu`,
+**no pytest config** (the `gpu` marker registered only in `conftest.py`).
 
 ---
 
-## Annexe — Validation dépendante de Lightroom (manuelle si pas de MCP)
+## Steps
 
-Non automatisable sans Lr ouvert (ou sans MCP Lr exposé) — **hors cases à cocher testables** :
+- [x] **1 — Remove dead code.** *(done 2026-07-18, Fable 5 review — `test_no_dead_modules.py` green)*
+  Remove `app/gui/analysis_worker.py` (`AnalysisWorker` never instantiated nor imported — verified).
+  Note (Fable 5 review, Pass 0): `analysis_worker` is the only direct GUI importer of
+  `gpu_raw`/`raw` — their live status hangs on the `gpu_schedule`/`embedded_jpeg` chain.
+  Removing it kills no core module, but makes `gpu_schedule` the sole entry point into `gpu_raw`.
+  - *Prior check*: `grep -rn "analysis_worker\|AnalysisWorker" app` returns only the definition.
+  - *Regression test*: create `app/tests/test_no_dead_modules.py` which imports every module in
+    `app/core/*` and `app/gui/*` (smoke import, except those requiring a Qt display →
+    `importlib` with documented tolerance) and **asserts** that `app.gui.analysis_worker` no
+    longer exists.
+  - *Validate*: `python -m pytest app/tests -q` green.
 
-- Verrou `requestJpegThumbnail` : convergence du 2ᵉ Aperçu ≈ 0 ; garde `_anchor_suspect` silencieuse.
-- Test e2e réel : seeds → « Marquer + analyser références » (`pool exploitable : N/N`) → sélectionner
-  le reste → cocher axes → « Aperçu » (mode `seeds`, deltas listés) → « Appliquer » → re-Aperçu ≈ 0.
-- Finition des stubs GUI `photo_panel.py` / `analysis_panel.py` (aperçus, histogrammes, outliers WB).
+- [ ] **2 — Pytest config.**
+  Add a `pyproject.toml` at the root with `[tool.pytest.ini_options]`: `testpaths = ["app/tests"]`,
+  `markers = ["gpu: GPU/CPU parity, skip if CUDA absent"]`. Keep the `gpu` skip from `conftest.py`.
+  - *Test*: `python -m pytest -q` (no path) from the root correctly discovers the tests;
+    `python -m pytest -q -m "not gpu"` works. No test broken.
 
-## Backlog restant (hors périmètre nettoyage)
+- [ ] **3 — Anti-desync guard for the docs.**
+  Create `app/tests/test_docs_consistency.py`: parse `CLAUDE.md` and `documentation/ARCHITECTURE.md`,
+  and **assert** that (a) every cited `core/xxx.py` / `gui/xxx.py` actually exists on disk, (b)
+  no removed file (`core/seeds.py`, `core/adjustments.py`, `core/prediction.py`,
+  `gui/analysis_worker.py`) is presented as alive.
+  - *Test = the test itself*: `python -m pytest app/tests/test_docs_consistency.py -q` green.
 
-- **Étalonnage caméra (axe "calib")** — livré 2026-07-19 : transplant k-NN (ShadowTint,
-  Red/Green/Blue Hue+Saturation) depuis les seeds, comme Temperature/Tint, actif dans les
-  deux modes de référence (seeds et embedded — pas de cible mesurable depuis un JPEG,
-  donc toujours seed-source côté embedded). `ANALYSIS_VERSION` bumpée (`v6-calib-style-keys`,
-  clés ajoutées à `_STYLE_KEYS`) + `DEVELOP_KEYS` Lua (+8). Tests : `test_autocorrect_calib.py`,
-  aggregation dans `test_seed_match.py`, clamp/dict dans `test_autocorrect_helpers.py`.
-  **Non validé en Lightroom réel** (pas de Lr dans cet environnement) — à vérifier manuellement
-  (annexe ci-dessous) : `EnableCalibration` s'applique bien, les seeds actuels n'ont pas encore
-  de valeurs Étalonnage retouchées à la main (transplant restera vide tant qu'aucun seed n'a
-  été édité dans le panneau Calibration caméra).
-- Repli régime artistique : `core/regime.py` n'est plus consulté par le chemin live (k-NN). À
-  revalider si le matching s'avère instable sur de petits pools de seeds.
-- `core/image_source.py` : tool-only — le retirer si les `tools/` qui l'utilisent sont archivés.
-- Perf : GPU + cache en place, mais la Passe 2 (REVIEW_FABLE5.md) identifie des pertes
-  structurelles (pas de recouvrement CPU/GPU, double ouverture rawpy, vagues JPEG sous-dimensionnées).
-  Profiler (`py-spy`/`torch.profiler`) puis traiter G7 avant d'envisager Rust.
+- [ ] **4 — Cover the untested live modules (pure functions only, no GPU or RAW).**
+  Add tests for:
+  - `core/exposure.py` — ΔEV from current L* to target L* (bound, sign, monotonicity).
+  - `core/hsl.py` — per-band deltas vs. target; **saturation = reduction only** (never an increase).
+  - `core/analysis.py` — `ev100()` / `ExposureStats` (known values).
+  - `core/autocorrect.py` — `plan()` on synthetic `PhotoMeasure` objects (no disk/GPU access).
+  - *Regression test*: new tests green; the ~40 existing tests unchanged.
+  - *Note*: if a function isn't pure (depends on GPU/RAW), leave it out of scope and note it
+    in the test — do not fabricate a mock that invents behavior.
 
-## Backlog revue Fable 5 (2026-07-18) — items 🟠 (détail : documentation/REVIEW_FABLE5.md, Passe 3)
+- [ ] **5 — Logging hygiene.**
+  In `app/gui/neutral_preview_worker.py`, replace `except Exception: pass` with a log
+  (`logging` module, `warning`/`exception` level). If the anchor logic isn't already pure,
+  isolate `_anchor_suspect` into a testable function.
+  - *Regression test*: unit test of `_anchor_suspect` on edge cases (sound anchor vs. suspect) —
+    numeric inputs, no Qt. `python -m pytest app/tests -q` green.
 
-Implémentation 2026-07-18 : **tous les items 🟠 + l'essentiel des 🟡/⚪ livrés** (voir
-Journal Passe 4 de REVIEW_FABLE5.md). Tests : 78/78 verts, parité GPU revalidée.
+- [ ] **6 — QThread cleanup.**
+  In `app/gui/main_window.py`, call `quit()` + `wait()` on the workers on close
+  (`closeEvent`) to avoid orphaned threads.
+  - *Test*: **limited, honest coverage** — smoke `python -c "import app.gui.main_window"` with
+    no import crash (to be documented as such in the step). Real GUI validation → Appendix.
 
-- [x] **G3 — Durcir `Thumbnails.lua`** (L-01/L-02/L-03) : retours de `requestJpegThumbnail`
-  retenus, nom de fichier unique par appel (génération), échecs de restore remontés
-  (`restore_error` jusqu'au GUI).
-- [x] **B-01 — Vérifier `_pending_ids` avant Apply** : re-fetch sélection, re-planification si écart.
-- [x] **G2 — exiftool argfile** (A-01/A-02) : `-@ argfile` temp UTF-8 + `encoding="utf-8"`.
-- [x] **G1 — Bump `ANALYSIS_VERSION` commun** (DB-01/C-01) : `DEVELOP_KEYS` 44→71 clés,
-  `_STYLE_KEYS` corrigées (noms SDK réels `SplitToning*`) + Texture/ToneCurve/Parametric,
-  garde `cam_mul[G2]==0` — bump unique `v5-style-keys-g2wb` (rebuild cache au 1ᵉʳ run).
-- [x] **G7 — Refonte scheduler GPU** (P-01/P-02/P-03, +P-06) : `process_combined_batch`
-  (unpack unifié, double-buffer, vagues par pipeline, `empty_cache` réactif, H2D uint16).
-  Parité revalidée (`validate_gpu_vs_libraw` : expo corr 1.000, gray-world 0.996-0.9995).
+- [ ] **7 — Resync the final docs.**
+  After 1-6, update `documentation/ARCHITECTURE.md` (remove `analysis_worker` from the map,
+  §8) and `CLAUDE.md` (add the pytest config to the workflow if relevant).
+  - *Test*: `test_docs_consistency` (step 3) stays green after the edit.
 
-Restant (non traité, décision de périmètre) :
+---
 
-- [ ] **G9 — Micro-passe métriques GPU** (P-04/P-05) : hoister hue/sat/chroma du dual,
-  regrouper les syncs scalaires. **Parité bit-exacte exigée** (sinon bump `ANALYSIS_VERSION`) —
-  à faire avec profilage (`torch.profiler`) à l'appui.
-- [ ] **P-10 — `_probe_chunk` décode une à une** : cohérence plus que perf (dominé par le
-  rendu Lr) ; batcher via `analyze_render_blobs` à l'occasion.
+## Appendix — Lightroom-dependent validation (manual if no MCP)
+
+Not automatable without Lr open (or without an exposed Lr MCP) — **outside the checkable boxes**:
+
+- `requestJpegThumbnail` lock: 2nd Preview convergence ≈ 0; silent `_anchor_suspect` guard.
+- Real e2e test: seeds → "Mark + analyze references" (`usable pool: N/N`) → select
+  the rest → check axes → "Preview" (`seeds` mode, listed deltas) → "Apply" → re-Preview ≈ 0.
+- Finishing the `photo_panel.py` / `analysis_panel.py` GUI stubs (previews, histograms, WB outliers).
+
+## Remaining backlog (out of cleanup scope)
+
+- **Camera calibration ("calib" axis)** — delivered 2026-07-19: k-NN transplant (ShadowTint,
+  Red/Green/Blue Hue+Saturation) from the seeds, like Temperature/Tint, active in both
+  reference modes (seeds and embedded — no measurable target from a JPEG, so always
+  seed-sourced on the embedded side). `ANALYSIS_VERSION` bumped (`v6-calib-style-keys`,
+  keys added to `_STYLE_KEYS`) + Lua `DEVELOP_KEYS` (+8). Tests: `test_autocorrect_calib.py`,
+  aggregation in `test_seed_match.py`, clamp/dict in `test_autocorrect_helpers.py`.
+  **Not validated in real Lightroom** (no Lr in this environment) — to be checked manually
+  (appendix below): that `EnableCalibration` applies correctly, that the current seeds don't
+  yet have hand-edited Calibration values (transplant will stay empty until a seed has
+  been edited in the Camera Calibration panel).
+- Artistic regime fallback: `core/regime.py` is no longer consulted by the live (k-NN) path. To
+  be revalidated if matching turns out unstable on small seed pools.
+- `core/image_source.py`: tool-only — remove it if the `tools/` that use it get archived.
+- Perf: GPU + cache are in place, but Pass 2 (REVIEW_FABLE5.md) identifies structural
+  losses (no CPU/GPU overlap, double rawpy open, undersized JPEG waves).
+  Profile (`py-spy`/`torch.profiler`) then address G7 before considering Rust.
+
+## Fable 5 review backlog (2026-07-18) — 🟠 items (detail: documentation/REVIEW_FABLE5.md, Pass 3)
+
+2026-07-18 implementation: **all 🟠 items + most of the 🟡/⚪ delivered** (see
+Pass 4 Journal of REVIEW_FABLE5.md). Tests: 78/78 green, GPU parity revalidated.
+
+- [x] **G3 — Harden `Thumbnails.lua`** (L-01/L-02/L-03): `requestJpegThumbnail` return values
+  retained, unique filename per call (generation), restore failures surfaced
+  (`restore_error` up to the GUI).
+- [x] **B-01 — Verify `_pending_ids` before Apply**: re-fetch selection, re-plan if there's a mismatch.
+- [x] **G2 — exiftool argfile** (A-01/A-02): temp UTF-8 `-@ argfile` + `encoding="utf-8"`.
+- [x] **G1 — Bump the shared `ANALYSIS_VERSION`** (DB-01/C-01): `DEVELOP_KEYS` 44→71 keys,
+  `_STYLE_KEYS` fixed (real SDK names `SplitToning*`) + Texture/ToneCurve/Parametric,
+  `cam_mul[G2]==0` guard — single bump `v5-style-keys-g2wb` (cache rebuild on 1st run).
+- [x] **G7 — GPU scheduler overhaul** (P-01/P-02/P-03, +P-06): `process_combined_batch`
+  (unified unpack, double-buffer, per-pipeline waves, reactive `empty_cache`, uint16 H2D).
+  Parity revalidated (`validate_gpu_vs_libraw`: exposure corr 1.000, gray-world 0.996-0.9995).
+
+Remaining (not addressed, scope decision):
+
+- [ ] **G9 — GPU metrics micro-pass** (P-04/P-05): hoist hue/sat/chroma out of the dual,
+  group the scalar syncs. **Bit-exact parity required** (otherwise bump `ANALYSIS_VERSION`) —
+  to be done backed by profiling (`torch.profiler`).
+- [ ] **P-10 — `_probe_chunk` decodes one at a time**: consistency more than perf (dominated by
+  Lr rendering); batch via `analyze_render_blobs` at some point.
